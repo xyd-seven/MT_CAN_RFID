@@ -1,0 +1,35 @@
+# Qt build artifacts
+build*/
+**/build*/
+**/debug/
+**/release/
+**/.qtcreator/
+**/.qmake.stash
+**/Makefile
+**/Makefile.Debug
+**/Makefile.Release
+**/object_script.*
+**/ui_*.h
+
+# Binaries and generated objects
+*.exe
+*.dll
+*.lib
+*.a
+*.o
+*.obj
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+
+# Local IDE and OS files
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+Desktop.ini
+
+# Original vendor examples kept locally only; project uses CAN_RFID_Qt/third_party.
+zlgcan 二次开发库/

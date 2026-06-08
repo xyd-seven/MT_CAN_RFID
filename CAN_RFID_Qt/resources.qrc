@@ -1,0 +1,7 @@
+<RCC>
+    <qresource prefix="/">
+        <file>images/MT_RFID.svg</file>
+        <file>images/MT_RFID.ico</file>
+        <file>images/MT_RFID.png</file>
+    </qresource>
+</RCC>
