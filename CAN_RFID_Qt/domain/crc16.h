@@ -50,4 +50,21 @@ inline quint16 calculateCrc16(const quint8 *pBuf, quint32 iLen, quint16 initialC
     return crc;
 }
 
+// 青桔协议规定：Modbus-RTU 校验算法 (初值为 0xFFFF，多项式 0xA001)
+inline quint16 calculateModbusCrc16(const quint8 *pBuf, quint32 iLen)
+{
+    quint16 crc = 0xFFFF;
+    for (quint32 i = 0; i < iLen; ++i) {
+        crc ^= pBuf[i];
+        for (int j = 0; j < 8; ++j) {
+            if (crc & 0x0001) {
+                crc = (crc >> 1) ^ 0xA001;
+            } else {
+                crc = crc >> 1;
+            }
+        }
+    }
+    return crc;
+}
+
 #endif // CRC16_H

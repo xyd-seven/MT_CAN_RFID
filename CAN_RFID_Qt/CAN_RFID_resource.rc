@@ -1,6 +1,6 @@
 #include <windows.h>
 
-IDI_ICON1	ICON	DISCARDABLE	"F:\\TestTools\\MT_CAN\\CAN_RFID_Qt\\images\\MT_RFID.ico"
+IDI_ICON1	ICON	DISCARDABLE	"C:\\Users\\Administrator\\.gemini\\antigravity\\worktrees\\MT_CAN\\review-handoff-encoding-format\\CAN_RFID_Qt\\images\\MT_RFID.ico"
 
 VS_VERSION_INFO VERSIONINFO
 	FILEVERSION 0,0,0,0

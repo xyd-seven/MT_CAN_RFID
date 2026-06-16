@@ -19,7 +19,14 @@
 #include "application/otaservice.h"
 #include "application/rfidservice.h"
 #include "application/stresstestservice.h"
+#include "application/qingjucanmanager.h"
+#include "application/qingjurfidservice.h"
+#include "application/qingjuotaservice.h"
 #include <QProgressBar>
+#include <QStackedWidget>
+#include <QComboBox>
+#include <QLineEdit>
+#include <QTextEdit>
 
 namespace Ui {
 class MainWindow;
@@ -201,6 +208,54 @@ private slots:
     void handleOtaStateChangeForStressTest(OtaService::State state, const QString &message);
     void onOtaInjectMasterToggled(bool checked);
     OtaErrorConfig getOtaErrorConfig() const;
+
+    // 青桔协议槽函数及方法
+    void onProtocolModeChanged(int index);
+    void updateQingjuRfidPanel(const QingjuNpkState &state);
+    void onQjCustomWriteClicked();
+    void onQjCustomReadClicked();
+    void handleQjCustomLog(const QString &text);
+    QWidget *createQjRfidMonitorPanel(QWidget *parent);
+
+private:
+    // 青桔协议服务及管理器
+    QComboBox *protocolModeCombo;
+    QStackedWidget *rfidStackedWidget;
+    QWidget *mtRfidPanel;
+    QWidget *qjRfidPanel;
+    QingjuCanManager *qingjuCanManager;
+    QingjuRfidService *qingjuRfidService;
+    QingjuOtaService *qingjuOtaService;
+    QSpinBox *qjRfidPeriodSpin;
+    QPushButton *qjStartBtn;
+    QPushButton *qjStopBtn;
+
+    // 青桔 NPK 监控标签
+    QLabel *qjRfidAddrValue;
+    QLabel *qjRfidAppStatusValue;
+    QLabel *qjRfidAlarmValue;
+    QLabel *qjRfidUidValue;
+    QLabel *qjRfidPwdValue;
+    QLabel *qjRfidModelValue;
+    QLabel *qjRfidSupplierValue;
+    QLabel *qjRfidSerialValue;
+    QLabel *qjRfidSnValue;
+    QLabel *qjRfidFirmwareVerValue;
+    QLabel *qjRfidHardwareVerValue;
+
+    // 自定义寄存器读写控制
+    QComboBox *qjDestAddrCombo;
+    QLineEdit *qjRegAddrEdit;
+    QLineEdit *qjRegValueEdit;
+    QComboBox *qjFuncCodeCombo;
+    QPushButton *qjCustomWriteBtn;
+    QPushButton *qjCustomReadBtn;
+    QTextEdit *qjCustomLog;
+
+    // 青桔 OTA 异常测试面板
+    QGroupBox *qjOtaAnomalyGroup;
+    QComboBox *qjOtaAnomalyCombo;
+    QCheckBox *qjOtaAnomalyEnableCheck;
 };
 
 #endif // MAINWINDOW_H

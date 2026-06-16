@@ -19,6 +19,7 @@ struct AppConfigData
     QString logDirectory;
     bool rfidControlEnabled = true;
     bool show0x207Log = true;
+    int protocolMode = 0; // 0: Meituan, 1: Qingju
 };
 
 class AppConfig

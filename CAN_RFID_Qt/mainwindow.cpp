@@ -1,4 +1,4 @@
-﻿#include "mainwindow.h"
+#include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include <QDateTime>
 #include <QFile>
@@ -15,6 +15,7 @@
 #include <QIcon>
 #include <QRegExp>
 #include <QScrollBar>
+#include <QInputDialog>
 
 namespace {
 const QStringList DeviceTypeNames = {
@@ -30,6 +31,7 @@ constexpr int MaxManualPayloadBytes = 64;
 MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
     ui(new Ui::MainWindow),
+    canthread(nullptr),
     maxLogRows(5000),
     canStarted(false),
     stressRefreshTimer(new QTimer(this)),
@@ -88,10 +90,47 @@ MainWindow::MainWindow(QWidget *parent) :
     m_otaSuccessCount(0),
     m_otaFailureCount(0),
     m_originalLogEnabled(true),
-    m_otaCooldownTimer(new QTimer(this))
+    m_otaCooldownTimer(new QTimer(this)),
+    protocolModeCombo(nullptr),
+    rfidStackedWidget(nullptr),
+    mtRfidPanel(nullptr),
+    qjRfidPanel(nullptr),
+    qingjuCanManager(nullptr),
+    qingjuRfidService(nullptr),
+    qingjuOtaService(nullptr),
+    qjRfidAddrValue(nullptr),
+    qjRfidAppStatusValue(nullptr),
+    qjRfidAlarmValue(nullptr),
+    qjRfidUidValue(nullptr),
+    qjRfidPwdValue(nullptr),
+    qjRfidModelValue(nullptr),
+    qjRfidSupplierValue(nullptr),
+    qjRfidSerialValue(nullptr),
+    qjRfidSnValue(nullptr),
+    qjRfidFirmwareVerValue(nullptr),
+    qjRfidHardwareVerValue(nullptr),
+    qjDestAddrCombo(nullptr),
+    qjRegAddrEdit(nullptr),
+    qjRegValueEdit(nullptr),
+    qjFuncCodeCombo(nullptr),
+    qjCustomWriteBtn(nullptr),
+    qjCustomReadBtn(nullptr),
+    qjCustomLog(nullptr),
+    qjOtaAnomalyGroup(nullptr),
+    qjOtaAnomalyCombo(nullptr),
+    qjOtaAnomalyEnableCheck(nullptr),
+    qjRfidPeriodSpin(nullptr),
+    qjStartBtn(nullptr),
+    qjStopBtn(nullptr)
 {
     ui->setupUi(this);
     setWindowIcon(QIcon(":/images/MT_RFID.png"));
+
+    // Instantiate background services first to avoid nullpointer dereferences during UI setup/loading config
+    canthread = new CANThread();
+    qingjuCanManager = new QingjuCanManager(canthread, this);
+    qingjuRfidService = new QingjuRfidService(qingjuCanManager, this);
+    qingjuOtaService = new QingjuOtaService(qingjuCanManager, this);
 
     ui->filterModeCombo->setCurrentIndex(2);
     ui->ABIT1Combo->setCurrentIndex(2);
@@ -216,8 +255,25 @@ MainWindow::MainWindow(QWidget *parent) :
         }
     });
 
-    canthread = new CANThread();
     connect(canthread, &CANThread::recvedFrames, this, &MainWindow::handleRecvedFrames);
+
+    connect(qingjuRfidService, &QingjuRfidService::stateUpdated, this, &MainWindow::updateQingjuRfidPanel);
+    connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, qingjuOtaService, &QingjuOtaService::handleIncomingModbusPacket);
+
+    connect(qingjuOtaService, &QingjuOtaService::otaStateChanged, this, [this](QingjuOtaService::State state, const QString &message) {
+        if (appConfig.load().protocolMode == 1) {
+            otaStateValue->setText(qingjuOtaService->stateText());
+            otaMessageValue->setText(message);
+            updateControlsState();
+        }
+    });
+    connect(qingjuOtaService, &QingjuOtaService::otaProgress, this, [this](int percentage) {
+        if (appConfig.load().protocolMode == 1) {
+            if (otaProgressBar != nullptr) {
+                otaProgressBar->setValue(percentage);
+            }
+        }
+    });
     stressRefreshTimer->setInterval(1000);
     connect(stressRefreshTimer, &QTimer::timeout, this, &MainWindow::refreshStressTestTick);
 
@@ -259,8 +315,14 @@ void MainWindow::setupRfidPanel()
 {
     rfidTabs = new QTabWidget(ui->centralWidget);
     
-    QWidget *t1 = createRfidMonitorTab(rfidTabs);
-    rfidTabs->addTab(t1, QStringLiteral("RFID监控"));
+    rfidStackedWidget = new QStackedWidget(rfidTabs);
+    mtRfidPanel = createRfidMonitorTab(rfidStackedWidget);
+    qjRfidPanel = createQjRfidMonitorPanel(rfidStackedWidget);
+    
+    rfidStackedWidget->addWidget(mtRfidPanel);
+    rfidStackedWidget->addWidget(qjRfidPanel);
+    
+    rfidTabs->addTab(rfidStackedWidget, QStringLiteral("RFID监控"));
     
     QWidget *t2 = createStressTestTab(rfidTabs);
     rfidTabs->addTab(t2, QStringLiteral("压力测试"));
@@ -330,26 +392,34 @@ void MainWindow::setupCompactMainLayout()
     ui->reSetCANBtn->setParent(devicePanel);
     ui->closeDeviceBtn->setParent(devicePanel);
 
+    protocolModeCombo = new QComboBox(devicePanel);
+    protocolModeCombo->addItem(QStringLiteral("美团协议"), 0);
+    protocolModeCombo->addItem(QStringLiteral("青桔协议"), 1);
+    protocolModeCombo->setMinimumWidth(160);
+    connect(protocolModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onProtocolModeChanged);
+
     // 拓宽设备类型选择框，设置最小宽度并使其横向跨越3列
     ui->deviceTypeCombo->setMinimumWidth(160);
     ui->ABIT1Combo->setMinimumWidth(160);
 
-    layout->addWidget(new QLabel(QStringLiteral("设备类型"), devicePanel), 0, 0);
-    layout->addWidget(ui->deviceTypeCombo, 0, 1, 1, 3);
-    layout->addWidget(new QLabel(QStringLiteral("设备索引"), devicePanel), 1, 0);
-    layout->addWidget(ui->deviceIndexCombo, 1, 1);
-    layout->addWidget(new QLabel(QStringLiteral("通道"), devicePanel), 1, 2);
-    layout->addWidget(ui->sendPathCombo, 1, 3);
-    layout->addWidget(new QLabel(QStringLiteral("波特率"), devicePanel), 2, 0);
-    layout->addWidget(ui->ABIT1Combo, 2, 1, 1, 3);
-    layout->addWidget(ui->resistanceCheckBox, 3, 0, 1, 4);
-    layout->addWidget(oneClickStartButton, 4, 0, 1, 4);
-    layout->addWidget(canDeviceStatusValue, 5, 0, 1, 4);
-    layout->addWidget(ui->openDeviceBtn, 6, 0, 1, 2);
-    layout->addWidget(ui->initCANBtn, 6, 2, 1, 2);
-    layout->addWidget(ui->StartCANBtn, 7, 0, 1, 2);
-    layout->addWidget(ui->reSetCANBtn, 7, 2);
-    layout->addWidget(ui->closeDeviceBtn, 7, 3);
+    layout->addWidget(new QLabel(QStringLiteral("协议模式"), devicePanel), 0, 0);
+    layout->addWidget(protocolModeCombo, 0, 1, 1, 3);
+    layout->addWidget(new QLabel(QStringLiteral("设备类型"), devicePanel), 1, 0);
+    layout->addWidget(ui->deviceTypeCombo, 1, 1, 1, 3);
+    layout->addWidget(new QLabel(QStringLiteral("设备索引"), devicePanel), 2, 0);
+    layout->addWidget(ui->deviceIndexCombo, 2, 1);
+    layout->addWidget(new QLabel(QStringLiteral("通道"), devicePanel), 2, 2);
+    layout->addWidget(ui->sendPathCombo, 2, 3);
+    layout->addWidget(new QLabel(QStringLiteral("波特率"), devicePanel), 3, 0);
+    layout->addWidget(ui->ABIT1Combo, 3, 1, 1, 3);
+    layout->addWidget(ui->resistanceCheckBox, 4, 0, 1, 4);
+    layout->addWidget(oneClickStartButton, 5, 0, 1, 4);
+    layout->addWidget(canDeviceStatusValue, 6, 0, 1, 4);
+    layout->addWidget(ui->openDeviceBtn, 7, 0, 1, 2);
+    layout->addWidget(ui->initCANBtn, 7, 2, 1, 2);
+    layout->addWidget(ui->StartCANBtn, 8, 0, 1, 2);
+    layout->addWidget(ui->reSetCANBtn, 8, 2);
+    layout->addWidget(ui->closeDeviceBtn, 8, 3);
 
     QVBoxLayout *groupLayout1 = new QVBoxLayout(ui->groupBox);
     groupLayout1->setContentsMargins(10, 22, 10, 10);
@@ -514,11 +584,18 @@ bool MainWindow::isOtaRunning() const
     if (m_otaStressRunning) {
         return true;
     }
-    OtaService::State state = otaService.state();
-    return state == OtaService::State::QueryProgram ||
-           state == OtaService::State::StartUpgrade ||
-           state == OtaService::State::SendData ||
-           state == OtaService::State::FinishUpgrade;
+    if (appConfig.load().protocolMode == 1) {
+        QingjuOtaService::State state = qingjuOtaService->state();
+        return state == QingjuOtaService::State::StartUpgrade ||
+               state == QingjuOtaService::State::SendData ||
+               state == QingjuOtaService::State::FinishUpgrade;
+    } else {
+        OtaService::State state = otaService.state();
+        return state == OtaService::State::QueryProgram ||
+               state == OtaService::State::StartUpgrade ||
+               state == OtaService::State::SendData ||
+               state == OtaService::State::FinishUpgrade;
+    }
 }
 
 void MainWindow::updateControlsState()
@@ -545,6 +622,10 @@ void MainWindow::updateControlsState()
         if (rfidRestartBtn != nullptr) rfidRestartBtn->setEnabled(false);
         if (rfidSetPeriodBtn != nullptr) rfidSetPeriodBtn->setEnabled(false);
         if (rfidScanPeriodSpin != nullptr) rfidScanPeriodSpin->setEnabled(false);
+
+        if (qjStartBtn != nullptr) qjStartBtn->setEnabled(false);
+        if (qjStopBtn != nullptr) qjStopBtn->setEnabled(false);
+        if (qjRfidPeriodSpin != nullptr) qjRfidPeriodSpin->setEnabled(false);
 
         // 禁用压力测试控制
         if (stressStartBtn != nullptr) stressStartBtn->setEnabled(false);
@@ -583,6 +664,10 @@ void MainWindow::updateControlsState()
         if (rfidSetPeriodBtn != nullptr) rfidSetPeriodBtn->setEnabled(false);
         if (rfidScanPeriodSpin != nullptr) rfidScanPeriodSpin->setEnabled(false);
 
+        if (qjStartBtn != nullptr) qjStartBtn->setEnabled(false);
+        if (qjStopBtn != nullptr) qjStopBtn->setEnabled(false);
+        if (qjRfidPeriodSpin != nullptr) qjRfidPeriodSpin->setEnabled(false);
+
         // 限制压力测试操作：仅允许停止，锁定参数配置与重置
         if (stressStartBtn != nullptr) stressStartBtn->setEnabled(false);
         if (stressStopBtn != nullptr) stressStopBtn->setEnabled(true);
@@ -619,6 +704,12 @@ void MainWindow::updateControlsState()
         if (rfidRestartBtn != nullptr) rfidRestartBtn->setEnabled(canStarted);
         if (rfidSetPeriodBtn != nullptr) rfidSetPeriodBtn->setEnabled(canStarted);
         if (rfidScanPeriodSpin != nullptr) rfidScanPeriodSpin->setEnabled(canStarted);
+
+        // 青桔 RFID 控制
+        const bool qjScanning = qingjuRfidService->isScanning();
+        if (qjStartBtn != nullptr) qjStartBtn->setEnabled(canStarted && !qjScanning);
+        if (qjStopBtn != nullptr) qjStopBtn->setEnabled(canStarted && qjScanning);
+        if (qjRfidPeriodSpin != nullptr) qjRfidPeriodSpin->setEnabled(canStarted && !qjScanning);
 
         // 根据 CAN 启动状态使能压力测试控制
         if (stressStartBtn != nullptr) stressStartBtn->setEnabled(canStarted);
@@ -1271,11 +1362,28 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
     otaProgressBar->setValue(0);
     stateLayout->addWidget(otaProgressBar, 2, 1);
 
+    // 青桔 OTA 异常注入测试面板
+    qjOtaAnomalyGroup = new QGroupBox(QStringLiteral("青桔异常注入测试"), otaWidget);
+    QVBoxLayout *qjInjectLayout = new QVBoxLayout(qjOtaAnomalyGroup);
+    qjInjectLayout->setContentsMargins(8, 8, 8, 8);
+    qjInjectLayout->setSpacing(4);
+    qjOtaAnomalyEnableCheck = new QCheckBox(QStringLiteral("启用异常注入模拟"), qjOtaAnomalyGroup);
+    qjOtaAnomalyCombo = new QComboBox(qjOtaAnomalyGroup);
+    qjOtaAnomalyCombo->addItem(QStringLiteral("Case 1: 固件类型不匹配 (ECU 发送 0x99)"), 1);
+    qjOtaAnomalyCombo->addItem(QStringLiteral("Case 2: 部分数据损坏 (ECU 发送错误文件 CRC)"), 2);
+    qjOtaAnomalyCombo->addItem(QStringLiteral("Case 3: 升级过程中断 (ECU 在第 5 块中途静默)"), 3);
+    qjOtaAnomalyCombo->addItem(QStringLiteral("Case 4: 传输静默超时 (握手后 ECU 静默 6s)"), 4);
+    qjOtaAnomalyCombo->addItem(QStringLiteral("Case 5: 收到 ECU 重复包 (ECU 重发第 2 块)"), 5);
+    qjInjectLayout->addWidget(qjOtaAnomalyEnableCheck);
+    qjInjectLayout->addWidget(qjOtaAnomalyCombo);
+    qjOtaAnomalyGroup->hide(); // 默认隐藏美团外的面板
+
     layout->addWidget(fileGroup, 0, 0);
     layout->addWidget(controlGroup, 1, 0);
     layout->addWidget(otaStressGroup, 2, 0);
     layout->addWidget(stateGroup, 0, 1, 2, 1); // 跨 2 行
-    layout->addWidget(otaErrorInjectionGroup, 2, 1); // 排在状态组下方
+    layout->addWidget(otaErrorInjectionGroup, 2, 1); // 美团异常注入
+    layout->addWidget(qjOtaAnomalyGroup, 2, 1);      // 青桔异常注入
     layout->setColumnStretch(0, 1);
     layout->setColumnStretch(1, 1);
 
@@ -1291,8 +1399,17 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
         }
     });
     connect(otaQueryBtn, &QPushButton::clicked, this, [this]() {
-        otaService.setChannel(static_cast<quint32>(ui->sendPathCombo->currentIndex()));
-        otaService.queryProgramLocation();
+        if (appConfig.load().protocolMode == 1) { // 青桔协议
+            if (canStarted) {
+                // 读取 RFR (0x0B) 的当前程序状态 (0xA02A)
+                qingjuCanManager->readRegisters(0x0B, 0xA02A, 1);
+            } else {
+                QMessageBox::warning(this, "警告", "请先启动 CAN 设备！");
+            }
+        } else { // 美团协议
+            otaService.setChannel(static_cast<quint32>(ui->sendPathCombo->currentIndex()));
+            otaService.queryProgramLocation();
+        }
     });
     connect(otaStartUpgradeBtn, &QPushButton::clicked, this, [this]() {
         const QString firmwarePath = otaFirmwarePathValue == nullptr ? QString() : otaFirmwarePathValue->text();
@@ -1301,40 +1418,59 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
             return;
         }
 
-        otaService.setChannel(static_cast<quint32>(ui->sendPathCombo->currentIndex()));
-        otaService.setDeviceVersions(rfidService.vendorCode(), rfidService.hardwareVersion(), rfidService.softwareVersion());
+        if (appConfig.load().protocolMode == 1) { // 青桔协议
+            if (!canStarted) {
+                QMessageBox::warning(this, "警告", "请先启动 CAN 设备！");
+                return;
+            }
+            m_otaStressRunning = false;
+            // 获取并下发青桔异常配置
+            QingjuOtaErrorConfig cfg;
+            if (qjOtaAnomalyEnableCheck != nullptr && qjOtaAnomalyEnableCheck->isChecked()) {
+                cfg.enabled = true;
+                cfg.caseMode = qjOtaAnomalyCombo->currentData().toInt();
+            }
+            qingjuOtaService->startUpgrade(firmwarePath, cfg);
+        } else { // 美团协议
+            otaService.setChannel(static_cast<quint32>(ui->sendPathCombo->currentIndex()));
+            otaService.setDeviceVersions(rfidService.vendorCode(), rfidService.hardwareVersion(), rfidService.softwareVersion());
 
-        if (otaStressTestEnabledCheck != nullptr && otaStressTestEnabledCheck->isChecked()) {
-            m_otaStressRunning = true;
-            m_otaCurrentCycle = 1;
-            m_otaSuccessCount = 0;
-            m_otaFailureCount = 0;
-            m_otaLastFailureReason = "-";
-            m_otaTargetCycles = otaStressCyclesSpin->value();
+            if (otaStressTestEnabledCheck != nullptr && otaStressTestEnabledCheck->isChecked()) {
+                m_otaStressRunning = true;
+                m_otaCurrentCycle = 1;
+                m_otaSuccessCount = 0;
+                m_otaFailureCount = 0;
+                m_otaLastFailureReason = "-";
+                m_otaTargetCycles = otaStressCyclesSpin->value();
 
-            // 暂停实时总线日志渲染
-            m_originalLogEnabled = ui->checkBox_4->isChecked();
-            if (otaStressSuspendLogCheck->isChecked()) {
-                ui->checkBox_4->setChecked(false);
+                // 暂停实时总线日志渲染
+                m_originalLogEnabled = ui->checkBox_4->isChecked();
+                if (otaStressSuspendLogCheck->isChecked()) {
+                    ui->checkBox_4->setChecked(false);
+                }
+
+                updateOtaStressUI();
+                logService.logRuntime(LogLevel::Info, QString("OTA stress test started. Target cycles: %1").arg(m_otaTargetCycles));
+            } else {
+                m_otaStressRunning = false;
             }
 
-            updateOtaStressUI();
-            logService.logRuntime(LogLevel::Info, QString("OTA stress test started. Target cycles: %1").arg(m_otaTargetCycles));
-        } else {
-            m_otaStressRunning = false;
+            otaService.startUpgrade(firmwarePath, getOtaErrorConfig());
         }
-
-        otaService.startUpgrade(firmwarePath, getOtaErrorConfig());
     });
     connect(otaAbortUpgradeBtn, &QPushButton::clicked, this, [this]() {
-        if (m_otaStressRunning) {
-            m_otaStressRunning = false;
-            m_otaCooldownTimer->stop();
-            ui->checkBox_4->setChecked(m_originalLogEnabled);
-            updateOtaStressUI();
-            logService.logRuntime(LogLevel::Info, "OTA stress test manually aborted.");
+        if (appConfig.load().protocolMode == 1) { // 青桔协议
+            qingjuOtaService->abortUpgrade();
+        } else { // 美团协议
+            if (m_otaStressRunning) {
+                m_otaStressRunning = false;
+                m_otaCooldownTimer->stop();
+                ui->checkBox_4->setChecked(m_originalLogEnabled);
+                updateOtaStressUI();
+                logService.logRuntime(LogLevel::Info, "OTA stress test manually aborted.");
+            }
+            otaService.abortUpgrade();
         }
-        otaService.abortUpgrade();
     });
 
     connect(otaStressCyclesSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this]() {
@@ -1542,6 +1678,10 @@ void MainWindow::loadAppConfig()
         canAutoSaveCheckBox->setChecked(config.canAutoSaveCsv);
         canAutoSaveCheckBox->blockSignals(false);
     }
+    if (protocolModeCombo != nullptr) {
+        protocolModeCombo->setCurrentIndex(qBound(0, config.protocolMode, 1));
+        onProtocolModeChanged(protocolModeCombo->currentIndex());
+    }
     logService.logRuntime(LogLevel::Info, QStringLiteral("Application started"));
 }
 
@@ -1575,6 +1715,9 @@ void MainWindow::saveAppConfig()
     }
     if (stressTargetSamplesSpin != nullptr) {
         config.stressTargetSamples = stressTargetSamplesSpin->value();
+    }
+    if (protocolModeCombo != nullptr) {
+        config.protocolMode = protocolModeCombo->currentIndex();
     }
     config.logDirectory = logDirectory;
     appConfig.save(config);
@@ -1628,18 +1771,28 @@ void MainWindow::handleRecvedFrames(const QVector<CanFrame> &frames)
 {
     for(const CanFrame &frame : frames)
     {
-        if ((frame.id >= 0x2C0 && frame.id <= 0x2DF) || frame.id == 0x107) {
-            lastRfidFrameTime = QDateTime::currentDateTime();
-        }
+        if (appConfig.load().protocolMode == 1) { // 青桔协议
+            if (frame.extendedFrame) {
+                QingjuCanId qjId = QingjuCanId::parse(frame.id);
+                if (qjId.srcAddr == 0x0A || qjId.srcAddr == 0x0B) {
+                    lastRfidFrameTime = QDateTime::currentDateTime();
+                }
+                qingjuCanManager->handleIncomingFrame(frame);
+            }
+        } else { // 美团协议
+            if ((frame.id >= 0x2C0 && frame.id <= 0x2DF) || frame.id == 0x107) {
+                lastRfidFrameTime = QDateTime::currentDateTime();
+            }
 
-        handleRfidFrame(frame);
+            handleRfidFrame(frame);
 
-        if (frame.id == 0x107) {
-            otaService.handleIncomingFrame(frame);
-        }
+            if (frame.id == 0x107) {
+                otaService.handleIncomingFrame(frame);
+            }
 
-        if (stressTestService.handleFrame(frame)) {
-            updateStressTestPanel(stressTestService.stats());
+            if (stressTestService.handleFrame(frame)) {
+                updateStressTestPanel(stressTestService.stats());
+            }
         }
 
         addCanFrameToList(frame);
@@ -1954,4 +2107,360 @@ OtaErrorConfig MainWindow::getOtaErrorConfig() const
         config.outOfOrderState = otaInjectOutOfOrderCheck != nullptr && otaInjectOutOfOrderCheck->isChecked();
     }
     return config;
+}
+
+void MainWindow::onProtocolModeChanged(int index)
+{
+    AppConfigData config = appConfig.load();
+    config.protocolMode = index;
+    appConfig.save(config);
+
+    if (index == 0) { // 美团协议
+        qingjuRfidService->stopScan();
+        if (rfidStackedWidget != nullptr && mtRfidPanel != nullptr) {
+            rfidStackedWidget->setCurrentWidget(mtRfidPanel);
+        }
+        if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->hide();
+        if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->show();
+        
+        otaStateValue->setText(otaService.stateText());
+        otaMessageValue->setText(otaService.lastMessage().isEmpty() ? QStringLiteral("点击“开始升级”或“查询APP/BOOT”启动") : otaService.lastMessage());
+    } else { // 青桔协议
+        rfidScanning = false;
+        rfidControlTimer->stop();
+        if (rfidControlEnabledCheck != nullptr) {
+            rfidControlEnabledCheck->setChecked(false);
+        }
+        
+        if (rfidStackedWidget != nullptr && qjRfidPanel != nullptr) {
+            rfidStackedWidget->setCurrentWidget(qjRfidPanel);
+        }
+        if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->show();
+        if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->hide();
+        
+        otaStateValue->setText(qingjuOtaService->stateText());
+        otaMessageValue->setText(qingjuOtaService->lastMessage().isEmpty() ? QStringLiteral("点击“开始升级”或“查询APP/BOOT”启动") : qingjuOtaService->lastMessage());
+    }
+
+    rfidOnlineStatusValue->setText("-");
+    rfidOnlineStatusValue->setStyleSheet("color: gray; font-weight: bold;");
+    lastRfidFrameTime = QDateTime();
+
+    updateControlsState();
+}
+
+void MainWindow::updateQingjuRfidPanel(const QingjuNpkState &state)
+{
+    if (qjRfidAppStatusValue != nullptr) {
+        qjRfidAppStatusValue->setText(state.appStatus.isEmpty() ? "-" : state.appStatus);
+    }
+    if (qjRfidAlarmValue != nullptr) {
+        qjRfidAlarmValue->setText(state.alarmText.isEmpty() ? "-" : state.alarmText);
+    }
+    if (qjRfidUidValue != nullptr) {
+        qjRfidUidValue->setText(state.uidText.isEmpty() ? "-" : state.uidText);
+    }
+    if (qjRfidPwdValue != nullptr) {
+        if (state.password == 0) {
+            qjRfidPwdValue->setText("-");
+        } else {
+            qjRfidPwdValue->setText(QString("0x%1").arg(state.password, 8, 16, QChar('0')).toUpper());
+        }
+    }
+    if (qjRfidModelValue != nullptr) {
+        qjRfidModelValue->setText(state.assetModel.isEmpty() ? "-" : state.assetModel);
+    }
+    if (qjRfidSupplierValue != nullptr) {
+        qjRfidSupplierValue->setText(state.assetSupplier.isEmpty() ? "-" : state.assetSupplier);
+    }
+    if (qjRfidSerialValue != nullptr) {
+        qjRfidSerialValue->setText(state.assetSerial.isEmpty() ? "-" : state.assetSerial);
+    }
+    if (qjRfidSnValue != nullptr) {
+        qjRfidSnValue->setText(state.devSn.isEmpty() ? "-" : state.devSn);
+    }
+    if (qjRfidFirmwareVerValue != nullptr) {
+        qjRfidFirmwareVerValue->setText(state.firmwareVer.isEmpty() ? "-" : state.firmwareVer);
+    }
+    if (qjRfidHardwareVerValue != nullptr) {
+        qjRfidHardwareVerValue->setText(state.hardwareVer.isEmpty() ? "-" : state.hardwareVer);
+    }
+}
+
+void MainWindow::onQjCustomWriteClicked()
+{
+    if (!canStarted) {
+        QMessageBox::warning(this, "警告", "请先启动 CAN 设备！");
+        return;
+    }
+
+    quint8 destAddr = 0;
+    if (qjDestAddrCombo->currentIndex() == 2) {
+        bool ok;
+        QString text = QInputDialog::getText(this, "自定义目标设备", "请输入目标设备地址(Hex):", QLineEdit::Normal, "0A", &ok);
+        if (ok && !text.isEmpty()) {
+            destAddr = static_cast<quint8>(text.toUShort(&ok, 16));
+        } else {
+            return;
+        }
+    } else {
+        destAddr = static_cast<quint8>(qjDestAddrCombo->currentData().toUInt());
+    }
+
+    bool ok;
+    quint16 startReg = qjRegAddrEdit->text().toUShort(&ok, 16);
+    if (!ok) {
+        QMessageBox::warning(this, "错误", "寄存器地址格式错误！");
+        return;
+    }
+
+    QString valStr = qjRegValueEdit->text().trimmed();
+    QStringList valList = valStr.split(QRegExp("\\s+"), QString::SkipEmptyParts);
+    QVector<quint16> values;
+    for (const QString &s : valList) {
+        quint16 val = s.toUShort(&ok, 16);
+        if (!ok) {
+            QMessageBox::warning(this, "错误", QString("写入数值格式错误: %1").arg(s));
+            return;
+        }
+        values.append(val);
+    }
+
+    if (values.isEmpty()) {
+        QMessageBox::warning(this, "错误", "请输入待写入的寄存器数值！");
+        return;
+    }
+
+    bool noAck = (qjFuncCodeCombo->currentIndex() == 1);
+    bool res = qingjuCanManager->writeRegisters(destAddr, startReg, values, noAck);
+
+    QString timeStr = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    if (res) {
+        handleQjCustomLog(QString("[%1] Write Reg: 0x%2 to Dest: 0x%3 Sent")
+                          .arg(timeStr)
+                          .arg(QString::number(startReg, 16).toUpper())
+                          .arg(QString::number(destAddr, 16).toUpper()));
+    } else {
+        handleQjCustomLog(QString("[%1] Write Reg: 0x%2 to Dest: 0x%3 Failed")
+                          .arg(timeStr)
+                          .arg(QString::number(startReg, 16).toUpper())
+                          .arg(QString::number(destAddr, 16).toUpper()));
+    }
+}
+
+void MainWindow::onQjCustomReadClicked()
+{
+    if (!canStarted) {
+        QMessageBox::warning(this, "警告", "请先启动 CAN 设备！");
+        return;
+    }
+
+    quint8 destAddr = 0;
+    if (qjDestAddrCombo->currentIndex() == 2) {
+        bool ok;
+        QString text = QInputDialog::getText(this, "自定义目标设备", "请输入目标设备地址(Hex):", QLineEdit::Normal, "0A", &ok);
+        if (ok && !text.isEmpty()) {
+            destAddr = static_cast<quint8>(text.toUShort(&ok, 16));
+        } else {
+            return;
+        }
+    } else {
+        destAddr = static_cast<quint8>(qjDestAddrCombo->currentData().toUInt());
+    }
+
+    bool ok;
+    quint16 startReg = qjRegAddrEdit->text().toUShort(&ok, 16);
+    if (!ok) {
+        QMessageBox::warning(this, "错误", "寄存器地址格式错误！");
+        return;
+    }
+
+    int regCount = 1;
+    QString valStr = qjRegValueEdit->text().trimmed();
+    if (!valStr.isEmpty()) {
+        regCount = valStr.toInt(&ok);
+        if (!ok || regCount <= 0 || regCount > 125) {
+            regCount = 1;
+        }
+    }
+
+    bool res = qingjuCanManager->readRegisters(destAddr, startReg, regCount);
+
+    QString timeStr = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+    if (res) {
+        handleQjCustomLog(QString("[%1] Read Reg: 0x%2 (Count: %3) from Dest: 0x%4 Sent")
+                          .arg(timeStr)
+                          .arg(QString::number(startReg, 16).toUpper())
+                          .arg(regCount)
+                          .arg(QString::number(destAddr, 16).toUpper()));
+    } else {
+        handleQjCustomLog(QString("[%1] Read Reg: 0x%2 (Count: %3) from Dest: 0x%4 Failed")
+                          .arg(timeStr)
+                          .arg(QString::number(startReg, 16).toUpper())
+                          .arg(regCount)
+                          .arg(QString::number(destAddr, 16).toUpper()));
+    }
+}
+
+void MainWindow::handleQjCustomLog(const QString &text)
+{
+    if (qjCustomLog != nullptr) {
+        qjCustomLog->append(text);
+    }
+}
+
+QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
+{
+    QWidget *panel = new QWidget(parent);
+    QGridLayout *mainLayout = new QGridLayout(panel);
+    mainLayout->setContentsMargins(8, 8, 8, 8);
+    mainLayout->setHorizontalSpacing(10);
+    mainLayout->setVerticalSpacing(6);
+
+    QGroupBox *ctrlGroup = new QGroupBox(QStringLiteral("控制"), panel);
+    QGridLayout *ctrlLayout = new QGridLayout(ctrlGroup);
+    ctrlLayout->setContentsMargins(6, 6, 6, 6);
+    ctrlLayout->setHorizontalSpacing(6);
+    ctrlLayout->setVerticalSpacing(4);
+    
+    qjStartBtn = new QPushButton(QStringLiteral("开始检测"), ctrlGroup);
+    qjStopBtn = new QPushButton(QStringLiteral("停止检测"), ctrlGroup);
+    
+    qjRfidPeriodSpin = new QSpinBox(ctrlGroup);
+    qjRfidPeriodSpin->setRange(100, 25500);
+    qjRfidPeriodSpin->setValue(100);
+    qjRfidPeriodSpin->setSingleStep(100);
+    qjRfidPeriodSpin->setSuffix(" ms");
+    qjRfidPeriodSpin->setMinimumWidth(120);
+    
+    ctrlLayout->addWidget(qjStartBtn, 0, 0);
+    ctrlLayout->addWidget(qjStopBtn, 0, 1);
+    ctrlLayout->addWidget(new QLabel(QStringLiteral("读取间隔"), ctrlGroup), 1, 0);
+    ctrlLayout->addWidget(qjRfidPeriodSpin, 1, 1);
+    
+    connect(qjStartBtn, &QPushButton::clicked, this, [this]() {
+        if (canStarted) {
+            qingjuRfidService->startScan(qjRfidPeriodSpin->value());
+            updateControlsState();
+        } else {
+            QMessageBox::warning(this, "警告", "请先启动 CAN 设备！");
+        }
+    });
+    connect(qjStopBtn, &QPushButton::clicked, this, [this]() {
+        qingjuRfidService->stopScan();
+        updateControlsState();
+    });
+
+    QGroupBox *statusGroup = new QGroupBox(QStringLiteral("NPK状态信息"), panel);
+    QGridLayout *statusLayout = new QGridLayout(statusGroup);
+    statusLayout->setContentsMargins(6, 6, 6, 6);
+    statusLayout->setHorizontalSpacing(8);
+    statusLayout->setVerticalSpacing(3);
+
+    qjRfidAddrValue = new QLabel("0x0A", statusGroup);
+    qjRfidAppStatusValue = new QLabel("-", statusGroup);
+    qjRfidAlarmValue = new QLabel("-", statusGroup);
+    qjRfidUidValue = new QLabel("-", statusGroup);
+    qjRfidPwdValue = new QLabel("-", statusGroup);
+
+    statusLayout->addWidget(new QLabel(QStringLiteral("读卡器地址"), statusGroup), 0, 0);
+    statusLayout->addWidget(qjRfidAddrValue, 0, 1);
+    statusLayout->addWidget(new QLabel(QStringLiteral("当前程序状态"), statusGroup), 1, 0);
+    statusLayout->addWidget(qjRfidAppStatusValue, 1, 1);
+    statusLayout->addWidget(new QLabel(QStringLiteral("芯片异常告警"), statusGroup), 2, 0);
+    statusLayout->addWidget(qjRfidAlarmValue, 2, 1);
+    statusLayout->addWidget(new QLabel(QStringLiteral("标签64位UID"), statusGroup), 3, 0);
+    statusLayout->addWidget(qjRfidUidValue, 3, 1);
+    statusLayout->addWidget(new QLabel(QStringLiteral("计算的密码"), statusGroup), 4, 0);
+    statusLayout->addWidget(qjRfidPwdValue, 4, 1);
+
+    QGroupBox *assetGroup = new QGroupBox(QStringLiteral("标签资产信息"), panel);
+    QGridLayout *assetLayout = new QGridLayout(assetGroup);
+    assetLayout->setContentsMargins(6, 6, 6, 6);
+    assetLayout->setHorizontalSpacing(8);
+    assetLayout->setVerticalSpacing(3);
+
+    qjRfidModelValue = new QLabel("-", assetGroup);
+    qjRfidSupplierValue = new QLabel("-", assetGroup);
+    qjRfidSerialValue = new QLabel("-", assetGroup);
+
+    assetLayout->addWidget(new QLabel(QStringLiteral("产品型号"), assetGroup), 0, 0);
+    assetLayout->addWidget(qjRfidModelValue, 0, 1);
+    assetLayout->addWidget(new QLabel(QStringLiteral("供应商"), assetGroup), 1, 0);
+    assetLayout->addWidget(qjRfidSupplierValue, 1, 1);
+    assetLayout->addWidget(new QLabel(QStringLiteral("流水号"), assetGroup), 2, 0);
+    assetLayout->addWidget(qjRfidSerialValue, 2, 1);
+
+    QGroupBox *devGroup = new QGroupBox(QStringLiteral("读卡器设备信息"), panel);
+    QGridLayout *devLayout = new QGridLayout(devGroup);
+    devLayout->setContentsMargins(6, 6, 6, 6);
+    devLayout->setHorizontalSpacing(8);
+    devLayout->setVerticalSpacing(3);
+
+    qjRfidSnValue = new QLabel("-", devGroup);
+    qjRfidFirmwareVerValue = new QLabel("-", devGroup);
+    qjRfidHardwareVerValue = new QLabel("-", devGroup);
+
+    devLayout->addWidget(new QLabel(QStringLiteral("设备SN"), devGroup), 0, 0);
+    devLayout->addWidget(qjRfidSnValue, 0, 1);
+    devLayout->addWidget(new QLabel(QStringLiteral("软件版本"), devGroup), 1, 0);
+    devLayout->addWidget(qjRfidFirmwareVerValue, 1, 1);
+    devLayout->addWidget(new QLabel(QStringLiteral("硬件版本"), devGroup), 2, 0);
+    devLayout->addWidget(qjRfidHardwareVerValue, 2, 1);
+
+    QGroupBox *customGroup = new QGroupBox(QStringLiteral("自定义寄存器读写调试"), panel);
+    QGridLayout *customLayout = new QGridLayout(customGroup);
+    customLayout->setContentsMargins(6, 6, 6, 6);
+    customLayout->setHorizontalSpacing(6);
+    customLayout->setVerticalSpacing(4);
+
+    qjDestAddrCombo = new QComboBox(customGroup);
+    qjDestAddrCombo->addItem(QStringLiteral("NPK (0x0A)"), 0x0A);
+    qjDestAddrCombo->addItem(QStringLiteral("RFR (0x0B)"), 0x0B);
+    qjDestAddrCombo->addItem(QStringLiteral("自定义"), 0x00);
+    
+    qjRegAddrEdit = new QLineEdit(customGroup);
+    qjRegAddrEdit->setPlaceholderText("Hex: e.g. A900");
+    
+    qjRegValueEdit = new QLineEdit(customGroup);
+    qjRegValueEdit->setPlaceholderText("Hex: e.g. 0001 0002");
+    
+    qjFuncCodeCombo = new QComboBox(customGroup);
+    qjFuncCodeCombo->addItem(QStringLiteral("0x10 写(带ACK)"), 0x10);
+    qjFuncCodeCombo->addItem(QStringLiteral("0x90 写(无ACK)"), 0x90);
+    qjFuncCodeCombo->addItem(QStringLiteral("0x03 读寄存器"), 0x03);
+
+    qjCustomWriteBtn = new QPushButton(QStringLiteral("寄存器写入"), customGroup);
+    qjCustomReadBtn = new QPushButton(QStringLiteral("寄存器读取"), customGroup);
+    qjCustomLog = new QTextEdit(customGroup);
+    qjCustomLog->setReadOnly(true);
+    qjCustomLog->setMaximumHeight(80);
+
+    customLayout->addWidget(new QLabel(QStringLiteral("目标设备"), customGroup), 0, 0);
+    customLayout->addWidget(qjDestAddrCombo, 0, 1);
+    customLayout->addWidget(new QLabel(QStringLiteral("功能码"), customGroup), 0, 2);
+    customLayout->addWidget(qjFuncCodeCombo, 0, 3);
+    
+    customLayout->addWidget(new QLabel(QStringLiteral("寄存器地址"), customGroup), 1, 0);
+    customLayout->addWidget(qjRegAddrEdit, 1, 1);
+    customLayout->addWidget(new QLabel(QStringLiteral("写入数值(Hex)"), customGroup), 1, 2);
+    customLayout->addWidget(qjRegValueEdit, 1, 3);
+
+    customLayout->addWidget(qjCustomWriteBtn, 2, 0, 1, 2);
+    customLayout->addWidget(qjCustomReadBtn, 2, 2, 1, 2);
+    customLayout->addWidget(qjCustomLog, 3, 0, 1, 4);
+
+    connect(qjCustomWriteBtn, &QPushButton::clicked, this, &MainWindow::onQjCustomWriteClicked);
+    connect(qjCustomReadBtn, &QPushButton::clicked, this, &MainWindow::onQjCustomReadClicked);
+
+    mainLayout->addWidget(ctrlGroup, 0, 0);
+    mainLayout->addWidget(statusGroup, 0, 1);
+    mainLayout->addWidget(assetGroup, 1, 0);
+    mainLayout->addWidget(devGroup, 1, 1);
+    mainLayout->addWidget(customGroup, 2, 0, 1, 2);
+
+    mainLayout->setColumnStretch(0, 1);
+    mainLayout->setColumnStretch(1, 1);
+
+    return panel;
 }

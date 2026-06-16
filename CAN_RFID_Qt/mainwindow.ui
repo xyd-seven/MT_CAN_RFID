@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
  <class>MainWindow</class>
  <widget class="QMainWindow" name="MainWindow">
@@ -33,7 +33,7 @@
      </rect>
     </property>
     <property name="title">
-     <string>鍙傛暟閰嶇疆</string>
+     <string>参数配置</string>
     </property>
     <widget class="QWidget" name="layoutWidget">
      <property name="geometry">
@@ -56,12 +56,12 @@
        <widget class="QComboBox" name="workStatusCombo">
         <item>
          <property name="text">
-          <string>姝ｅ父</string>
+          <string>正常</string>
          </property>
         </item>
         <item>
          <property name="text">
-          <string>鍙惉</string>
+          <string>只听</string>
          </property>
         </item>
        </widget>
@@ -90,7 +90,7 @@
       <item>
        <widget class="QCheckBox" name="resistanceCheckBox">
         <property name="text">
-         <string>缁堢鐢甸樆浣胯兘</string>
+         <string>终端电阻使能</string>
         </property>
        </widget>
       </item>
@@ -198,7 +198,7 @@
       <item>
        <widget class="QCheckBox" name="CustomBaudrateCheckBox">
         <property name="text">
-         <string>鑷畾涔夋尝鐗圭巼</string>
+         <string>自定义波特率</string>
         </property>
        </widget>
       </item>
@@ -208,7 +208,7 @@
       <item>
        <widget class="QLabel" name="label_7">
         <property name="text">
-         <string>鑷畾涔夋尝鐗圭巼鍊艰浣跨敤ZCANPRO鐩綍涓嬬殑baudcal鐢熸垚</string>
+         <string>自定义波特率值请使用ZCANPRO目录下的baudcal生成</string>
         </property>
        </widget>
       </item>
@@ -248,7 +248,7 @@
         </item>
         <item>
          <property name="text">
-          <string>绂佽兘</string>
+          <string>禁能</string>
          </property>
         </item>
        </widget>
@@ -256,7 +256,7 @@
       <item>
        <widget class="QLabel" name="label_9">
         <property name="text">
-         <string>璧峰ID(0x):</string>
+         <string>起始ID(0x):</string>
         </property>
        </widget>
       </item>
@@ -270,7 +270,7 @@
       <item>
        <widget class="QLabel" name="label_10">
         <property name="text">
-         <string>缁撴潫ID(0x):</string>
+         <string>结束ID(0x):</string>
         </property>
        </widget>
       </item>
@@ -323,7 +323,7 @@
       <item>
        <widget class="QLabel" name="label_12">
         <property name="text">
-         <string>甯х被鍨嬶細</string>
+         <string>帧类型：</string>
         </property>
        </widget>
       </item>
@@ -451,7 +451,7 @@
      </rect>
     </property>
     <property name="title">
-     <string>鏁版嵁鎺ユ敹</string>
+     <string>数据接收</string>
     </property>
     <widget class="QPushButton" name="cleanListBtn">
      <property name="geometry">
@@ -463,7 +463,7 @@
       </rect>
      </property>
      <property name="text">
-      <string>娓呯┖</string>
+      <string>清空</string>
      </property>
     </widget>
     <widget class="QTableWidget" name="tableWidget">
@@ -489,7 +489,7 @@
       </rect>
      </property>
      <property name="text">
-      <string>瀹炴椂鏄剧ず</string>
+      <string>实时显示</string>
      </property>
      <property name="checked">
       <bool>true</bool>
@@ -718,7 +718,7 @@
      <item>
       <widget class="QPushButton" name="openDeviceBtn">
        <property name="text">
-        <string>鎵撳紑璁惧</string>
+        <string>打开设备</string>
        </property>
       </widget>
      </item>
@@ -728,7 +728,7 @@
         <bool>false</bool>
        </property>
        <property name="text">
-        <string>鍒濆鍖朇AN</string>
+        <string>初始化CAN</string>
        </property>
       </widget>
      </item>
@@ -738,7 +738,7 @@
         <bool>false</bool>
        </property>
        <property name="text">
-        <string>鍚姩CAN</string>
+        <string>启动CAN</string>
        </property>
       </widget>
      </item>
@@ -748,7 +748,7 @@
         <bool>false</bool>
        </property>
        <property name="text">
-        <string>澶嶄綅</string>
+        <string>复位</string>
        </property>
       </widget>
      </item>
@@ -758,7 +758,7 @@
         <bool>false</bool>
        </property>
        <property name="text">
-        <string>鍏抽棴璁惧</string>
+        <string>关闭设备</string>
        </property>
       </widget>
      </item>

@@ -28,6 +28,7 @@ AppConfigData AppConfig::load() const
     config.logDirectory = settings.value("log/directory", config.logDirectory).toString();
     config.rfidControlEnabled = settings.value("rfid/controlEnabled", config.rfidControlEnabled).toBool();
     config.show0x207Log = settings.value("log/show0x207Log", config.show0x207Log).toBool();
+    config.protocolMode = settings.value("device/protocolMode", config.protocolMode).toInt();
 
     if (config.logDirectory.isEmpty()) {
         config.logDirectory = QDir(QCoreApplication::applicationDirPath()).filePath("logs");
@@ -52,6 +53,7 @@ void AppConfig::save(const AppConfigData &config) const
     settings.setValue("log/directory", config.logDirectory);
     settings.setValue("rfid/controlEnabled", config.rfidControlEnabled);
     settings.setValue("log/show0x207Log", config.show0x207Log);
+    settings.setValue("device/protocolMode", config.protocolMode);
     settings.sync();
 }
 

@@ -17,7 +17,10 @@ SOURCES += \
     application/logservice.cpp \
     application/otaservice.cpp \
     application/rfidservice.cpp \
-    application/stresstestservice.cpp
+    application/stresstestservice.cpp \
+    application/qingjucanmanager.cpp \
+    application/qingjurfidservice.cpp \
+    application/qingjuotaservice.cpp
 
 HEADERS += \
     mainwindow.h \
@@ -26,11 +29,15 @@ HEADERS += \
     domain/canframe.h \
     domain/isotptransport.h \
     domain/crc16.h \
+    domain/qingjucanid.h \
     application/appconfig.h \
     application/logservice.h \
     application/otaservice.h \
     application/rfidservice.h \
     application/stresstestservice.h \
+    application/qingjucanmanager.h \
+    application/qingjurfidservice.h \
+    application/qingjuotaservice.h \
     third_party/zlgcan/zlgcan.h \
     third_party/zlgcan/config.h
 
