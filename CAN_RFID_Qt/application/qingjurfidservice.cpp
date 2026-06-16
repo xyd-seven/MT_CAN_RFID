@@ -107,6 +107,7 @@ void QingjuRfidService::onModbusPacketReceived(quint8 srcAddr, quint8 destAddr, 
 void QingjuRfidService::parseStatusData(const QByteArray &data)
 {
     if (data.size() < 44) return;
+    m_state.statusSample = true;
 
     // 0xA904: 读取结果
     quint16 result = (static_cast<quint8>(data.at(0)) << 8) | static_cast<quint8>(data.at(1));
@@ -178,6 +179,7 @@ void QingjuRfidService::parseStatusData(const QByteArray &data)
 void QingjuRfidService::parseVersionData(const QByteArray &data)
 {
     if (data.size() < 6) return;
+    m_state.statusSample = false;
 
     // 0xA002 (4 字节, uint32) - 软件版本号
     quint8 swMajor = static_cast<quint8>(data.at(0));
@@ -196,6 +198,7 @@ void QingjuRfidService::parseVersionData(const QByteArray &data)
 void QingjuRfidService::parseSnData(const QByteArray &data)
 {
     if (data.size() < 16) return;
+    m_state.statusSample = false;
 
     m_state.devSn = QString::fromLatin1(data.left(16)).trimmed();
     emit stateUpdated(m_state);
@@ -204,6 +207,7 @@ void QingjuRfidService::parseSnData(const QByteArray &data)
 void QingjuRfidService::parseAppStatusData(const QByteArray &data)
 {
     if (data.size() < 2) return;
+    m_state.statusSample = false;
 
     quint16 statusVal = (static_cast<quint8>(data.at(0)) << 8) | static_cast<quint8>(data.at(1));
     if (statusVal == 0) {

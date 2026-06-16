@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QByteArray>
 #include <QMap>
+#include <QMutex>
 #include <QVector>
 #include "domain/canframe.h"
 #include "domain/qingjucanid.h"
@@ -41,7 +42,8 @@ private:
 
     CANThread *m_canThread;
     quint8 m_nextQueue;
-    QMap<quint16, AssemblyBuffer> m_buffers; // key: (srcAddr << 8) | queue
+    QMap<quint32, AssemblyBuffer> m_buffers; // key: (srcAddr << 16) | (destAddr << 8) | queue
+    QMutex m_sendMutex;
 };
 
 #endif // QINGJUCANMANAGER_H

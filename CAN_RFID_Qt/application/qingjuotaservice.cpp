@@ -2,6 +2,7 @@
 #include "domain/crc16.h"
 #include <QDebug>
 #include <QElapsedTimer>
+#include <QTimer>
 
 QingjuOtaWorker::QingjuOtaWorker(QingjuCanManager *canManager, QObject *parent)
     : QThread(parent)
@@ -117,7 +118,7 @@ void QingjuOtaWorker::run()
             return;
         }
         
-        m_canManager->sendModbusRequest(0x0B, 0x45, QByteArray::fromHex("01"), 7); // OTA 优先级为 7
+        emit transmitModbusRequest(0x0B, 0x45, QByteArray::fromHex("01"), 7); // OTA 优先级为 7
         if (waitForResponse(0x0B, 0x45, 0x02, 1000, respPayload)) {
             enterOk = true;
             break;
@@ -197,7 +198,7 @@ void QingjuOtaWorker::run()
     reqPayload.append(static_cast<char>(0x13));
     reqPayload.append(infoVal);
 
-    m_canManager->sendModbusRequest(0x0B, 0x45, reqPayload, 7);
+    emit transmitModbusRequest(0x0B, 0x45, reqPayload, 7);
 
     if (!waitForResponse(0x0B, 0x45, 0x14, 2000, respPayload)) {
         emit statusUpdated(5, "固件信息回应超时: " + m_lastError, 5);
@@ -279,7 +280,7 @@ void QingjuOtaWorker::run()
         blockReq.append(blockVal);
 
         // 发送数据块
-        m_canManager->sendModbusRequest(0x0B, 0x45, blockReq, 7);
+        emit transmitModbusRequest(0x0B, 0x45, blockReq, 7);
 
         // 异常 Case 5: 收到 ECU 重复的数据包
         if (m_injectConfig.enabled && m_injectConfig.caseMode == 5 && nextBlock == 2 && !dupSent) {
@@ -287,7 +288,7 @@ void QingjuOtaWorker::run()
             // 稍等并直接重发一次 Block 2
             QThread::msleep(100);
             emit statusUpdated(1, "[Case 5 注入] 重发数据块 2 ...", (nextBlock * 90) / totalBlocks + 10);
-            m_canManager->sendModbusRequest(0x0B, 0x45, blockReq, 7);
+            emit transmitModbusRequest(0x0B, 0x45, blockReq, 7);
         }
 
         // 等待 0x16 响应 (接收结果)
@@ -332,7 +333,7 @@ void QingjuOtaWorker::run()
         }
 
         // 再次下发 0x13 固件基本信息进行查询
-        m_canManager->sendModbusRequest(0x0B, 0x45, reqPayload, 7);
+        emit transmitModbusRequest(0x0B, 0x45, reqPayload, 7);
 
         if (waitForResponse(0x0B, 0x45, 0x14, 1500, respPayload)) {
             if (respPayload.size() >= 2) {
@@ -364,9 +365,15 @@ QingjuOtaService::QingjuOtaService(QingjuCanManager *canManager, QObject *parent
     , m_canManager(canManager)
     , m_currentState(State::Idle)
     , m_currentProgress(0)
+    , m_queryProgramPending(false)
 {
     m_worker = new QingjuOtaWorker(m_canManager, this);
     connect(m_worker, &QingjuOtaWorker::statusUpdated, this, &QingjuOtaService::onWorkerStatusUpdated);
+    connect(m_worker, &QingjuOtaWorker::transmitModbusRequest, this,
+            [this](quint8 destAddr, quint8 funcCode, const QByteArray &payload, quint8 priority) {
+                m_canManager->sendModbusRequest(destAddr, funcCode, payload, priority);
+            },
+            Qt::QueuedConnection);
 }
 
 QingjuOtaService::~QingjuOtaService()
@@ -383,6 +390,7 @@ QString QingjuOtaService::stateText() const
     case State::Abort: return "已终止";
     case State::Failed: return "升级失败";
     case State::Completed: return "升级成功";
+    case State::QueryProgram: return "查询程序位置";
     }
     return "未知";
 }
@@ -410,8 +418,55 @@ void QingjuOtaService::abortUpgrade()
     setState(State::Abort, "升级已被用户终止");
 }
 
+void QingjuOtaService::queryProgramStatus()
+{
+    if (m_worker->isRunning()) {
+        return;
+    }
+
+    m_queryProgramPending = true;
+    m_currentProgress = 0;
+    setState(State::QueryProgram, "正在查询程序位置...");
+    emit otaProgress(0);
+    m_canManager->readRegisters(0x0B, 0xA02A, 1);
+
+    QTimer::singleShot(2000, this, [this]() {
+        if (!m_queryProgramPending) {
+            return;
+        }
+        m_queryProgramPending = false;
+        setState(State::Failed, "查询程序位置超时");
+        emit otaProgress(0);
+    });
+}
+
 void QingjuOtaService::handleIncomingModbusPacket(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload)
 {
+    if (srcAddr == 0x0B && destAddr == 0x01 && funcCode == 0x03 && m_queryProgramPending) {
+        m_queryProgramPending = false;
+        if (payload.size() < 3 || static_cast<quint8>(payload.at(0)) < 2) {
+            setState(State::Failed, "查询程序位置响应长度错误");
+            emit otaProgress(0);
+            return;
+        }
+
+        const quint16 status = (static_cast<quint8>(payload.at(1)) << 8) |
+                               static_cast<quint8>(payload.at(2));
+        QString locationText;
+        if (status == 0) {
+            locationText = "BOOT";
+        } else if (status == 1) {
+            locationText = "APP";
+        } else if (status == 2) {
+            locationText = "APP（未自检完成）";
+        } else {
+            locationText = QString("未知状态 0x%1").arg(status, 4, 16, QChar('0')).toUpper();
+        }
+        setState(State::Idle, QString("程序位置：%1").arg(locationText));
+        emit otaProgress(100);
+        return;
+    }
+
     if (m_worker && m_worker->isRunning()) {
         m_worker->handleIncomingModbusPacket(srcAddr, destAddr, funcCode, payload);
     }

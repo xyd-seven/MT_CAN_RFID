@@ -29,6 +29,7 @@ public:
 
 signals:
     void statusUpdated(int stateVal, const QString &message, int progressPercent);
+    void transmitModbusRequest(quint8 destAddr, quint8 funcCode, const QByteArray &payload, quint8 priority);
 
 protected:
     void run() override;
@@ -66,7 +67,8 @@ public:
         FinishUpgrade = 3,
         Abort = 4,
         Failed = 5,
-        Completed = 6
+        Completed = 6,
+        QueryProgram = 7
     };
     Q_ENUM(State)
 
@@ -80,6 +82,7 @@ public:
 
     void startUpgrade(const QString &firmwarePath, const QingjuOtaErrorConfig &injectCfg = QingjuOtaErrorConfig());
     void abortUpgrade();
+    void queryProgramStatus();
     void handleIncomingModbusPacket(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload);
 
 signals:
@@ -97,6 +100,7 @@ private:
     QString m_currentMessage;
     int m_currentProgress;
     QingjuOtaWorker *m_worker;
+    bool m_queryProgramPending;
 };
 
 #endif // QINGJUOTASERVICE_H

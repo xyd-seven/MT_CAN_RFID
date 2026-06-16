@@ -116,6 +116,9 @@ MainWindow::MainWindow(QWidget *parent) :
     qjCustomWriteBtn(nullptr),
     qjCustomReadBtn(nullptr),
     qjCustomLog(nullptr),
+    qjCustomRequestPending(false),
+    qjCustomExpectedSrc(0),
+    qjCustomExpectedFunc(0),
     qjOtaAnomalyGroup(nullptr),
     qjOtaAnomalyCombo(nullptr),
     qjOtaAnomalyEnableCheck(nullptr),
@@ -239,19 +242,23 @@ MainWindow::MainWindow(QWidget *parent) :
         } else {
             rfidOnlineStatusValue->setText(QStringLiteral("离线"));
             rfidOnlineStatusValue->setStyleSheet("color: red; font-weight: bold;");
-            
-            // 设备离线时清空显示数据为 -
-            rfidWorkModeValue->setText("-");
-            rfidCardStatusValue->setText("-");
-            rfidFaultStatusValue->setText("-");
-            rfidScanPeriodValue->setText("-");
-            rfidTagValue->setText("-");
-            rfidTagPart1Value->setText("-");
-            rfidTagPart2Value->setText("-");
-            rfidTagPart3Value->setText("-");
-            rfidDeviceIdValue->setText("-");
-            rfidVersionValue->setText("-");
-            rfidResponseValue->setText("-");
+
+            if (appConfig.load().protocolMode == 1) {
+                clearQingjuRfidPanel();
+            } else {
+                // 设备离线时清空显示数据为 -
+                rfidWorkModeValue->setText("-");
+                rfidCardStatusValue->setText("-");
+                rfidFaultStatusValue->setText("-");
+                rfidScanPeriodValue->setText("-");
+                rfidTagValue->setText("-");
+                rfidTagPart1Value->setText("-");
+                rfidTagPart2Value->setText("-");
+                rfidTagPart3Value->setText("-");
+                rfidDeviceIdValue->setText("-");
+                rfidVersionValue->setText("-");
+                rfidResponseValue->setText("-");
+            }
         }
     });
 
@@ -259,6 +266,7 @@ MainWindow::MainWindow(QWidget *parent) :
 
     connect(qingjuRfidService, &QingjuRfidService::stateUpdated, this, &MainWindow::updateQingjuRfidPanel);
     connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, qingjuOtaService, &QingjuOtaService::handleIncomingModbusPacket);
+    connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, this, &MainWindow::handleQjCustomResponse);
 
     connect(qingjuOtaService, &QingjuOtaService::otaStateChanged, this, [this](QingjuOtaService::State state, const QString &message) {
         if (appConfig.load().protocolMode == 1) {
@@ -586,7 +594,8 @@ bool MainWindow::isOtaRunning() const
     }
     if (appConfig.load().protocolMode == 1) {
         QingjuOtaService::State state = qingjuOtaService->state();
-        return state == QingjuOtaService::State::StartUpgrade ||
+        return state == QingjuOtaService::State::QueryProgram ||
+               state == QingjuOtaService::State::StartUpgrade ||
                state == QingjuOtaService::State::SendData ||
                state == QingjuOtaService::State::FinishUpgrade;
     } else {
@@ -812,13 +821,20 @@ void MainWindow::startStressTest()
         stressRemainingLabel->setText(QStringLiteral("正在进行中..."));
     }
 
-    rfidScanning = true; // 开启周期发送以支持持续读卡
-    sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
-    rfidControlTimer->start(); // 开启压测时同步启动 0x207 周期发送
+    const bool qingjuMode = appConfig.load().protocolMode == 1;
+    if (qingjuMode) {
+        const int intervalMs = qjRfidPeriodSpin == nullptr ? 100 : qjRfidPeriodSpin->value();
+        qingjuRfidService->startScan(intervalMs);
+    } else {
+        rfidScanning = true; // 开启周期发送以支持持续读卡
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
+        rfidControlTimer->start(); // 开启压测时同步启动 0x207 周期发送
+    }
     stressTestService.start();
     stressRefreshTimer->start();
     updateStressTestPanel(stressTestService.stats());
-    logService.logRuntime(LogLevel::Info, QStringLiteral("Stress test started"));
+    logService.logRuntime(LogLevel::Info, qingjuMode ? QStringLiteral("Qingju stress test started")
+                                                     : QStringLiteral("Stress test started"));
     updateControlsState();
 }
 
@@ -828,14 +844,20 @@ void MainWindow::stopStressTest(bool autoStopped)
         return;
     }
 
-    rfidScanning = false; // 关闭周期发送，切回空闲状态
+    const bool qingjuMode = appConfig.load().protocolMode == 1;
     stressTestService.stop();
     stressRefreshTimer->stop();
-    sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
-    if (canStarted && rfidControlEnabledCheck != nullptr && rfidControlEnabledCheck->isChecked()) {
-        rfidControlTimer->start();
+
+    if (qingjuMode) {
+        qingjuRfidService->stopScan();
     } else {
-        rfidControlTimer->stop();
+        rfidScanning = false; // 关闭周期发送，切回空闲状态
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
+        if (canStarted && rfidControlEnabledCheck != nullptr && rfidControlEnabledCheck->isChecked()) {
+            rfidControlTimer->start();
+        } else {
+            rfidControlTimer->stop();
+        }
     }
     updateStressTestPanel(stressTestService.stats());
     logService.logRuntime(LogLevel::Info, autoStopped ? QStringLiteral("Stress test auto stopped")
@@ -1401,8 +1423,7 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
     connect(otaQueryBtn, &QPushButton::clicked, this, [this]() {
         if (appConfig.load().protocolMode == 1) { // 青桔协议
             if (canStarted) {
-                // 读取 RFR (0x0B) 的当前程序状态 (0xA02A)
-                qingjuCanManager->readRegisters(0x0B, 0xA02A, 1);
+                qingjuOtaService->queryProgramStatus();
             } else {
                 QMessageBox::warning(this, "警告", "请先启动 CAN 设备！");
             }
@@ -1490,6 +1511,43 @@ void MainWindow::setLabelValue(QLabel *label, const QString &value)
     if (label != nullptr) {
         label->setText(value.isEmpty() ? "-" : value);
     }
+}
+
+bool MainWindow::parseQingjuAddress(const QString &text, quint8 *address, QString *error) const
+{
+    const QString trimmed = text.trimmed();
+    bool ok = false;
+    const ushort value = trimmed.toUShort(&ok, 16);
+    if (!ok || trimmed.isEmpty()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("目标设备地址必须为十六进制数。");
+        }
+        return false;
+    }
+    if (value > 0x3F) {
+        if (error != nullptr) {
+            *error = QStringLiteral("目标设备地址超出范围，青桔地址合法范围为 0x00~0x3F。");
+        }
+        return false;
+    }
+    if (address != nullptr) {
+        *address = static_cast<quint8>(value);
+    }
+    return true;
+}
+
+void MainWindow::clearQingjuRfidPanel()
+{
+    setLabelValue(qjRfidAppStatusValue, QString());
+    setLabelValue(qjRfidAlarmValue, QString());
+    setLabelValue(qjRfidUidValue, QString());
+    setLabelValue(qjRfidPwdValue, QString());
+    setLabelValue(qjRfidModelValue, QString());
+    setLabelValue(qjRfidSupplierValue, QString());
+    setLabelValue(qjRfidSerialValue, QString());
+    setLabelValue(qjRfidSnValue, QString());
+    setLabelValue(qjRfidFirmwareVerValue, QString());
+    setLabelValue(qjRfidHardwareVerValue, QString());
 }
 
 void MainWindow::sendRfidFrame(UINT canId, const QByteArray &payload)
@@ -2185,6 +2243,9 @@ void MainWindow::updateQingjuRfidPanel(const QingjuNpkState &state)
     if (qjRfidHardwareVerValue != nullptr) {
         qjRfidHardwareVerValue->setText(state.hardwareVer.isEmpty() ? "-" : state.hardwareVer);
     }
+    if (stressTestService.handleQingjuState(state)) {
+        updateStressTestPanel(stressTestService.stats());
+    }
 }
 
 void MainWindow::onQjCustomWriteClicked()
@@ -2198,9 +2259,12 @@ void MainWindow::onQjCustomWriteClicked()
     if (qjDestAddrCombo->currentIndex() == 2) {
         bool ok;
         QString text = QInputDialog::getText(this, "自定义目标设备", "请输入目标设备地址(Hex):", QLineEdit::Normal, "0A", &ok);
-        if (ok && !text.isEmpty()) {
-            destAddr = static_cast<quint8>(text.toUShort(&ok, 16));
-        } else {
+        if (!ok) {
+            return;
+        }
+        QString error;
+        if (!parseQingjuAddress(text, &destAddr, &error)) {
+            QMessageBox::warning(this, "错误", error);
             return;
         }
     } else {
@@ -2236,11 +2300,18 @@ void MainWindow::onQjCustomWriteClicked()
 
     QString timeStr = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
     if (res) {
+        qjCustomRequestPending = !noAck;
+        qjCustomExpectedSrc = destAddr;
+        qjCustomExpectedFunc = 0x10;
         handleQjCustomLog(QString("[%1] Write Reg: 0x%2 to Dest: 0x%3 Sent")
                           .arg(timeStr)
                           .arg(QString::number(startReg, 16).toUpper())
                           .arg(QString::number(destAddr, 16).toUpper()));
+        if (noAck) {
+            handleQjCustomLog(QString("[%1] No-ACK write: device response is not expected").arg(timeStr));
+        }
     } else {
+        qjCustomRequestPending = false;
         handleQjCustomLog(QString("[%1] Write Reg: 0x%2 to Dest: 0x%3 Failed")
                           .arg(timeStr)
                           .arg(QString::number(startReg, 16).toUpper())
@@ -2259,9 +2330,12 @@ void MainWindow::onQjCustomReadClicked()
     if (qjDestAddrCombo->currentIndex() == 2) {
         bool ok;
         QString text = QInputDialog::getText(this, "自定义目标设备", "请输入目标设备地址(Hex):", QLineEdit::Normal, "0A", &ok);
-        if (ok && !text.isEmpty()) {
-            destAddr = static_cast<quint8>(text.toUShort(&ok, 16));
-        } else {
+        if (!ok) {
+            return;
+        }
+        QString error;
+        if (!parseQingjuAddress(text, &destAddr, &error)) {
+            QMessageBox::warning(this, "错误", error);
             return;
         }
     } else {
@@ -2288,17 +2362,86 @@ void MainWindow::onQjCustomReadClicked()
 
     QString timeStr = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
     if (res) {
+        qjCustomRequestPending = true;
+        qjCustomExpectedSrc = destAddr;
+        qjCustomExpectedFunc = 0x03;
         handleQjCustomLog(QString("[%1] Read Reg: 0x%2 (Count: %3) from Dest: 0x%4 Sent")
                           .arg(timeStr)
                           .arg(QString::number(startReg, 16).toUpper())
                           .arg(regCount)
                           .arg(QString::number(destAddr, 16).toUpper()));
     } else {
+        qjCustomRequestPending = false;
         handleQjCustomLog(QString("[%1] Read Reg: 0x%2 (Count: %3) from Dest: 0x%4 Failed")
                           .arg(timeStr)
                           .arg(QString::number(startReg, 16).toUpper())
                           .arg(regCount)
                           .arg(QString::number(destAddr, 16).toUpper()));
+    }
+}
+
+void MainWindow::handleQjCustomResponse(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload)
+{
+    if (!qjCustomRequestPending ||
+        srcAddr != qjCustomExpectedSrc ||
+        destAddr != 0x01 ||
+        funcCode != qjCustomExpectedFunc) {
+        return;
+    }
+
+    qjCustomRequestPending = false;
+    const QString timeStr = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+
+    if (funcCode == 0x03) {
+        if (payload.isEmpty()) {
+            handleQjCustomLog(QString("[%1] Read Response from 0x%2: invalid empty payload")
+                              .arg(timeStr)
+                              .arg(QString::number(srcAddr, 16).toUpper()));
+            return;
+        }
+
+        const int byteCount = static_cast<quint8>(payload.at(0));
+        const QByteArray data = payload.mid(1, byteCount);
+        if (data.size() != byteCount) {
+            handleQjCustomLog(QString("[%1] Read Response from 0x%2: length mismatch, byteCount=%3 actual=%4")
+                              .arg(timeStr)
+                              .arg(QString::number(srcAddr, 16).toUpper())
+                              .arg(byteCount)
+                              .arg(data.size()));
+            return;
+        }
+
+        QStringList words;
+        for (int i = 0; i + 1 < data.size(); i += 2) {
+            const quint16 value = (static_cast<quint8>(data.at(i)) << 8) |
+                                  static_cast<quint8>(data.at(i + 1));
+            words << QString("0x%1").arg(value, 4, 16, QChar('0')).toUpper();
+        }
+        handleQjCustomLog(QString("[%1] Read Response from 0x%2: %3")
+                          .arg(timeStr)
+                          .arg(QString::number(srcAddr, 16).toUpper())
+                          .arg(words.isEmpty() ? QString(data.toHex(' ').toUpper()) : words.join(' ')));
+        return;
+    }
+
+    if (funcCode == 0x10) {
+        if (payload.size() < 3) {
+            handleQjCustomLog(QString("[%1] Write Response from 0x%2: %3")
+                              .arg(timeStr)
+                              .arg(QString::number(srcAddr, 16).toUpper())
+                              .arg(QString(payload.toHex(' ').toUpper())));
+            return;
+        }
+
+        const quint16 startReg = (static_cast<quint8>(payload.at(0)) << 8) |
+                                 static_cast<quint8>(payload.at(1));
+        const quint8 count = static_cast<quint8>(payload.at(2));
+        const QString regText = QString("%1").arg(startReg, 4, 16, QChar('0')).toUpper();
+        handleQjCustomLog(QString("[%1] Write Response from 0x%2: startReg=0x%3 count=%4")
+                          .arg(timeStr)
+                          .arg(QString::number(srcAddr, 16).toUpper())
+                          .arg(regText)
+                          .arg(count));
     }
 }
 

@@ -72,6 +72,8 @@ private:
     void sendRfidFrame(UINT canId, const QByteArray &payload);
     void addCanFrameToList(const CanFrame &frame);
     void setLabelValue(QLabel *label, const QString &value);
+    bool parseQingjuAddress(const QString &text, quint8 *address, QString *error) const;
+    void clearQingjuRfidPanel();
     void setupCanLogSaveButton();
     void setupStatusPanel();
     void setupCompactMainLayout();
@@ -214,6 +216,7 @@ private slots:
     void updateQingjuRfidPanel(const QingjuNpkState &state);
     void onQjCustomWriteClicked();
     void onQjCustomReadClicked();
+    void handleQjCustomResponse(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload);
     void handleQjCustomLog(const QString &text);
     QWidget *createQjRfidMonitorPanel(QWidget *parent);
 
@@ -251,6 +254,9 @@ private:
     QPushButton *qjCustomWriteBtn;
     QPushButton *qjCustomReadBtn;
     QTextEdit *qjCustomLog;
+    bool qjCustomRequestPending;
+    quint8 qjCustomExpectedSrc;
+    quint8 qjCustomExpectedFunc;
 
     // 青桔 OTA 异常测试面板
     QGroupBox *qjOtaAnomalyGroup;

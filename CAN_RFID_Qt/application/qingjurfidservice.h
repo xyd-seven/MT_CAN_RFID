@@ -14,6 +14,7 @@ struct QingjuNpkState
     QByteArray assetData;
     quint16 alarm = 0;
     quint32 password = 0;
+    bool statusSample = false;
     
     QString statusText;
     QString uidText;

@@ -1,5 +1,7 @@
 ﻿#include "stresstestservice.h"
 
+#include "qingjurfidservice.h"
+
 #include <QDate>
 #include <QDir>
 
@@ -115,6 +117,73 @@ bool StressTestService::handleFrame(const CanFrame &frame)
     default:
         return false;
     }
+}
+
+bool StressTestService::handleQingjuState(const QingjuNpkState &state)
+{
+    if (!currentStats.running || !state.statusSample || state.statusText.isEmpty()) {
+        return false;
+    }
+
+    ++currentStats.totalSamples;
+    if (elapsedTimer.isValid()) {
+        currentStats.elapsedMilliseconds = elapsedTimer.elapsed();
+        currentStats.elapsedSeconds = currentStats.elapsedMilliseconds / 1000;
+    }
+
+    QString tagText = state.uidText.trimmed();
+    if (tagText.isEmpty()) {
+        tagText = QString("%1%2%3")
+            .arg(state.assetModel.trimmed(), state.assetSupplier.trimmed(), state.assetSerial.trimmed());
+    }
+    currentStats.currentTag = tagText;
+
+    bool success = false;
+    bool tagValid = isValidTagText(tagText);
+
+    switch (state.result) {
+    case 1:
+        success = true;
+        ++currentStats.successCount;
+        ++currentStats.currentContinuousSuccess;
+        currentStats.currentContinuousFailure = 0;
+        if (tagValid) {
+            ++currentStats.validTagCount;
+            currentStats.lastSuccessTag = tagText;
+            currentStats.lastFailureReason.clear();
+            currentStats.lastTagUpdateTime = QDateTime::currentDateTime();
+            if (!tagText.isEmpty()) {
+                uniqueTags.insert(tagText);
+                currentStats.uniqueTagCount = static_cast<quint64>(uniqueTags.size());
+            }
+        } else {
+            ++currentStats.tagContentErrorCount;
+            currentStats.lastFailureReason = QStringLiteral("识别成功但 UID 内容异常");
+        }
+        break;
+    case 2:
+        ++currentStats.noTagCount;
+        markFailure(QStringLiteral("未识别到 TAG"));
+        break;
+    case 3:
+        ++currentStats.tagLengthErrorCount;
+        markFailure(QStringLiteral("检测到标签，读取UID失败"));
+        break;
+    case 4:
+    case 5:
+    case 6:
+    case 7:
+        ++currentStats.moduleFaultCount;
+        markFailure(state.statusText);
+        break;
+    default:
+        markFailure(state.statusText.isEmpty() ? QStringLiteral("青桔读卡状态未知") : state.statusText);
+        break;
+    }
+
+    updateRates();
+    writeQingjuSampleCsv(state, success, tagValid);
+    return true;
 }
 
 StressTestStats StressTestService::stats() const
@@ -302,6 +371,41 @@ void StressTestService::writeSampleCsv(const CanFrame &frame, const RfidStatus &
            << currentStats.currentContinuousFailure << ','
            << currentStats.maxContinuousFailure << ','
            << (frame.hasZlgTimestamp ? QString::number(frame.zlgTimestampRaw) : QString()) << '\n';
+    ++pendingSampleRows;
+    if (pendingSampleRows >= FlushRowThreshold) {
+        sampleCsvFile.flush();
+        pendingSampleRows = 0;
+    }
+}
+
+void StressTestService::writeQingjuSampleCsv(const QingjuNpkState &state, bool success, bool tagValid)
+{
+    if (!autoSaveCsv) {
+        return;
+    }
+    ensureSampleCsvOpen();
+    if (!sampleCsvFile.isOpen()) {
+        return;
+    }
+
+    QTextStream stream(&sampleCsvFile);
+    stream << csvEscape(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")) << ','
+           << currentStats.elapsedMilliseconds << ','
+           << currentStats.totalSamples << ','
+           << "qingju" << ','
+           << static_cast<int>(state.result) << ','
+           << static_cast<int>(state.alarm) << ','
+           << QString() << ','
+           << csvEscape(currentStats.currentTag) << ','
+           << currentStats.currentTag.length() << ','
+           << (success ? "true" : "false") << ','
+           << (tagValid ? "true" : "false") << ','
+           << csvEscape(currentStats.lastFailureReason) << ','
+           << QString::number(currentStats.successRate, 'f', 2) << ','
+           << QString::number(currentStats.tagValidRate, 'f', 2) << ','
+           << currentStats.currentContinuousFailure << ','
+           << currentStats.maxContinuousFailure << ','
+           << csvEscape(state.statusText) << '\n';
     ++pendingSampleRows;
     if (pendingSampleRows >= FlushRowThreshold) {
         sampleCsvFile.flush();

@@ -2,6 +2,7 @@
 #include "canthread.h"
 #include "domain/crc16.h"
 #include <QDateTime>
+#include <QMutexLocker>
 #include <QThread>
 #include <QtGlobal>
 
@@ -26,7 +27,9 @@ void QingjuCanManager::handleIncomingFrame(const CanFrame &frame)
         return;
     }
 
-    quint16 key = (static_cast<quint16>(id.srcAddr) << 8) | id.queue;
+    quint32 key = (static_cast<quint32>(id.srcAddr) << 16) |
+                  (static_cast<quint32>(id.destAddr) << 8) |
+                  id.queue;
     qint64 now = QDateTime::currentMSecsSinceEpoch();
 
     AssemblyBuffer &buf = m_buffers[key];
@@ -106,6 +109,7 @@ bool QingjuCanManager::sendModbusRequest(quint8 destAddr, quint8 funcCode, const
     if (!m_canThread) {
         return false;
     }
+    QMutexLocker locker(&m_sendMutex);
 
     quint8 srcAddr = 0x01; // ECU 地址固定为 0x01
     QByteArray packet;

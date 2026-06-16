@@ -10,6 +10,8 @@
 #include "domain/canframe.h"
 #include "rfidprotocol.h"
 
+struct QingjuNpkState;
+
 struct StressTestStats
 {
     bool running = false;
@@ -48,6 +50,7 @@ public:
     bool autoSaveEnabled() const;
     bool exportSummary(const QString &filePath) const;
     bool handleFrame(const CanFrame &frame);
+    bool handleQingjuState(const QingjuNpkState &state);
     StressTestStats stats() const;
 
 private:
@@ -61,6 +64,7 @@ private:
     void markSuccess();
     void markFailure(const QString &reason);
     void writeSampleCsv(const CanFrame &frame, const RfidStatus &status, bool success, bool tagValid);
+    void writeQingjuSampleCsv(const QingjuNpkState &state, bool success, bool tagValid);
     void ensureSampleCsvOpen();
     QString csvEscape(const QString &value) const;
 

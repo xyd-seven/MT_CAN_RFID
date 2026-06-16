@@ -12,11 +12,18 @@
 - [x] 已实现美团协议 RFID 状态监测、TAG 分段显示和 OTA 升级流程。
 - [x] 已全面兼容青桔协议：
   - [x] 实现了 29-bit CAN ID 的位域编解码（优先级、源/目的地址、包队列、帧序号）。
-  - [x] 实现了 Modbus RTU 网络层分片传输与多帧拼包重组（按通道隔离、包去重、100ms 乱序超时清除）。
+  - [x] 实现了 Modbus RTU 网络层分片传输与多帧拼包重组（按源地址、目的地址、包队列隔离，包去重、100ms 乱序超时清除）。
   - [x] 实现了 NPK 周期状态轮询与一机一密解锁（动态根据 64位 UID 计算 32位密码并自动写入 `0xA902`/`0xA903`）。
   - [x] 实现了 NPK 开始检测时下发自定义标签读取间隔（范围 100~25500ms，写至 `0xA901` 低字节）。
   - [x] 实现了 RFR 固件升级状态机（握手进OTA、传输分块、确认升级）与 5 大异常注入 Case 模拟。
 - [x] 实现了青桔协议专属的“自定义寄存器读写调试”面板。
+- [x] 已完成青桔协议 P1/P2 修复：
+  - [x] 青桔压力测试不再发送美团 `0x207`，改为启动 NPK 周期读卡并接入成功率统计。
+  - [x] 青桔 OTA 查询 APP/BOOT 已补齐响应解析、超时提示和 UI 状态更新。
+  - [x] 青桔 OTA Worker 发送改为主线程队列发送，`QingjuCanManager` 增加发送互斥。
+  - [x] 青桔组包 key 已包含源地址、目的地址和包队列，避免不同目的地址响应串包。
+  - [x] 自定义寄存器读写面板已显示实际响应值，且自定义地址限制为 `0x00~0x3F`。
+  - [x] 青桔设备离线后会清空 UID、密码、资产信息、版本和 SN 等 UI 字段。
 - [x] 修复了主窗口构造中由于 `loadAppConfig` 提前调用导致的空指针闪退（SIGSEGV）问题。
 - [x] 修复了 `mainwindow.ui` 中 10 处中文字符的 UTF-8/GBK 乱码（Mojibake）问题。
 - [x] 配置了本地 MinGW 32-bit (Qt 5.15.2) 环境的编译并成功通过编译。
@@ -24,19 +31,19 @@
 
 ## 3. 当前任务
 
-当前任务：针对当前分支 `review-handoff-encoding-format` 下完成的代码进行提交并更新本交接文档，移交至下一阶段与实际硬件终端完成实机联调。
+当前任务：`qingju` 分支已完成青桔协议 P1/P2 修复并更新本交接文档，准备进入实际青桔 RFID 终端联调。
 
 ## 4. 关键设计决策
 
 - **协议兼容切换**：在左侧 CAN 配置区添加“协议模式”下拉选择框。通过 `QStackedWidget` 动态切换“美团监控”与“青桔监控”UI，并在底层对 CAN 接收数据进行分流（青桔协议数据进入 `QingjuCanManager` 组包后再路由至对应服务）。
-- **青桔 Modbus 重组设计**：使用 `AssemblyBuffer` 按 `(srcAddr, queue)` 键值隔离各链路。数据接收按帧索引重组，尾帧（index=0）到达且无区间缺失时触发拼包输出；帧间隔超过 100ms 自动清空残包防死锁。
+- **青桔 Modbus 重组设计**：使用 `AssemblyBuffer` 按 `(srcAddr, destAddr, queue)` 键值隔离各链路。数据接收按帧索引重组，尾帧（index=0）到达且无区间缺失时触发拼包输出；帧间隔超过 100ms 自动清空残包防死锁。
 - **一机一密动态密码**：
   - `PASSWORD[0] = UID[0] ^ UID[4] ^ 0x44`
   - `PASSWORD[1] = UID[1] ^ UID[5] ^ 0x64`
   - `PASSWORD[2] = UID[2] ^ UID[6] ^ 0x54`
   - `PASSWORD[3] = UID[3] ^ UID[7] ^ 0x67`
   计算出 32 位密码后，自动执行 `0xA902`/`0xA903` 寄存器写入，成功完成密钥解锁。
-- **自定义调试面板**：在青桔监控界面下方加入了功能码 `0x03`（读）、`0x06`/`0x10`（写）的通用调试接口，支持任意十六进制寄存器地址 and 数值交互。
+- **自定义调试面板**：在青桔监控界面下方加入了功能码 `0x03`（读）、`0x10`（带 ACK 写）、`0x90`（无 ACK 写）的通用调试接口，自定义目标地址按青桔 6-bit 地址范围限制为 `0x00~0x3F`。
 - **打包依赖管理**：通过 `windeployqt --compiler-runtime` 不仅打包了 Qt5 框架 DLL，也提取了 MinGW 编译器运行时 DLL (`libgcc_s_dw2-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`)，连同第三方的 `zlgcan.dll` 统一放置于 [CAN_RFID_Release](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Release) 发布包中，保证了真正的开箱即用。
 
 ## 5. 修改记录
@@ -49,6 +56,7 @@
 - `CAN_RFID_Qt/application/qingjucanmanager.h / .cpp` [NEW] (Modbus 分包与组包网络层)
 - `CAN_RFID_Qt/application/qingjurfidservice.h / .cpp` [NEW] (青桔 NPK 轮询解锁、标签周期设置等服务)
 - `CAN_RFID_Qt/application/qingjuotaservice.h / .cpp` [NEW] (青桔 RFR 固件升级与 5 大异常注入服务)
+- `CAN_RFID_Qt/application/stresstestservice.h / .cpp` (扩展青桔 NPK 状态压力测试统计与 CSV 自动保存)
 - `CAN_RFID_Qt/mainwindow.h / .cpp` (修复构造顺序闪退，集成协议模式切换、青桔专属 UI 及状态更新)
 - `CAN_RFID_Qt/mainwindow.ui` (彻底清除 GBK mojibake 乱码字符串)
 - `CAN_RFID_Release/` [NEW] (包含完整 DLL 依赖的无闪退、无乱码绿色发布版)
@@ -59,11 +67,12 @@
 - 无已确认 P0 问题。
 
 ### P1
-- 暂未接入实际硬件 CAN 卡和 RFID 终端（美团/青桔），协议在总线冲突下的高负载拼包性能及实机 OTA 升级成功率还有待验证。
+- 暂未接入实际青桔 RFID 终端，NPK 标签读取、一机一密解锁、RFR OTA 升级成功率仍需实机验证。
 
 ### P2
 - 未接 RFID 终端时，美团 `0x207` 日志可能出现非严格 100ms 连续显示（与底层 CAN 控制器重发/无 ACK 报错机制有关）。
 - 仓库 `.gitignore` 忽略了打包生成的发布包 `CAN_RFID_Release`，需在发布交付时手动提取压缩。
+- 当前自定义寄存器调试面板只跟踪最近一次手动请求，连续快速发送多条请求时建议等待上一条响应后再发送下一条。
 
 ## 7. 下一步任务
 
@@ -75,6 +84,7 @@
 ## 8. 测试状态
 
 - Release 编译：PASS (MinGW 32-bit 成功通过编译)
+- 青桔 P1/P2 修复 Release 编译：PASS (`F:\TestTools\MT_CAN\tmp\qingju_p1_fix_build\release\CAN_RFID.exe`)
 - 程序启动闪退检测：PASS (在没有任何 DLL 缺失的绿色发布目录下成功通过后台挂载及 tasklist 进程驻留验证，进程稳定且不再闪退)
 - 界面乱码清除：PASS (在 UI 文件重构后，程序界面文字中文编码完全正常)
 - 手动发送 CAN 帧 / 日志自动保存：PASS
