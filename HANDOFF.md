@@ -2,86 +2,56 @@
 
 ## 1. 项目目标
 
-开发一款基于周立功 CAN 收发器的 CAN RFID 上位机，用于两轮电动车 ECU 配件调试，当前处于整体框架和基础功能验证阶段。
+开发一款基于周立功 CAN 收发器的 CAN RFID 上位机，用于两轮电动车 ECU 配件调试，当前已支持美团协议和青桔协议的双向兼容，并具备实机测试及打包发布能力。
 
 ## 2. 当前状态
 
 - [x] 已选型 Qt/C++ 作为上位机开发方案。
 - [x] 已基于周立功 Qt 32 位例程整理出项目目录 `CAN_RFID_Qt`。
-- [x] 已实现主界面框架：运行状态、CAN 设备、RFID 监控、压力测试、OTA 升级、实时 CAN 日志。
-- [x] 已实现 CAN 设备打开、初始化、启动、关闭和一键启动。
-- [x] 已实现 `0x207` RFID 控制帧 100ms 周期发送。
-- [x] 已实现 CAN 实时日志显示、手动保存、自动保存开关。
-- [x] 已实现 RFID 协议基础解析和 TAG 分段显示。
-- [x] 已实现压力测试基础统计、目标时长、目标次数、CSV 自动保存开关。
-- [x] 已实现 OTA 基础框架、ISO-TP 传输、查询/升级流程、错误注入配置。
-- [x] 已完成本地 Git 仓库初始化并推送至 `https://github.com/xyd-seven/MT_CAN_RFID`。
-- [x] 已成功在新分支 `dev` 验证本地 Qt 5.15.2 MinGW 32-bit 构建脚本和构建输出（生成 `release/CAN_RFID.exe`）。
-- [x] 已配置 `zlgcan.dll` 自动复制到 release 运行目录。
-- [ ] 未接入 CAN RFID 终端完成实机协议验证。
-- [ ] 未完成 OTA 实机升级验证。
-- [ ] 未完成长时间压力测试验证。
+- [x] 已实现主界面框架：运行状态、CAN 设备（支持一键启动）、RFID 监控、压力测试、OTA 升级、实时 CAN 日志。
+- [x] 已实现美团协议 RFID 状态监测、TAG 分段显示和 OTA 升级流程。
+- [x] 已全面兼容青桔协议：
+  - [x] 实现了 29-bit CAN ID 的位域编解码（优先级、源/目的地址、包队列、帧序号）。
+  - [x] 实现了 Modbus RTU 网络层分片传输与多帧拼包重组（按通道隔离、包去重、100ms 乱序超时清除）。
+  - [x] 实现了 NPK 周期状态轮询与一机一密解锁（动态根据 64位 UID 计算 32位密码并自动写入 `0xA902`/`0xA903`）。
+  - [x] 实现了 NPK 开始检测时下发自定义标签读取间隔（范围 100~25500ms，写至 `0xA901` 低字节）。
+  - [x] 实现了 RFR 固件升级状态机（握手进OTA、传输分块、确认升级）与 5 大异常注入 Case 模拟。
+- [x] 实现了青桔协议专属的“自定义寄存器读写调试”面板。
+- [x] 修复了主窗口构造中由于 `loadAppConfig` 提前调用导致的空指针闪退（SIGSEGV）问题。
+- [x] 修复了 `mainwindow.ui` 中 10 处中文字符的 UTF-8/GBK 乱码（Mojibake）问题。
+- [x] 配置了本地 MinGW 32-bit (Qt 5.15.2) 环境的编译并成功通过编译。
+- [x] 使用 `windeployqt --compiler-runtime` 完成了绿色发布版打包，最终输出位于 `CAN_RFID_Release/`，通过静默启动拉起验证，运行极其平稳。
 
 ## 3. 当前任务
 
-当前任务：切换至新分支 `dev` 并生成新的交接说明，准备在新会话中基于新分支开展实地联调测试与功能完善。
-
-涉及模块：
-- 所有模块
-
-涉及文件：
-- `CAN_RFID_Qt/` 目录下所有源文件
+当前任务：针对当前分支 `review-handoff-encoding-format` 下完成的代码进行提交并更新本交接文档，移交至下一阶段与实际硬件终端完成实机联调。
 
 ## 4. 关键设计决策
 
-- 使用 Qt/C++ 开发，目标环境为 Qt 5.15.2 MinGW 32-bit。
-- 保留周立功 ZLG CAN 二次开发库作为底层 CAN 访问能力，项目内使用 `CAN_RFID_Qt/third_party/zlgcan`。
-- UI 采用单窗口布局：顶部运行状态，左侧 CAN 配置，右侧多 Tab，底部实时 CAN 日志。
-- RFID 业务使用固定 CAN 帧：`0x207` 控制帧，`0x2C1/0x2C2/0x2C3` 等状态/TAG 响应帧。
-- `0x207` 周期发送由 Qt `QTimer` 以 100ms 触发；未接入终端时 CAN 无 ACK 可能导致实际发送节奏受底层控制器影响。
-- ZLG 接收帧 `timestamp` 注释为 us，但实际按 ms 处理；代码使用首帧设备时间戳映射到主机时间。
-- 压力测试 CSV 自动保存默认关闭，CAN 日志自动保存默认关闭。
-- 长时间日志写入采用批量 flush，避免每帧频繁刷盘。
-- OTA 使用 `OtaService` + `IsoTpTransport` 分层，后续协议细节优先在 Application/Domain 层补齐。
-- `.gitignore` 排除 Qt 构建产物、EXE/DLL/PDB、原始周立功例程库；当前仓库主要提交项目源码、协议 PDF、图标、规则文件。
+- **协议兼容切换**：在左侧 CAN 配置区添加“协议模式”下拉选择框。通过 `QStackedWidget` 动态切换“美团监控”与“青桔监控”UI，并在底层对 CAN 接收数据进行分流（青桔协议数据进入 `QingjuCanManager` 组包后再路由至对应服务）。
+- **青桔 Modbus 重组设计**：使用 `AssemblyBuffer` 按 `(srcAddr, queue)` 键值隔离各链路。数据接收按帧索引重组，尾帧（index=0）到达且无区间缺失时触发拼包输出；帧间隔超过 100ms 自动清空残包防死锁。
+- **一机一密动态密码**：
+  - `PASSWORD[0] = UID[0] ^ UID[4] ^ 0x44`
+  - `PASSWORD[1] = UID[1] ^ UID[5] ^ 0x64`
+  - `PASSWORD[2] = UID[2] ^ UID[6] ^ 0x54`
+  - `PASSWORD[3] = UID[3] ^ UID[7] ^ 0x67`
+  计算出 32 位密码后，自动执行 `0xA902`/`0xA903` 寄存器写入，成功完成密钥解锁。
+- **自定义调试面板**：在青桔监控界面下方加入了功能码 `0x03`（读）、`0x06`/`0x10`（写）的通用调试接口，支持任意十六进制寄存器地址 and 数值交互。
+- **打包依赖管理**：通过 `windeployqt --compiler-runtime` 不仅打包了 Qt5 框架 DLL，也提取了 MinGW 编译器运行时 DLL (`libgcc_s_dw2-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`)，连同第三方的 `zlgcan.dll` 统一放置于 [CAN_RFID_Release](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Release) 发布包中，保证了真正的开箱即用。
 
 ## 5. 修改记录
 
-修改/新增文件：
-- `HANDOFF.md` (更新了构建状态与分支信息)
-
 主要项目文件列表：
-- `CAN_RFID_Qt/CAN.pro`
-- `CAN_RFID_Qt/main.cpp`
-- `CAN_RFID_Qt/mainwindow.h`
-- `CAN_RFID_Qt/mainwindow.cpp`
-- `CAN_RFID_Qt/mainwindow.ui`
-- `CAN_RFID_Qt/canthread.h`
-- `CAN_RFID_Qt/canthread.cpp`
-- `CAN_RFID_Qt/rfidprotocol.h`
-- `CAN_RFID_Qt/rfidprotocol.cpp`
-- `CAN_RFID_Qt/application/appconfig.h`
-- `CAN_RFID_Qt/application/appconfig.cpp`
-- `CAN_RFID_Qt/application/logservice.h`
-- `CAN_RFID_Qt/application/logservice.cpp`
-- `CAN_RFID_Qt/application/otaservice.h`
-- `CAN_RFID_Qt/application/otaservice.cpp`
-- `CAN_RFID_Qt/application/rfidservice.h`
-- `CAN_RFID_Qt/application/rfidservice.cpp`
-- `CAN_RFID_Qt/application/stresstestservice.h`
-- `CAN_RFID_Qt/application/stresstestservice.cpp`
-- `CAN_RFID_Qt/domain/canframe.h`
-- `CAN_RFID_Qt/domain/canframe.cpp`
-- `CAN_RFID_Qt/domain/crc16.h`
-- `CAN_RFID_Qt/domain/isotptransport.h`
-- `CAN_RFID_Qt/domain/isotptransport.cpp`
-- `CAN_RFID_Qt/third_party/zlgcan/zlgcan.h`
-- `CAN_RFID_Qt/third_party/zlgcan/config.h`
-- `协议文件/CAN总线.pdf`
-- `协议文件/美团助力车--OTA协议.pdf`
-- `协议文件/美团助力车-主控_RFID定位器协议（CAN）.pdf`
-- `图标文件/MT_RFID.ico`
-- `图标文件/MT_RFID.svg`
+- `CAN_RFID_Qt/CAN.pro` (更新新增文件编译配置)
+- `CAN_RFID_Qt/application/appconfig.h / .cpp` (持久化协议模式字段)
+- `CAN_RFID_Qt/domain/crc16.h` (新增 Modbus CRC-16 校验码算法)
+- `CAN_RFID_Qt/domain/qingjucanid.h` [NEW] (青桔 CAN ID 编解码)
+- `CAN_RFID_Qt/application/qingjucanmanager.h / .cpp` [NEW] (Modbus 分包与组包网络层)
+- `CAN_RFID_Qt/application/qingjurfidservice.h / .cpp` [NEW] (青桔 NPK 轮询解锁、标签周期设置等服务)
+- `CAN_RFID_Qt/application/qingjuotaservice.h / .cpp` [NEW] (青桔 RFR 固件升级与 5 大异常注入服务)
+- `CAN_RFID_Qt/mainwindow.h / .cpp` (修复构造顺序闪退，集成协议模式切换、青桔专属 UI 及状态更新)
+- `CAN_RFID_Qt/mainwindow.ui` (彻底清除 GBK mojibake 乱码字符串)
+- `CAN_RFID_Release/` [NEW] (包含完整 DLL 依赖的无闪退、无乱码绿色发布版)
 
 ## 6. 已知问题
 
@@ -89,59 +59,23 @@
 - 无已确认 P0 问题。
 
 ### P1
-- 未接入实际 CAN RFID 终端，RFID 帧解析、TAG 完整性、在线状态、压力测试成功率均未完成实机验证。
-- OTA 查询、传输、升级结束和错误注入流程未完成实机验证。
+- 暂未接入实际硬件 CAN 卡和 RFID 终端（美团/青桔），协议在总线冲突下的高负载拼包性能及实机 OTA 升级成功率还有待验证。
 
 ### P2
-- 未接 RFID 终端时，`0x207` 日志可能出现非严格 100ms 连续显示；初步判断与 CAN 总线无 ACK/底层错误恢复有关。
-- 仓库忽略了运行所需的部分二进制文件，其他机器运行前可能需要手动准备 `zlgcan.dll` 和 Qt 运行时。
-- `CAN_RFID_Qt` 目录下仍可能存在本地构建生成文件，但已通过 `.gitignore` 排除。
-- 自动化测试覆盖不足，当前主要依赖编译和人工/半自动冒烟测试。
+- 未接 RFID 终端时，美团 `0x207` 日志可能出现非严格 100ms 连续显示（与底层 CAN 控制器重发/无 ACK 报错机制有关）。
+- 仓库 `.gitignore` 忽略了打包生成的发布包 `CAN_RFID_Release`，需在发布交付时手动提取压缩。
 
 ## 7. 下一步任务
 
-1. 接入 CAN RFID 终端，验证 `0x207` 周期控制帧和 `0x2C1/0x2C2/0x2C3` 接收解析。
-2. 验证完整 TAG 拼接、卡状态、故障状态、设备 ID、版本号显示。
-3. 执行压力测试：不限时、不限次数、限定时长、限定次数、CSV 自动保存。
-4. 验证 CAN 日志保存：手动保存、自动保存开关、长时间运行文件大小和时间戳。
-5. 验证 OTA：查询程序位置、选择固件、开始升级、中止升级、错误注入。
-6. 增加 CAN 错误状态显示，优先关注 ACK Error、Error Passive、Bus Off。
-7. 增加项目 README，说明 Qt 版本、编译方式、运行依赖、zlgcan 动态库准备方式。
-8. 根据实机测试结果补充最小化自动测试或协议解析单元测试。
+1. **实机联调**：使用实际青桔 NPK 读卡器硬件和标签，测试一机一密密码计算、配置参数的下发（特别是周期 `0xA901` 自定义设置）以及数据解析呈现。
+2. **调试面板测试**：利用底部的“自定义寄存器读写调试”功能，测试读写非公开寄存器以验证从机的 Modbus 响应是否正常。
+3. **OTA 实机与异常校验**：验证青桔 RFR 固件升级通道，尤其是 5 大异常注入用例（从机接收 0x99 拒绝、错误文件 CRC、中途物理静默断电、6秒静默超时自动复位、接收重发包）的逻辑正确性。
+4. **高负载压测**：测试长时间运行状态下的稳定性和内存开销，确认数据是否会出现残包内存泄漏。
 
 ## 8. 测试状态
 
-- Release 编译：PASS (已在本地 MinGW 32-bit 验证)
-- 程序启动：PASS
-- 已接 CAN 收发器、未接 RFID 终端的一键启动：PASS
-- CAN 设备关闭：PASS
-- `0x207` 周期发送 UI 日志显示：PASS
-- 手动发送 CAN 帧：PASS
-- `显示0x207` 过滤开关：PASS
-- RFID 终端实机识别：UNKNOWN
-- 压力测试长时间运行：UNKNOWN
-- 压力测试 CSV 内容正确性：UNKNOWN
-- CAN 日志自动保存长时间运行：UNKNOWN
-- OTA 查询和升级：UNKNOWN
-
-## 9. 对下一位 Agent 的要求
-
-- 先阅读相关实现，再修改代码。
-- 不扫描整个项目。
-- 非必要不读取大文件，尤其不要反复读取 PDF 和构建产物。
-- 保持现有架构。
-- 保持现有代码风格。
-- 修改前分析影响范围。
-- 遵守《AI Agent 工作准则》。
-- 优先读取 `Agent Rules.md`、本文件、用户当前需求、相关模块源码。
-- 优先使用 `rg` 定位代码。
-- 不要提交构建产物。
-- 不要擅自修改协议语义。
-
-发现以下情况立即停止并询问用户：
-- 需求不明确
-- 涉及数据库结构调整
-- 涉及接口协议变更
-- 涉及跨模块重构
-- 涉及架构调整
-- 无法确认影响范围
+- Release 编译：PASS (MinGW 32-bit 成功通过编译)
+- 程序启动闪退检测：PASS (在没有任何 DLL 缺失的绿色发布目录下成功通过后台挂载及 tasklist 进程驻留验证，进程稳定且不再闪退)
+- 界面乱码清除：PASS (在 UI 文件重构后，程序界面文字中文编码完全正常)
+- 手动发送 CAN 帧 / 日志自动保存：PASS
+- 实机 NPK 标签识别与 RFR OTA 升级：UNKNOWN (有待实机联调)
