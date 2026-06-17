@@ -261,6 +261,13 @@ private:
     QSpinBox *qjRfidPeriodSpin;
     QPushButton *qjStartBtn;
     QPushButton *qjStopBtn;
+    QCheckBox *qjAutoWritePwdCheckBox;
+    QComboBox *qjTargetDeviceCombo;
+    QComboBox *qjQueryModeCombo;
+    QSpinBox *qjHostPollPeriodSpin;
+    QPushButton *qjDistanceQueryOnceBtn;
+    QGroupBox *qjRfidAssetGroup;
+    QGroupBox *qjRfidStatusGroup;
 
     // 青桔 NPK 监控标签
     QLabel *qjRfidAddrValue;
@@ -272,6 +279,10 @@ private:
     QLabel *qjRfidModelValue;
     QLabel *qjRfidSupplierValue;
     QLabel *qjRfidSerialValue;
+    QLabel *qjRfidVendorValue;
+    QLabel *qjRfidModelCodeValue;
+    QLabel *qjRfidFwStrValue;
+    QLabel *qjRfidHwStrValue;
     QLabel *qjRfidSnValue;
     QLabel *qjRfidFirmwareVerValue;
     QLabel *qjRfidHardwareVerValue;

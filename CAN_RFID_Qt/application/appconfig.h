@@ -20,6 +20,10 @@ struct AppConfigData
     bool rfidControlEnabled = true;
     bool show0x207Log = true;
     int protocolMode = 0; // 0: Meituan, 1: Qingju
+    bool qjAutoWritePwd = false;
+    int qjTargetDevice = 0x0A;
+    int qjQueryMode = 0; // 0: Auto Poll, 1: Single Query
+    int qjHostPollIntervalMs = 500;
 };
 
 class AppConfig

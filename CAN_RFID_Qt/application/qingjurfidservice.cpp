@@ -5,36 +5,43 @@ QingjuRfidService::QingjuRfidService(QingjuCanManager *canManager, QObject *pare
     : QObject(parent)
     , m_canManager(canManager)
     , m_isScanning(false)
+    , m_autoWritePassword(false)
+    , m_targetAddress(0x0A)
+    , m_infoStep(0)
+    , m_readMode(1)
 {
     m_pollTimer = new QTimer(this);
     m_pollTimer->setInterval(500);
     connect(m_pollTimer, &QTimer::timeout, this, &QingjuRfidService::onPollTimeout);
 
+    m_deviceInfoTimer = new QTimer(this);
+    m_deviceInfoTimer->setSingleShot(true);
+    connect(m_deviceInfoTimer, &QTimer::timeout, this, &QingjuRfidService::onDeviceInfoTimerTimeout);
+
     connect(m_canManager, &QingjuCanManager::modbusPacketReceived, this, &QingjuRfidService::onModbusPacketReceived);
 }
 
-void QingjuRfidService::startScan(int intervalMs)
+void QingjuRfidService::startScan(int intervalMs, int hostPollIntervalMs, int readMode)
 {
     if (m_isScanning) return;
     
     m_isScanning = true;
     m_lastUid.clear();
+    m_readMode = readMode;
 
-    // 1. 发送启动指令：写寄存器 0xA900 = 1, 0xA901 = 0x8000 | (intervalMs / 100) (高字节使能 bit7=1，低字节为周期，单位100ms)
-    quint8 periodVal = static_cast<quint8>(qBound(100, intervalMs, 25500) / 100);
-    quint16 configVal = 0x8000 | periodVal;
-    QVector<quint16> startVals = { 1, configVal };
-    m_canManager->writeRegisters(0x0A, 0xA900, startVals);
+    // 1. 仅 NPK (0x0A) 支持发送启动读卡指令（0xA900 = readMode, 0xA901 周期设置）
+    if (m_targetAddress == 0x0A) {
+        quint8 periodVal = static_cast<quint8>(qBound(100, intervalMs, 25500) / 100);
+        quint16 configVal = 0x8000 | periodVal;
+        QVector<quint16> startVals = { static_cast<quint16>(readMode), configVal };
+        m_canManager->writeRegisters(0x0A, 0xA900, startVals);
+    }
 
-    // 2. 发送读取版本和硬件版本指令（从 0xA002 读取 3 个寄存器：0xA002, 0xA003, 0xA004）
-    m_canManager->readRegisters(0x0A, 0xA002, 3);
+    // 保存轮询间隔
+    m_pollTimer->setInterval(hostPollIntervalMs);
 
-    // 3. 发送读取 SN 指令（从 0xA00D 读取 8 个寄存器）
-    m_canManager->readRegisters(0x0A, 0xA00D, 8);
-
-    // 4. 开启 500ms 周期轮询
-    m_pollTimer->start();
-    onPollTimeout(); // 立即执行一次轮询
+    // 2. 串行获取设备静态信息（0xA002, 0xA005, 0xA00D, 0xA015, 0xA016, 0xA020）
+    queryDeviceInfo();
 }
 
 void QingjuRfidService::stopScan()
@@ -43,10 +50,16 @@ void QingjuRfidService::stopScan()
 
     m_isScanning = false;
     m_pollTimer->stop();
+    if (m_deviceInfoTimer != nullptr) {
+        m_deviceInfoTimer->stop();
+    }
+    m_infoStep = 0;
 
-    // 发送停止指令：写寄存器 0xA900 = 1, 0xA901 = 0x0000 (高字节 bit7=0 关闭)
-    QVector<quint16> stopVals = { 1, 0x0000 };
-    m_canManager->writeRegisters(0x0A, 0xA900, stopVals);
+    // 仅 NPK (0x0A) 发送停止读卡指令
+    if (m_targetAddress == 0x0A) {
+        QVector<quint16> stopVals = { static_cast<quint16>(m_readMode), 0x0000 };
+        m_canManager->writeRegisters(0x0A, 0xA900, stopVals);
+    }
 }
 
 void QingjuRfidService::reset()
@@ -57,21 +70,50 @@ void QingjuRfidService::reset()
     emit stateUpdated(m_state);
 }
 
+void QingjuRfidService::triggerSingleQuery()
+{
+    if (!m_isScanning) return;
+
+    if (m_targetAddress == 0x0A) {
+        m_canManager->readRegisters(0x0A, 0xA904, 22);
+        m_canManager->readRegisters(0x0A, 0xA02A, 1);
+    } else {
+        m_canManager->readRegisters(m_targetAddress, 0xA02A, 1);
+    }
+}
+
+void QingjuRfidService::startPollingOrSingleQuery()
+{
+    if (!m_isScanning) return;
+
+    if (m_readMode == 1) {
+        if (!m_pollTimer->isActive()) {
+            m_pollTimer->start();
+            onPollTimeout(); // 立即执行一次轮询
+        }
+    } else {
+        triggerSingleQuery();
+    }
+}
+
 void QingjuRfidService::onPollTimeout()
 {
     if (!m_isScanning) return;
 
-    // 周期查询：NPK 状态寄存器 (0xA904 至 0xA919，共 22 个寄存器)
-    m_canManager->readRegisters(0x0A, 0xA904, 22);
-
-    // 周期查询：从机程序状态 (0xA02A，共 1 个寄存器)
-    m_canManager->readRegisters(0x0A, 0xA02A, 1);
+    if (m_targetAddress == 0x0A) {
+        // NPK 轮询：1. NFC状态 (0xA904), 2. 程序状态 (0xA02A)
+        m_canManager->readRegisters(0x0A, 0xA904, 22);
+        m_canManager->readRegisters(0x0A, 0xA02A, 1);
+    } else {
+        // RFR 轮询：仅轮询程序状态 (0xA02A)
+        m_canManager->readRegisters(m_targetAddress, 0xA02A, 1);
+    }
 }
 
 void QingjuRfidService::onModbusPacketReceived(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload)
 {
-    // 只处理来自 NPK 设备 (0x0A) 且发送给中控 (0x01) 的读响应 (0x03)
-    if (srcAddr != 0x0A || destAddr != 0x01 || funcCode != 0x03) {
+    // 只处理来自当前所选目标设备且发送给中控 (0x01) 的读响应 (0x03)
+    if (srcAddr != m_targetAddress || destAddr != 0x01 || funcCode != 0x03) {
         return;
     }
 
@@ -86,21 +128,68 @@ void QingjuRfidService::onModbusPacketReceived(quint8 srcAddr, quint8 destAddr, 
         return; // 数据不全
     }
 
-    switch (byteCount) {
-    case 44: // NPK 状态数据 (0xA904 ~ 0xA919)
+    // 处理周期轮询的响应包
+    if (byteCount == 44) {
         parseStatusData(data);
+        return;
+    }
+
+    // 根据串行请求步骤匹配并解析对应的响应包
+    bool stepHandled = false;
+    switch (m_infoStep) {
+    case 1: // 期待读取版本 (0xA002 ~ 0xA004) -> 6 字节
+        if (byteCount == 6) {
+            parseVersionData(data);
+            stepHandled = true;
+        }
         break;
-    case 16: // 设备 SN (0xA00D)
-        parseSnData(data);
+    case 2: // 期待读取制造厂信息 (0xA005) -> 16 字节
+        if (byteCount == 16) {
+            parseVendorData(data);
+            stepHandled = true;
+        }
         break;
-    case 6:  // 版本信息 (0xA002 ~ 0xA004)
-        parseVersionData(data);
+    case 3: // 期待读取设备 SN (0xA00D) -> 16 字节
+        if (byteCount == 16) {
+            parseSnData(data);
+            stepHandled = true;
+        }
         break;
-    case 2:  // 程序状态 (0xA02A)
-        parseAppStatusData(data);
+    case 4: // 期待读取型号编码 (0xA015) -> 2 字节
+        if (byteCount == 2) {
+            parseModelData(data);
+            stepHandled = true;
+        }
+        break;
+    case 5: // 期待读取固件标识串 (0xA016) -> 20 字节
+        if (byteCount == 20) {
+            parseFwStrData(data);
+            stepHandled = true;
+        }
+        break;
+    case 6: // 期待读取硬件标识串 (0xA020) -> 20 字节
+        if (byteCount == 20) {
+            parseHwStrData(data);
+            stepHandled = true;
+        }
         break;
     default:
         break;
+    }
+
+    // 如果是由串行单次查询触发并成功处理的，立即步进到下一步
+    if (stepHandled) {
+        m_infoStep++;
+        sendDeviceInfoRequest();
+        if (m_isScanning && m_deviceInfoTimer != nullptr) {
+            m_deviceInfoTimer->start(200); // 重新启动单次超时定时器
+        }
+        return;
+    }
+
+    // 处理其余未被步骤绑定的包 (比如定时器单独周期轮询的 0xA02A 程序状态)
+    if (byteCount == 2) {
+        parseAppStatusData(data);
     }
 }
 
@@ -253,6 +342,113 @@ void QingjuRfidService::calculatePassword(const QByteArray &uid)
     m_state.password = (static_cast<quint32>(pwd_high) << 16) | pwd_low;
 
     // 自动下发一机一密解锁：写入 0xA902(高16位), 0xA903(低16位)
-    QVector<quint16> pwdVals = { pwd_high, pwd_low };
-    m_canManager->writeRegisters(0x0A, 0xA902, pwdVals);
+    if (m_autoWritePassword) {
+        QVector<quint16> pwdVals = { pwd_high, pwd_low };
+        m_canManager->writeRegisters(0x0A, 0xA902, pwdVals);
+    }
+}
+
+void QingjuRfidService::setAutoWritePassword(bool enabled)
+{
+    m_autoWritePassword = enabled;
+}
+
+void QingjuRfidService::setTargetAddress(quint8 addr)
+{
+    if (m_targetAddress == addr) return;
+    m_targetAddress = addr;
+    m_lastUid.clear();
+    
+    // 重置相关状态数据
+    QingjuNpkState newState;
+    newState.password = m_state.password; // 保留密码缓存
+    m_state = newState;
+    emit stateUpdated(m_state);
+}
+
+void QingjuRfidService::queryDeviceInfo()
+{
+    if (!m_isScanning) return;
+    m_infoStep = 1;
+    sendDeviceInfoRequest();
+    if (m_deviceInfoTimer != nullptr) {
+        m_deviceInfoTimer->start(200); // 200ms 超时守护
+    }
+}
+
+void QingjuRfidService::sendDeviceInfoRequest()
+{
+    if (!m_isScanning) {
+        if (m_deviceInfoTimer != nullptr) m_deviceInfoTimer->stop();
+        m_infoStep = 0;
+        return;
+    }
+
+    switch (m_infoStep) {
+    case 1:
+        m_canManager->readRegisters(m_targetAddress, 0xA002, 3);
+        break;
+    case 2:
+        m_canManager->readRegisters(m_targetAddress, 0xA005, 8);
+        break;
+    case 3:
+        m_canManager->readRegisters(m_targetAddress, 0xA00D, 8);
+        break;
+    case 4:
+        m_canManager->readRegisters(m_targetAddress, 0xA015, 1);
+        break;
+    case 5:
+        m_canManager->readRegisters(m_targetAddress, 0xA016, 10);
+        break;
+    case 6:
+        m_canManager->readRegisters(m_targetAddress, 0xA020, 10);
+        break;
+    default:
+        if (m_deviceInfoTimer != nullptr) m_deviceInfoTimer->stop();
+        m_infoStep = 0;
+        startPollingOrSingleQuery();
+        break;
+    }
+}
+
+void QingjuRfidService::onDeviceInfoTimerTimeout()
+{
+    if (!m_isScanning) return;
+    m_infoStep++;
+    sendDeviceInfoRequest();
+    if (m_infoStep > 0 && m_infoStep <= 6) {
+        m_deviceInfoTimer->start(200); // 继续启动下一个 200ms 的超时定时器
+    }
+}
+
+void QingjuRfidService::parseVendorData(const QByteArray &data)
+{
+    if (data.size() < 16) return;
+    m_state.vendorInfo = QString::fromLatin1(data.left(16)).trimmed();
+    emit stateUpdated(m_state);
+}
+
+void QingjuRfidService::parseModelData(const QByteArray &data)
+{
+    if (data.size() < 2) return;
+    quint8 hwCode = static_cast<quint8>(data.at(0));
+    quint8 custCode = static_cast<quint8>(data.at(1));
+    m_state.modelCodeText = QString("HW:0x%1 / Cust:0x%2")
+                            .arg(QString("%1").arg(hwCode, 2, 16, QChar('0')).toUpper())
+                            .arg(QString("%1").arg(custCode, 2, 16, QChar('0')).toUpper());
+    emit stateUpdated(m_state);
+}
+
+void QingjuRfidService::parseFwStrData(const QByteArray &data)
+{
+    if (data.size() < 20) return;
+    m_state.fwVersionStr = QString::fromLatin1(data.left(20)).trimmed();
+    emit stateUpdated(m_state);
+}
+
+void QingjuRfidService::parseHwStrData(const QByteArray &data)
+{
+    if (data.size() < 20) return;
+    m_state.hwVersionStr = QString::fromLatin1(data.left(20)).trimmed();
+    emit stateUpdated(m_state);
 }

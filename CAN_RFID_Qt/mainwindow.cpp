@@ -147,7 +147,18 @@ MainWindow::MainWindow(QWidget *parent) :
     qjOtaAnomalyEnableCheck(nullptr),
     qjRfidPeriodSpin(nullptr),
     qjStartBtn(nullptr),
-    qjStopBtn(nullptr)
+    qjStopBtn(nullptr),
+    qjAutoWritePwdCheckBox(nullptr),
+    qjTargetDeviceCombo(nullptr),
+    qjQueryModeCombo(nullptr),
+    qjHostPollPeriodSpin(nullptr),
+    qjDistanceQueryOnceBtn(nullptr),
+    qjRfidAssetGroup(nullptr),
+    qjRfidStatusGroup(nullptr),
+    qjRfidVendorValue(nullptr),
+    qjRfidModelCodeValue(nullptr),
+    qjRfidFwStrValue(nullptr),
+    qjRfidHwStrValue(nullptr)
 {
     ui->setupUi(this);
     setWindowIcon(QIcon(":/images/MT_RFID.png"));
@@ -686,6 +697,9 @@ void MainWindow::updateControlsState()
         if (qjStartBtn != nullptr) qjStartBtn->setEnabled(false);
         if (qjStopBtn != nullptr) qjStopBtn->setEnabled(false);
         if (qjRfidPeriodSpin != nullptr) qjRfidPeriodSpin->setEnabled(false);
+        if (qjQueryModeCombo != nullptr) qjQueryModeCombo->setEnabled(false);
+        if (qjHostPollPeriodSpin != nullptr) qjHostPollPeriodSpin->setEnabled(false);
+        if (qjDistanceQueryOnceBtn != nullptr) qjDistanceQueryOnceBtn->setEnabled(false);
 
         // 禁用压力测试控制
         if (stressStartBtn != nullptr) stressStartBtn->setEnabled(false);
@@ -729,6 +743,9 @@ void MainWindow::updateControlsState()
         if (qjStartBtn != nullptr) qjStartBtn->setEnabled(false);
         if (qjStopBtn != nullptr) qjStopBtn->setEnabled(false);
         if (qjRfidPeriodSpin != nullptr) qjRfidPeriodSpin->setEnabled(false);
+        if (qjQueryModeCombo != nullptr) qjQueryModeCombo->setEnabled(false);
+        if (qjHostPollPeriodSpin != nullptr) qjHostPollPeriodSpin->setEnabled(false);
+        if (qjDistanceQueryOnceBtn != nullptr) qjDistanceQueryOnceBtn->setEnabled(false);
 
         // 限制压力测试操作：仅允许停止，锁定参数配置与重置
         if (stressStartBtn != nullptr) stressStartBtn->setEnabled(false);
@@ -774,6 +791,18 @@ void MainWindow::updateControlsState()
         if (qjStartBtn != nullptr) qjStartBtn->setEnabled(canStarted && !qjScanning);
         if (qjStopBtn != nullptr) qjStopBtn->setEnabled(canStarted && qjScanning);
         if (qjRfidPeriodSpin != nullptr) qjRfidPeriodSpin->setEnabled(canStarted && !qjScanning);
+
+        bool isAutoPoll = true;
+        if (qjQueryModeCombo != nullptr) {
+            isAutoPoll = (qjQueryModeCombo->currentIndex() == 0);
+            qjQueryModeCombo->setEnabled(canStarted && !qjScanning);
+        }
+        if (qjHostPollPeriodSpin != nullptr) {
+            qjHostPollPeriodSpin->setEnabled(canStarted && !qjScanning && isAutoPoll);
+        }
+        if (qjDistanceQueryOnceBtn != nullptr) {
+            qjDistanceQueryOnceBtn->setEnabled(canStarted && qjScanning && !isAutoPoll);
+        }
 
         // 根据 CAN 启动状态使能压力测试控制
         if (stressStartBtn != nullptr) stressStartBtn->setEnabled(canStarted);
@@ -1733,6 +1762,10 @@ void MainWindow::clearQingjuRfidPanel()
     setLabelValue(qjRfidSnValue, QString());
     setLabelValue(qjRfidFirmwareVerValue, QString());
     setLabelValue(qjRfidHardwareVerValue, QString());
+    setLabelValue(qjRfidVendorValue, QString());
+    setLabelValue(qjRfidModelCodeValue, QString());
+    setLabelValue(qjRfidFwStrValue, QString());
+    setLabelValue(qjRfidHwStrValue, QString());
 }
 
 void MainWindow::updateQingjuOnlineStatus(bool clearOfflineData)
@@ -1777,7 +1810,17 @@ void MainWindow::updateQingjuOnlineStatus(bool clearOfflineData)
         }
     }
 
-    if (clearOfflineData && !npkOnline) {
+    bool isTargetOffline = false;
+    if (qingjuRfidService != nullptr) {
+        if (qingjuRfidService->targetAddress() == 0x0A) {
+            isTargetOffline = !npkOnline;
+        } else {
+            isTargetOffline = !rfrOnline;
+        }
+    } else {
+        isTargetOffline = !npkOnline;
+    }
+    if (clearOfflineData && isTargetOffline) {
         clearQingjuRfidPanel();
     }
 }
@@ -2018,6 +2061,48 @@ void MainWindow::loadAppConfig()
         canAutoSaveCheckBox->setChecked(config.canAutoSaveCsv);
         canAutoSaveCheckBox->blockSignals(false);
     }
+    if (qjAutoWritePwdCheckBox != nullptr) {
+        qjAutoWritePwdCheckBox->blockSignals(true);
+        qjAutoWritePwdCheckBox->setChecked(config.qjAutoWritePwd);
+        qjAutoWritePwdCheckBox->blockSignals(false);
+    }
+    if (qjTargetDeviceCombo != nullptr) {
+        qjTargetDeviceCombo->blockSignals(true);
+        int idx = qjTargetDeviceCombo->findData(config.qjTargetDevice);
+        if (idx >= 0) {
+            qjTargetDeviceCombo->setCurrentIndex(idx);
+        }
+        qjTargetDeviceCombo->blockSignals(false);
+    }
+    if (qjQueryModeCombo != nullptr) {
+        qjQueryModeCombo->blockSignals(true);
+        qjQueryModeCombo->setCurrentIndex(qBound(0, config.qjQueryMode, qjQueryModeCombo->count() - 1));
+        qjQueryModeCombo->blockSignals(false);
+    }
+    if (qjHostPollPeriodSpin != nullptr) {
+        qjHostPollPeriodSpin->blockSignals(true);
+        qjHostPollPeriodSpin->setValue(qBound(100, config.qjHostPollIntervalMs, 10000));
+        qjHostPollPeriodSpin->blockSignals(false);
+    }
+    if (qingjuRfidService != nullptr) {
+        qingjuRfidService->setAutoWritePassword(config.qjAutoWritePwd);
+        qingjuRfidService->setTargetAddress(config.qjTargetDevice);
+        
+        bool isNpk = (config.qjTargetDevice == 0x0A);
+        if (qjRfidAddrValue != nullptr) {
+            qjRfidAddrValue->setText(QString("0x%1").arg(config.qjTargetDevice, 2, 16, QChar('0')).toUpper());
+        }
+        if (qjAutoWritePwdCheckBox != nullptr) {
+            qjAutoWritePwdCheckBox->setEnabled(isNpk);
+        }
+        if (qjRfidAssetGroup != nullptr) {
+            qjRfidAssetGroup->setEnabled(isNpk);
+        }
+        if (qjRfidResultValue != nullptr) qjRfidResultValue->setEnabled(isNpk);
+        if (qjRfidAlarmValue != nullptr) qjRfidAlarmValue->setEnabled(isNpk);
+        if (qjRfidUidValue != nullptr) qjRfidUidValue->setEnabled(isNpk);
+        if (qjRfidPwdValue != nullptr) qjRfidPwdValue->setEnabled(isNpk);
+    }
     if (protocolModeCombo != nullptr) {
         protocolModeCombo->setCurrentIndex(qBound(0, config.protocolMode, 1));
         onProtocolModeChanged(protocolModeCombo->currentIndex());
@@ -2058,6 +2143,18 @@ void MainWindow::saveAppConfig()
     }
     if (protocolModeCombo != nullptr) {
         config.protocolMode = protocolModeCombo->currentIndex();
+    }
+    if (qjAutoWritePwdCheckBox != nullptr) {
+        config.qjAutoWritePwd = qjAutoWritePwdCheckBox->isChecked();
+    }
+    if (qjTargetDeviceCombo != nullptr) {
+        config.qjTargetDevice = qjTargetDeviceCombo->currentData().toInt();
+    }
+    if (qjQueryModeCombo != nullptr) {
+        config.qjQueryMode = qjQueryModeCombo->currentIndex();
+    }
+    if (qjHostPollPeriodSpin != nullptr) {
+        config.qjHostPollIntervalMs = qjHostPollPeriodSpin->value();
     }
     config.logDirectory = logDirectory;
     appConfig.save(config);
@@ -2653,6 +2750,18 @@ void MainWindow::updateQingjuRfidPanel(const QingjuNpkState &state)
     if (qjRfidHardwareVerValue != nullptr) {
         qjRfidHardwareVerValue->setText(state.hardwareVer.isEmpty() ? "-" : state.hardwareVer);
     }
+    if (qjRfidVendorValue != nullptr) {
+        qjRfidVendorValue->setText(state.vendorInfo.isEmpty() ? "-" : state.vendorInfo);
+    }
+    if (qjRfidModelCodeValue != nullptr) {
+        qjRfidModelCodeValue->setText(state.modelCodeText.isEmpty() ? "-" : state.modelCodeText);
+    }
+    if (qjRfidFwStrValue != nullptr) {
+        qjRfidFwStrValue->setText(state.fwVersionStr.isEmpty() ? "-" : state.fwVersionStr);
+    }
+    if (qjRfidHwStrValue != nullptr) {
+        qjRfidHwStrValue->setText(state.hwVersionStr.isEmpty() ? "-" : state.hwVersionStr);
+    }
     if (stressTestService.handleQingjuState(state)) {
         updateStressTestPanel(stressTestService.stats());
     }
@@ -2876,24 +2985,114 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     ctrlLayout->setHorizontalSpacing(6);
     ctrlLayout->setVerticalSpacing(4);
     
+    qjTargetDeviceCombo = new QComboBox(ctrlGroup);
+    qjTargetDeviceCombo->addItem(QStringLiteral("NPK (0x0A)"), 0x0A);
+    qjTargetDeviceCombo->addItem(QStringLiteral("RFR (0x0B)"), 0x0B);
+
     qjStartBtn = new QPushButton(QStringLiteral("开始检测"), ctrlGroup);
+    qjStartBtn->setToolTip(QStringLiteral("开始检测：发送启动指令，写入 0xA900（读取模式：1-自动轮询，2-单次查询）和 0xA901（使能及读卡间隔时间，高字节Bit7=1为使能，低字节为读卡间隔）"));
+
     qjStopBtn = new QPushButton(QStringLiteral("停止检测"), ctrlGroup);
-    
+    qjStopBtn->setToolTip(QStringLiteral("停止检测：发送停止指令，向 0xA901 写入 0x0000 关闭读卡"));
+
+    qjQueryModeCombo = new QComboBox(ctrlGroup);
+    qjQueryModeCombo->addItem(QStringLiteral("自动轮询"), 0);
+    qjQueryModeCombo->addItem(QStringLiteral("单次查询"), 1);
+    qjQueryModeCombo->setToolTip(QStringLiteral("设置从机 0xA900 寄存器：1 代表普通循环读取模式，2 代表单次读取模式"));
+
     qjRfidPeriodSpin = new QSpinBox(ctrlGroup);
     qjRfidPeriodSpin->setRange(100, 25500);
     qjRfidPeriodSpin->setValue(100);
     qjRfidPeriodSpin->setSingleStep(100);
     qjRfidPeriodSpin->setSuffix(" ms");
     qjRfidPeriodSpin->setMinimumWidth(120);
-    
-    ctrlLayout->addWidget(qjStartBtn, 0, 0);
-    ctrlLayout->addWidget(qjStopBtn, 0, 1);
-    ctrlLayout->addWidget(new QLabel(QStringLiteral("读取间隔"), ctrlGroup), 1, 0);
-    ctrlLayout->addWidget(qjRfidPeriodSpin, 1, 1);
-    
+    qjRfidPeriodSpin->setToolTip(QStringLiteral("读卡器的读卡时间间隔（单位：100ms），配置从机 0xA901 寄存器的低字节（写入值=间隔ms/100）"));
+
+    qjHostPollPeriodSpin = new QSpinBox(ctrlGroup);
+    qjHostPollPeriodSpin->setRange(100, 10000);
+    qjHostPollPeriodSpin->setValue(500);
+    qjHostPollPeriodSpin->setSingleStep(100);
+    qjHostPollPeriodSpin->setSuffix(" ms");
+    qjHostPollPeriodSpin->setMinimumWidth(120);
+    qjHostPollPeriodSpin->setToolTip(QStringLiteral("设置上位机周期性发送读命令（NPK: 0xA904; RFR: 0xA02A）的时间间隔(ms)；这属于上位机软件设置，不修改从机寄存器"));
+
+    qjDistanceQueryOnceBtn = new QPushButton(QStringLiteral("单次查询"), ctrlGroup);
+    qjDistanceQueryOnceBtn->setToolTip(QStringLiteral("当查询方式为单次查询时，手动发送读指令获取从机当前数据（NPK 读取 0xA904，RFR 读取 0xA02A）"));
+
+    qjAutoWritePwdCheckBox = new QCheckBox(QStringLiteral("自动写入密码(0xA902/A903)"), ctrlGroup);
+    qjAutoWritePwdCheckBox->setToolTip(QStringLiteral("开启后，在检测到有效 UID 时自动计算并写入 0xA902/0xA903 密码寄存器进行密钥解锁"));
+
+    ctrlLayout->addWidget(new QLabel(QStringLiteral("目标设备"), ctrlGroup), 0, 0);
+    ctrlLayout->addWidget(qjTargetDeviceCombo, 0, 1);
+    ctrlLayout->addWidget(qjStartBtn, 1, 0);
+    ctrlLayout->addWidget(qjStopBtn, 1, 1);
+    ctrlLayout->addWidget(new QLabel(QStringLiteral("查询方式 (0xA900)"), ctrlGroup), 2, 0);
+    ctrlLayout->addWidget(qjQueryModeCombo, 2, 1);
+    ctrlLayout->addWidget(new QLabel(QStringLiteral("读取间隔 (0xA901)"), ctrlGroup), 3, 0);
+    ctrlLayout->addWidget(qjRfidPeriodSpin, 3, 1);
+    ctrlLayout->addWidget(new QLabel(QStringLiteral("轮询间隔"), ctrlGroup), 4, 0);
+    ctrlLayout->addWidget(qjHostPollPeriodSpin, 4, 1);
+    ctrlLayout->addWidget(qjDistanceQueryOnceBtn, 5, 0, 1, 2);
+    ctrlLayout->addWidget(qjAutoWritePwdCheckBox, 6, 0, 1, 2);
+
+    connect(qjTargetDeviceCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (qingjuRfidService == nullptr) return;
+        quint8 selectedAddr = qjTargetDeviceCombo->itemData(index).toUInt();
+        qingjuRfidService->setTargetAddress(selectedAddr);
+        
+        if (qjRfidAddrValue != nullptr) {
+            qjRfidAddrValue->setText(QString("0x%1").arg(selectedAddr, 2, 16, QChar('0')).toUpper());
+        }
+        
+        bool isNpk = (selectedAddr == 0x0A);
+        if (qjAutoWritePwdCheckBox != nullptr) {
+            qjAutoWritePwdCheckBox->setEnabled(isNpk);
+        }
+        if (qjRfidAssetGroup != nullptr) {
+            qjRfidAssetGroup->setEnabled(isNpk);
+        }
+        if (qjRfidResultValue != nullptr) qjRfidResultValue->setEnabled(isNpk);
+        if (qjRfidAlarmValue != nullptr) qjRfidAlarmValue->setEnabled(isNpk);
+        if (qjRfidUidValue != nullptr) qjRfidUidValue->setEnabled(isNpk);
+        if (qjRfidPwdValue != nullptr) qjRfidPwdValue->setEnabled(isNpk);
+
+        clearQingjuRfidPanel();
+
+        if (qingjuRfidService->isScanning()) {
+            qingjuRfidService->queryDeviceInfo();
+        }
+        saveAppConfig();
+    });
+
+    connect(qjAutoWritePwdCheckBox, &QCheckBox::toggled, this, [this](bool checked) {
+        if (qingjuRfidService != nullptr) {
+            qingjuRfidService->setAutoWritePassword(checked);
+        }
+        saveAppConfig();
+    });
+
+    connect(qjQueryModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        updateControlsState();
+        saveAppConfig();
+    });
+
+    connect(qjHostPollPeriodSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int) {
+        saveAppConfig();
+    });
+
+    connect(qjDistanceQueryOnceBtn, &QPushButton::clicked, this, [this]() {
+        if (qingjuRfidService != nullptr) {
+            qingjuRfidService->triggerSingleQuery();
+        }
+    });
+
     connect(qjStartBtn, &QPushButton::clicked, this, [this]() {
         if (canStarted) {
-            qingjuRfidService->startScan(qjRfidPeriodSpin->value());
+            int intervalMs = qjRfidPeriodSpin->value();
+            int hostPollIntervalMs = qjHostPollPeriodSpin->value();
+            int queryModeIndex = qjQueryModeCombo->currentIndex();
+            int readMode = (queryModeIndex == 0) ? 1 : 2;
+            qingjuRfidService->startScan(intervalMs, hostPollIntervalMs, readMode);
             updateControlsState();
         } else {
             QMessageBox::warning(this, "警告", "请先启动 CAN 设备！");
@@ -2905,6 +3104,7 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     });
 
     QGroupBox *statusGroup = new QGroupBox(QStringLiteral("NPK状态信息"), panel);
+    qjRfidStatusGroup = statusGroup;
     QGridLayout *statusLayout = new QGridLayout(statusGroup);
     statusLayout->setContentsMargins(6, 6, 6, 6);
     statusLayout->setHorizontalSpacing(8);
@@ -2921,7 +3121,7 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     statusLayout->addWidget(qjRfidAddrValue, 0, 1);
     statusLayout->addWidget(new QLabel(QStringLiteral("读取结果 0xA904"), statusGroup), 1, 0);
     statusLayout->addWidget(qjRfidResultValue, 1, 1);
-    statusLayout->addWidget(new QLabel(QStringLiteral("当前程序状态"), statusGroup), 2, 0);
+    statusLayout->addWidget(new QLabel(QStringLiteral("当前程序状态 (0xA02A)"), statusGroup), 2, 0);
     statusLayout->addWidget(qjRfidAppStatusValue, 2, 1);
     statusLayout->addWidget(new QLabel(QStringLiteral("芯片异常告警 0xA919"), statusGroup), 3, 0);
     statusLayout->addWidget(qjRfidAlarmValue, 3, 1);
@@ -2931,6 +3131,7 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     statusLayout->addWidget(qjRfidPwdValue, 5, 1);
 
     QGroupBox *assetGroup = new QGroupBox(QStringLiteral("标签资产信息"), panel);
+    qjRfidAssetGroup = assetGroup;
     QGridLayout *assetLayout = new QGridLayout(assetGroup);
     assetLayout->setContentsMargins(6, 6, 6, 6);
     assetLayout->setHorizontalSpacing(8);
@@ -2947,7 +3148,7 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     assetLayout->addWidget(new QLabel(QStringLiteral("流水号"), assetGroup), 2, 0);
     assetLayout->addWidget(qjRfidSerialValue, 2, 1);
 
-    QGroupBox *devGroup = new QGroupBox(QStringLiteral("读卡器设备信息"), panel);
+    QGroupBox *devGroup = new QGroupBox(QStringLiteral("设备基本信息"), panel);
     QGridLayout *devLayout = new QGridLayout(devGroup);
     devLayout->setContentsMargins(6, 6, 6, 6);
     devLayout->setHorizontalSpacing(8);
@@ -2956,6 +3157,10 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     qjRfidSnValue = new QLabel("-", devGroup);
     qjRfidFirmwareVerValue = new QLabel("-", devGroup);
     qjRfidHardwareVerValue = new QLabel("-", devGroup);
+    qjRfidVendorValue = new QLabel("-", devGroup);
+    qjRfidModelCodeValue = new QLabel("-", devGroup);
+    qjRfidFwStrValue = new QLabel("-", devGroup);
+    qjRfidHwStrValue = new QLabel("-", devGroup);
 
     devLayout->addWidget(new QLabel(QStringLiteral("设备SN"), devGroup), 0, 0);
     devLayout->addWidget(qjRfidSnValue, 0, 1);
@@ -2963,6 +3168,14 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     devLayout->addWidget(qjRfidFirmwareVerValue, 1, 1);
     devLayout->addWidget(new QLabel(QStringLiteral("硬件版本"), devGroup), 2, 0);
     devLayout->addWidget(qjRfidHardwareVerValue, 2, 1);
+    devLayout->addWidget(new QLabel(QStringLiteral("制造厂商"), devGroup), 3, 0);
+    devLayout->addWidget(qjRfidVendorValue, 3, 1);
+    devLayout->addWidget(new QLabel(QStringLiteral("型号编码"), devGroup), 4, 0);
+    devLayout->addWidget(qjRfidModelCodeValue, 4, 1);
+    devLayout->addWidget(new QLabel(QStringLiteral("固件标识串"), devGroup), 5, 0);
+    devLayout->addWidget(qjRfidFwStrValue, 5, 1);
+    devLayout->addWidget(new QLabel(QStringLiteral("硬件标识串"), devGroup), 6, 0);
+    devLayout->addWidget(qjRfidHwStrValue, 6, 1);
 
     QGroupBox *customGroup = new QGroupBox(QStringLiteral("自定义寄存器读写调试"), panel);
     QGridLayout *customLayout = new QGridLayout(customGroup);

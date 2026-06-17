@@ -29,6 +29,10 @@ AppConfigData AppConfig::load() const
     config.rfidControlEnabled = settings.value("rfid/controlEnabled", config.rfidControlEnabled).toBool();
     config.show0x207Log = settings.value("log/show0x207Log", config.show0x207Log).toBool();
     config.protocolMode = settings.value("device/protocolMode", config.protocolMode).toInt();
+    config.qjAutoWritePwd = settings.value("rfid/qjAutoWritePwd", config.qjAutoWritePwd).toBool();
+    config.qjTargetDevice = settings.value("rfid/qjTargetDevice", config.qjTargetDevice).toInt();
+    config.qjQueryMode = settings.value("rfid/qjQueryMode", config.qjQueryMode).toInt();
+    config.qjHostPollIntervalMs = settings.value("rfid/qjHostPollIntervalMs", config.qjHostPollIntervalMs).toInt();
 
     if (config.logDirectory.isEmpty()) {
         config.logDirectory = QDir(QCoreApplication::applicationDirPath()).filePath("logs");
@@ -54,6 +58,10 @@ void AppConfig::save(const AppConfigData &config) const
     settings.setValue("rfid/controlEnabled", config.rfidControlEnabled);
     settings.setValue("log/show0x207Log", config.show0x207Log);
     settings.setValue("device/protocolMode", config.protocolMode);
+    settings.setValue("rfid/qjAutoWritePwd", config.qjAutoWritePwd);
+    settings.setValue("rfid/qjTargetDevice", config.qjTargetDevice);
+    settings.setValue("rfid/qjQueryMode", config.qjQueryMode);
+    settings.setValue("rfid/qjHostPollIntervalMs", config.qjHostPollIntervalMs);
     settings.sync();
 }
 
