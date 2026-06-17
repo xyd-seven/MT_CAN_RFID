@@ -71,9 +71,12 @@ private:
     void updateStressTestPanel(const StressTestStats &stats);
     void sendRfidFrame(UINT canId, const QByteArray &payload);
     void addCanFrameToList(const CanFrame &frame);
+    QString protocolDecodeText(const CanFrame &frame) const;
+    QString qingjuAddressName(quint8 address) const;
     void setLabelValue(QLabel *label, const QString &value);
     bool parseQingjuAddress(const QString &text, quint8 *address, QString *error) const;
     void clearQingjuRfidPanel();
+    void updateQingjuOnlineStatus(bool clearOfflineData);
     void setupCanLogSaveButton();
     void setupStatusPanel();
     void setupCompactMainLayout();
@@ -146,6 +149,8 @@ private:
     QTimer *rfidControlTimer;
     QTimer *rfidOnlineCheckTimer;
     QDateTime lastRfidFrameTime;
+    QDateTime lastQingjuNpkFrameTime;
+    QDateTime lastQingjuRfrFrameTime;
     QLabel *rfidOnlineStatusValue;
     QProgressBar *stressProgressBar;
     QLabel *stressRemainingLabel;
@@ -167,6 +172,24 @@ private:
     QPushButton *stressStopBtn;
     QPushButton *stressResetBtn;
     QPushButton *stressExportBtn;
+    QStackedWidget *stressStatsStackedWidget;
+    QWidget *mtStressPanel;
+    QWidget *qjStressPanel;
+    QLabel *qjStressStateValue;
+    QLabel *qjStressElapsedValue;
+    QLabel *qjStressTotalSamplesValue;
+    QLabel *qjStressSuccessCountValue;
+    QLabel *qjStressSuccessRateValue;
+    QLabel *qjStressCurrentUidValue;
+    QLabel *qjStressLastSuccessUidValue;
+    QLabel *qjStressUniqueUidCountValue;
+    QLabel *qjStressNoTagCountValue;
+    QLabel *qjStressUidReadErrorValue;
+    QLabel *qjStressModuleFaultValue;
+    QLabel *qjStressCommunicationFaultValue;
+    QLabel *qjStressContentErrorValue;
+    QLabel *qjStressMaxContinuousFailureValue;
+    QLabel *qjStressLastFailureReasonValue;
 
     QPushButton *otaQueryBtn;
     QPushButton *otaStartUpgradeBtn;
@@ -178,6 +201,8 @@ private:
     QSpinBox *otaStressCyclesSpin;
     QSpinBox *otaCooldownSpin;
     QCheckBox *otaStressSuspendLogCheck;
+    QLabel *qjOtaTargetLabel;
+    QComboBox *qjOtaTargetCombo;
     QLabel *otaCurrentCycleLabel;
     QLabel *otaSuccessCyclesLabel;
     QLabel *otaFailureCyclesLabel;
@@ -186,6 +211,7 @@ private:
 
     // OTA 异常注入测试 UI 控件
     QGroupBox *otaErrorInjectionGroup;
+    QGroupBox *otaStressGroup;
     QCheckBox *otaInjectMasterCheck;
     QCheckBox *otaInjectCrcErrorCheck;
     QCheckBox *otaInjectSeqErrorCheck;
@@ -208,8 +234,11 @@ private:
 private slots:
     void updateOtaStressUI();
     void handleOtaStateChangeForStressTest(OtaService::State state, const QString &message);
+    void handleQingjuOtaStateChangeForStressTest(QingjuOtaService::State state, const QString &message);
     void onOtaInjectMasterToggled(bool checked);
     OtaErrorConfig getOtaErrorConfig() const;
+    QingjuOtaErrorConfig getQingjuOtaErrorConfig() const;
+    quint8 selectedQingjuOtaTarget() const;
 
     // 青桔协议槽函数及方法
     void onProtocolModeChanged(int index);
@@ -235,6 +264,7 @@ private:
 
     // 青桔 NPK 监控标签
     QLabel *qjRfidAddrValue;
+    QLabel *qjRfidResultValue;
     QLabel *qjRfidAppStatusValue;
     QLabel *qjRfidAlarmValue;
     QLabel *qjRfidUidValue;
@@ -247,6 +277,7 @@ private:
     QLabel *qjRfidHardwareVerValue;
 
     // 自定义寄存器读写控制
+    QComboBox *qjRegisterPresetCombo;
     QComboBox *qjDestAddrCombo;
     QLineEdit *qjRegAddrEdit;
     QLineEdit *qjRegValueEdit;

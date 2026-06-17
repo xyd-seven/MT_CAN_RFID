@@ -7,6 +7,7 @@
 QingjuOtaWorker::QingjuOtaWorker(QingjuCanManager *canManager, QObject *parent)
     : QThread(parent)
     , m_canManager(canManager)
+    , m_targetAddr(0x0B)
     , m_abortRequested(false)
 {
 }
@@ -17,9 +18,10 @@ QingjuOtaWorker::~QingjuOtaWorker()
     wait();
 }
 
-void QingjuOtaWorker::setup(const QString &filePath, const QingjuOtaErrorConfig &injectCfg)
+void QingjuOtaWorker::setup(const QString &filePath, quint8 targetAddr, const QingjuOtaErrorConfig &injectCfg)
 {
     m_firmwarePath = filePath;
+    m_targetAddr = targetAddr;
     m_injectConfig = injectCfg;
     m_abortRequested.store(false);
     m_lastError.clear();
@@ -37,8 +39,8 @@ void QingjuOtaWorker::requestAbort()
 
 void QingjuOtaWorker::handleIncomingModbusPacket(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload)
 {
-    // OTA 升级只处理来自 RFR 设备 (0x0B) 且发送给中控 (0x01) 的功能码 0x45 (固件升级) 报文
-    if (srcAddr != 0x0B || destAddr != 0x01 || funcCode != 0x45) {
+    // OTA response must come from the selected target device and be sent to ECU (0x01).
+    if (srcAddr != m_targetAddr || destAddr != 0x01 || funcCode != 0x45) {
         return;
     }
 
@@ -118,8 +120,8 @@ void QingjuOtaWorker::run()
             return;
         }
         
-        emit transmitModbusRequest(0x0B, 0x45, QByteArray::fromHex("01"), 7); // OTA 优先级为 7
-        if (waitForResponse(0x0B, 0x45, 0x02, 1000, respPayload)) {
+        emit transmitModbusRequest(m_targetAddr, 0x45, QByteArray::fromHex("01"), 7); // OTA 优先级为 7
+        if (waitForResponse(m_targetAddr, 0x45, 0x02, 1000, respPayload)) {
             enterOk = true;
             break;
         }
@@ -166,8 +168,8 @@ void QingjuOtaWorker::run()
     // 客户编号 (1字节)
     infoVal.append(static_cast<char>(0x01));
 
-    // 固件类型 (1字节)：低6位为固件类型 RFR = 0x0B
-    quint8 firmwareType = 0x0B;
+    // 固件类型低 6 位使用目标设备类型：NPK=0x0A，RFR=0x0B。
+    quint8 firmwareType = m_targetAddr;
     if (m_injectConfig.enabled && m_injectConfig.caseMode == 1) {
         firmwareType = 0x99; // [Case 1 注入] 不匹配的固件类型
         emit statusUpdated(1, "[Case 1 注入] 发送不匹配的固件类型 0x99", 5);
@@ -198,9 +200,9 @@ void QingjuOtaWorker::run()
     reqPayload.append(static_cast<char>(0x13));
     reqPayload.append(infoVal);
 
-    emit transmitModbusRequest(0x0B, 0x45, reqPayload, 7);
+    emit transmitModbusRequest(m_targetAddr, 0x45, reqPayload, 7);
 
-    if (!waitForResponse(0x0B, 0x45, 0x14, 2000, respPayload)) {
+    if (!waitForResponse(m_targetAddr, 0x45, 0x14, 2000, respPayload)) {
         emit statusUpdated(5, "固件信息回应超时: " + m_lastError, 5);
         return;
     }
@@ -260,8 +262,8 @@ void QingjuOtaWorker::run()
         blockVal.append(static_cast<char>(0x01));
         blockVal.append(static_cast<char>(0x00));
         blockVal.append(static_cast<char>(0x00));
-        // 固件类型 (1字节) RFR = 0x0B
-        blockVal.append(static_cast<char>(0x0B));
+        // 固件类型 (1字节)：NPK=0x0A，RFR=0x0B
+        blockVal.append(static_cast<char>(m_targetAddr));
         // 数据块编号 (2字节) 大端
         blockVal.append(static_cast<char>((nextBlock >> 8) & 0xFF));
         blockVal.append(static_cast<char>(nextBlock & 0xFF));
@@ -280,7 +282,7 @@ void QingjuOtaWorker::run()
         blockReq.append(blockVal);
 
         // 发送数据块
-        emit transmitModbusRequest(0x0B, 0x45, blockReq, 7);
+        emit transmitModbusRequest(m_targetAddr, 0x45, blockReq, 7);
 
         // 异常 Case 5: 收到 ECU 重复的数据包
         if (m_injectConfig.enabled && m_injectConfig.caseMode == 5 && nextBlock == 2 && !dupSent) {
@@ -288,11 +290,11 @@ void QingjuOtaWorker::run()
             // 稍等并直接重发一次 Block 2
             QThread::msleep(100);
             emit statusUpdated(1, "[Case 5 注入] 重发数据块 2 ...", (nextBlock * 90) / totalBlocks + 10);
-            emit transmitModbusRequest(0x0B, 0x45, blockReq, 7);
+            emit transmitModbusRequest(m_targetAddr, 0x45, blockReq, 7);
         }
 
         // 等待 0x16 响应 (接收结果)
-        if (!waitForResponse(0x0B, 0x45, 0x16, 3000, respPayload)) {
+        if (!waitForResponse(m_targetAddr, 0x45, 0x16, 3000, respPayload)) {
             emit statusUpdated(5, QString("数据块 [%1] 响应超时: ").arg(nextBlock) + m_lastError, (nextBlock * 90) / totalBlocks + 10);
             return;
         }
@@ -333,9 +335,9 @@ void QingjuOtaWorker::run()
         }
 
         // 再次下发 0x13 固件基本信息进行查询
-        emit transmitModbusRequest(0x0B, 0x45, reqPayload, 7);
+        emit transmitModbusRequest(m_targetAddr, 0x45, reqPayload, 7);
 
-        if (waitForResponse(0x0B, 0x45, 0x14, 1500, respPayload)) {
+        if (waitForResponse(m_targetAddr, 0x45, 0x14, 1500, respPayload)) {
             if (respPayload.size() >= 2) {
                 quint8 finalStatus = static_cast<quint8>(respPayload.at(1));
                 if (finalStatus == 0x02) {
@@ -366,6 +368,7 @@ QingjuOtaService::QingjuOtaService(QingjuCanManager *canManager, QObject *parent
     , m_currentState(State::Idle)
     , m_currentProgress(0)
     , m_queryProgramPending(false)
+    , m_queryTargetAddr(0x0B)
 {
     m_worker = new QingjuOtaWorker(m_canManager, this);
     connect(m_worker, &QingjuOtaWorker::statusUpdated, this, &QingjuOtaService::onWorkerStatusUpdated);
@@ -395,7 +398,7 @@ QString QingjuOtaService::stateText() const
     return "未知";
 }
 
-void QingjuOtaService::startUpgrade(const QString &firmwarePath, const QingjuOtaErrorConfig &injectCfg)
+void QingjuOtaService::startUpgrade(const QString &firmwarePath, quint8 targetAddr, const QingjuOtaErrorConfig &injectCfg)
 {
     if (m_currentState != State::Idle && m_currentState != State::Completed && m_currentState != State::Failed && m_currentState != State::Abort) {
         return;
@@ -405,7 +408,7 @@ void QingjuOtaService::startUpgrade(const QString &firmwarePath, const QingjuOta
     m_currentMessage = "正在初始化...";
     setState(State::StartUpgrade, m_currentMessage);
 
-    m_worker->setup(firmwarePath, injectCfg);
+    m_worker->setup(firmwarePath, targetAddr, injectCfg);
     m_worker->start();
 }
 
@@ -418,17 +421,18 @@ void QingjuOtaService::abortUpgrade()
     setState(State::Abort, "升级已被用户终止");
 }
 
-void QingjuOtaService::queryProgramStatus()
+void QingjuOtaService::queryProgramStatus(quint8 targetAddr)
 {
     if (m_worker->isRunning()) {
         return;
     }
 
     m_queryProgramPending = true;
+    m_queryTargetAddr = targetAddr;
     m_currentProgress = 0;
     setState(State::QueryProgram, "正在查询程序位置...");
     emit otaProgress(0);
-    m_canManager->readRegisters(0x0B, 0xA02A, 1);
+    m_canManager->readRegisters(m_queryTargetAddr, 0xA02A, 1);
 
     QTimer::singleShot(2000, this, [this]() {
         if (!m_queryProgramPending) {
@@ -442,7 +446,7 @@ void QingjuOtaService::queryProgramStatus()
 
 void QingjuOtaService::handleIncomingModbusPacket(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload)
 {
-    if (srcAddr == 0x0B && destAddr == 0x01 && funcCode == 0x03 && m_queryProgramPending) {
+    if (srcAddr == m_queryTargetAddr && destAddr == 0x01 && funcCode == 0x03 && m_queryProgramPending) {
         m_queryProgramPending = false;
         if (payload.size() < 3 || static_cast<quint8>(payload.at(0)) < 2) {
             setState(State::Failed, "查询程序位置响应长度错误");

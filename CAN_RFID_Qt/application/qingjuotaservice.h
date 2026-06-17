@@ -23,7 +23,7 @@ public:
     explicit QingjuOtaWorker(QingjuCanManager *canManager, QObject *parent = nullptr);
     ~QingjuOtaWorker();
 
-    void setup(const QString &filePath, const QingjuOtaErrorConfig &injectCfg);
+    void setup(const QString &filePath, quint8 targetAddr, const QingjuOtaErrorConfig &injectCfg);
     void requestAbort();
     void handleIncomingModbusPacket(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload);
 
@@ -46,6 +46,7 @@ private:
 
     QingjuCanManager *m_canManager;
     QString m_firmwarePath;
+    quint8 m_targetAddr;
     QingjuOtaErrorConfig m_injectConfig;
 
     QMutex m_mutex;
@@ -80,9 +81,9 @@ public:
     QString lastMessage() const { return m_currentMessage; }
     int progress() const { return m_currentProgress; }
 
-    void startUpgrade(const QString &firmwarePath, const QingjuOtaErrorConfig &injectCfg = QingjuOtaErrorConfig());
+    void startUpgrade(const QString &firmwarePath, quint8 targetAddr, const QingjuOtaErrorConfig &injectCfg = QingjuOtaErrorConfig());
     void abortUpgrade();
-    void queryProgramStatus();
+    void queryProgramStatus(quint8 targetAddr);
     void handleIncomingModbusPacket(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload);
 
 signals:
@@ -101,6 +102,7 @@ private:
     int m_currentProgress;
     QingjuOtaWorker *m_worker;
     bool m_queryProgramPending;
+    quint8 m_queryTargetAddr;
 };
 
 #endif // QINGJUOTASERVICE_H

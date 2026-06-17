@@ -62,6 +62,24 @@ MainWindow::MainWindow(QWidget *parent) :
     stressStopBtn(nullptr),
     stressResetBtn(nullptr),
     stressExportBtn(nullptr),
+    stressStatsStackedWidget(nullptr),
+    mtStressPanel(nullptr),
+    qjStressPanel(nullptr),
+    qjStressStateValue(nullptr),
+    qjStressElapsedValue(nullptr),
+    qjStressTotalSamplesValue(nullptr),
+    qjStressSuccessCountValue(nullptr),
+    qjStressSuccessRateValue(nullptr),
+    qjStressCurrentUidValue(nullptr),
+    qjStressLastSuccessUidValue(nullptr),
+    qjStressUniqueUidCountValue(nullptr),
+    qjStressNoTagCountValue(nullptr),
+    qjStressUidReadErrorValue(nullptr),
+    qjStressModuleFaultValue(nullptr),
+    qjStressCommunicationFaultValue(nullptr),
+    qjStressContentErrorValue(nullptr),
+    qjStressMaxContinuousFailureValue(nullptr),
+    qjStressLastFailureReasonValue(nullptr),
     otaQueryBtn(nullptr),
     otaStartUpgradeBtn(nullptr),
     otaAbortUpgradeBtn(nullptr),
@@ -70,12 +88,15 @@ MainWindow::MainWindow(QWidget *parent) :
     otaStressCyclesSpin(nullptr),
     otaCooldownSpin(nullptr),
     otaStressSuspendLogCheck(nullptr),
+    qjOtaTargetLabel(nullptr),
+    qjOtaTargetCombo(nullptr),
     otaCurrentCycleLabel(nullptr),
     otaSuccessCyclesLabel(nullptr),
     otaFailureCyclesLabel(nullptr),
     otaStressSuccessRateLabel(nullptr),
     otaLastFailureReasonLabel(nullptr),
     otaErrorInjectionGroup(nullptr),
+    otaStressGroup(nullptr),
     otaInjectMasterCheck(nullptr),
     otaInjectCrcErrorCheck(nullptr),
     otaInjectSeqErrorCheck(nullptr),
@@ -99,6 +120,7 @@ MainWindow::MainWindow(QWidget *parent) :
     qingjuRfidService(nullptr),
     qingjuOtaService(nullptr),
     qjRfidAddrValue(nullptr),
+    qjRfidResultValue(nullptr),
     qjRfidAppStatusValue(nullptr),
     qjRfidAlarmValue(nullptr),
     qjRfidUidValue(nullptr),
@@ -109,6 +131,7 @@ MainWindow::MainWindow(QWidget *parent) :
     qjRfidSnValue(nullptr),
     qjRfidFirmwareVerValue(nullptr),
     qjRfidHardwareVerValue(nullptr),
+    qjRegisterPresetCombo(nullptr),
     qjDestAddrCombo(nullptr),
     qjRegAddrEdit(nullptr),
     qjRegValueEdit(nullptr),
@@ -141,7 +164,7 @@ MainWindow::MainWindow(QWidget *parent) :
     ui->frameTypeCombo->setCurrentIndex(0);
 
     QStringList listHeader;
-    listHeader << "时间" << "通道" << "收/发" << "ID" << "Frame" << "类型" << "DLC" << "CAN-FD" << "数据";
+    listHeader << "时间" << "通道" << "收/发" << "ID" << "Frame" << "类型" << "DLC" << "CAN-FD" << "数据" << "协议解析";
 
     ui->tableWidget->setColumnCount(listHeader.count());
     ui->tableWidget->setHorizontalHeaderLabels(listHeader);
@@ -154,6 +177,7 @@ MainWindow::MainWindow(QWidget *parent) :
     ui->tableWidget->setColumnWidth(6,80);
     ui->tableWidget->setColumnWidth(7,90);
     ui->tableWidget->setColumnWidth(8,200);
+    ui->tableWidget->setColumnWidth(9,260);
 
     ui->tableWidget->setEditTriggers(QAbstractItemView::NoEditTriggers);
     ui->tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -236,6 +260,11 @@ MainWindow::MainWindow(QWidget *parent) :
             rfidOnlineStatusValue->setStyleSheet("color: gray; font-weight: bold;");
             return;
         }
+        const bool qingjuMode = protocolModeCombo != nullptr && protocolModeCombo->currentIndex() == 1;
+        if (qingjuMode) {
+            updateQingjuOnlineStatus(true);
+            return;
+        }
         if (lastRfidFrameTime.isValid() && lastRfidFrameTime.msecsTo(QDateTime::currentDateTime()) < 1500) {
             rfidOnlineStatusValue->setText(QStringLiteral("在线"));
             rfidOnlineStatusValue->setStyleSheet("color: green; font-weight: bold;");
@@ -243,22 +272,18 @@ MainWindow::MainWindow(QWidget *parent) :
             rfidOnlineStatusValue->setText(QStringLiteral("离线"));
             rfidOnlineStatusValue->setStyleSheet("color: red; font-weight: bold;");
 
-            if (appConfig.load().protocolMode == 1) {
-                clearQingjuRfidPanel();
-            } else {
-                // 设备离线时清空显示数据为 -
-                rfidWorkModeValue->setText("-");
-                rfidCardStatusValue->setText("-");
-                rfidFaultStatusValue->setText("-");
-                rfidScanPeriodValue->setText("-");
-                rfidTagValue->setText("-");
-                rfidTagPart1Value->setText("-");
-                rfidTagPart2Value->setText("-");
-                rfidTagPart3Value->setText("-");
-                rfidDeviceIdValue->setText("-");
-                rfidVersionValue->setText("-");
-                rfidResponseValue->setText("-");
-            }
+            // 设备离线时清空美团协议显示数据为 -
+            rfidWorkModeValue->setText("-");
+            rfidCardStatusValue->setText("-");
+            rfidFaultStatusValue->setText("-");
+            rfidScanPeriodValue->setText("-");
+            rfidTagValue->setText("-");
+            rfidTagPart1Value->setText("-");
+            rfidTagPart2Value->setText("-");
+            rfidTagPart3Value->setText("-");
+            rfidDeviceIdValue->setText("-");
+            rfidVersionValue->setText("-");
+            rfidResponseValue->setText("-");
         }
     });
 
@@ -272,6 +297,7 @@ MainWindow::MainWindow(QWidget *parent) :
         if (appConfig.load().protocolMode == 1) {
             otaStateValue->setText(qingjuOtaService->stateText());
             otaMessageValue->setText(message);
+            handleQingjuOtaStateChangeForStressTest(state, message);
             updateControlsState();
         }
     });
@@ -299,7 +325,13 @@ MainWindow::MainWindow(QWidget *parent) :
         updateOtaStressUI();
 
         const QString firmwarePath = otaFirmwarePathValue == nullptr ? QString() : otaFirmwarePathValue->text();
-        otaService.startUpgrade(firmwarePath == "-" ? QString() : firmwarePath, getOtaErrorConfig());
+        if (appConfig.load().protocolMode == 1) {
+            qingjuOtaService->startUpgrade(firmwarePath == "-" ? QString() : firmwarePath,
+                                           selectedQingjuOtaTarget(),
+                                           getQingjuOtaErrorConfig());
+        } else {
+            otaService.startUpgrade(firmwarePath == "-" ? QString() : firmwarePath, getOtaErrorConfig());
+        }
     });
 
     // 连接 OTA 服务信号
@@ -536,11 +568,16 @@ void MainWindow::updateCanControlState(bool deviceOpened, bool canInitialized, b
         }
         rfidOnlineCheckTimer->start();
         lastRfidFrameTime = QDateTime();
+        lastQingjuNpkFrameTime = QDateTime();
+        lastQingjuRfrFrameTime = QDateTime();
     } else {
         testerPresentTimer->stop();
         rfidControlTimer->stop();
         rfidOnlineCheckTimer->stop();
         rfidScanning = false;
+        lastRfidFrameTime = QDateTime();
+        lastQingjuNpkFrameTime = QDateTime();
+        lastQingjuRfrFrameTime = QDateTime();
         if (rfidOnlineStatusValue != nullptr) {
             rfidOnlineStatusValue->setText(QStringLiteral("未启动"));
             rfidOnlineStatusValue->setStyleSheet("color: gray; font-weight: bold;");
@@ -575,6 +612,20 @@ void MainWindow::updateCanControlState(bool deviceOpened, bool canInitialized, b
             topCanStatusValue->setText(QStringLiteral("CAN：设备已打开"));
         } else {
             topCanStatusValue->setText(QStringLiteral("CAN：未启动"));
+        }
+    }
+    if (topRfidStatusValue != nullptr) {
+        const bool qingjuMode = protocolModeCombo != nullptr && protocolModeCombo->currentIndex() == 1;
+        if (qingjuMode) {
+            if (canStarted) {
+                updateQingjuOnlineStatus(false);
+            } else {
+                topRfidStatusValue->setText(QStringLiteral("协议：青桔  NPK：未启动  RFR：未启动"));
+                topRfidStatusValue->setStyleSheet(QStringLiteral("color: gray; font-weight: bold;"));
+            }
+        } else if (!canStarted) {
+            topRfidStatusValue->setText(QStringLiteral("RFID：未识别"));
+            topRfidStatusValue->setStyleSheet(QString());
         }
     }
     if (!canStarted && stressTestService.stats().running) {
@@ -652,6 +703,8 @@ void MainWindow::updateControlsState()
         if (otaSelectFileBtn != nullptr) otaSelectFileBtn->setEnabled(false);
         if (otaAbortUpgradeBtn != nullptr) otaAbortUpgradeBtn->setEnabled(true);
         if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->setEnabled(false);
+        if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(false);
+        if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(false);
     }
     else if (stressRunning) {
         // 2. 压力测试期间：
@@ -693,6 +746,8 @@ void MainWindow::updateControlsState()
         if (otaSelectFileBtn != nullptr) otaSelectFileBtn->setEnabled(false);
         if (otaAbortUpgradeBtn != nullptr) otaAbortUpgradeBtn->setEnabled(false);
         if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->setEnabled(false);
+        if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(false);
+        if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(false);
     }
     else {
         // 3. 常规空闲状态：
@@ -736,6 +791,8 @@ void MainWindow::updateControlsState()
         if (otaSelectFileBtn != nullptr) otaSelectFileBtn->setEnabled(true); // 可以断连时选择文件
         if (otaAbortUpgradeBtn != nullptr) otaAbortUpgradeBtn->setEnabled(false);
         if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->setEnabled(true);
+        if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(true);
+        if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(true);
     }
 }
 
@@ -1128,6 +1185,25 @@ QWidget *MainWindow::createStressTestTab(QWidget *parent)
     stressLastSuccessTagValue->setWordWrap(true);
     stressLastFailureReasonValue->setWordWrap(true);
 
+    qjStressStateValue = new QLabel("-", stressWidget);
+    qjStressElapsedValue = new QLabel("-", stressWidget);
+    qjStressTotalSamplesValue = new QLabel("-", stressWidget);
+    qjStressSuccessCountValue = new QLabel("-", stressWidget);
+    qjStressSuccessRateValue = new QLabel("-", stressWidget);
+    qjStressCurrentUidValue = new QLabel("-", stressWidget);
+    qjStressLastSuccessUidValue = new QLabel("-", stressWidget);
+    qjStressUniqueUidCountValue = new QLabel("-", stressWidget);
+    qjStressNoTagCountValue = new QLabel("-", stressWidget);
+    qjStressUidReadErrorValue = new QLabel("-", stressWidget);
+    qjStressModuleFaultValue = new QLabel("-", stressWidget);
+    qjStressCommunicationFaultValue = new QLabel("-", stressWidget);
+    qjStressContentErrorValue = new QLabel("-", stressWidget);
+    qjStressMaxContinuousFailureValue = new QLabel("-", stressWidget);
+    qjStressLastFailureReasonValue = new QLabel("-", stressWidget);
+    qjStressCurrentUidValue->setWordWrap(true);
+    qjStressLastSuccessUidValue->setWordWrap(true);
+    qjStressLastFailureReasonValue->setWordWrap(true);
+
     QGroupBox *controlGroup = new QGroupBox(QStringLiteral("控制"), stressWidget);
     QGridLayout *controlLayout = new QGridLayout(controlGroup);
     controlLayout->setContentsMargins(8, 8, 8, 8);
@@ -1201,12 +1277,79 @@ QWidget *MainWindow::createStressTestTab(QWidget *parent)
     faultLayout->addWidget(new QLabel(QStringLiteral("失败原因"), faultGroup), 2, 0);
     faultLayout->addWidget(stressLastFailureReasonValue, 2, 1, 1, 3);
 
+    mtStressPanel = new QWidget(stressWidget);
+    QGridLayout *mtLayout = new QGridLayout(mtStressPanel);
+    mtLayout->setContentsMargins(0, 0, 0, 0);
+    mtLayout->setHorizontalSpacing(6);
+    mtLayout->setVerticalSpacing(6);
+    mtLayout->addWidget(summaryGroup, 0, 0);
+    mtLayout->addWidget(tagGroup, 0, 1);
+    mtLayout->addWidget(faultGroup, 1, 0, 1, 2);
+    mtLayout->setColumnStretch(0, 1);
+    mtLayout->setColumnStretch(1, 1);
+
+    qjStressPanel = new QWidget(stressWidget);
+    QGridLayout *qjLayout = new QGridLayout(qjStressPanel);
+    qjLayout->setContentsMargins(0, 0, 0, 0);
+    qjLayout->setHorizontalSpacing(6);
+    qjLayout->setVerticalSpacing(6);
+
+    QGroupBox *qjSummaryGroup = new QGroupBox(QStringLiteral("青桔读卡统计"), qjStressPanel);
+    QGridLayout *qjSummaryLayout = new QGridLayout(qjSummaryGroup);
+    qjSummaryLayout->setContentsMargins(8, 8, 8, 8);
+    qjSummaryLayout->addWidget(new QLabel(QStringLiteral("状态"), qjSummaryGroup), 0, 0);
+    qjSummaryLayout->addWidget(qjStressStateValue, 0, 1);
+    qjSummaryLayout->addWidget(new QLabel(QStringLiteral("时长"), qjSummaryGroup), 0, 2);
+    qjSummaryLayout->addWidget(qjStressElapsedValue, 0, 3);
+    qjSummaryLayout->addWidget(new QLabel(QStringLiteral("成功率"), qjSummaryGroup), 1, 0);
+    qjSummaryLayout->addWidget(qjStressSuccessRateValue, 1, 1);
+    qjSummaryLayout->addWidget(new QLabel(QStringLiteral("总轮询次数"), qjSummaryGroup), 2, 0);
+    qjSummaryLayout->addWidget(qjStressTotalSamplesValue, 2, 1);
+    qjSummaryLayout->addWidget(new QLabel(QStringLiteral("读卡成功"), qjSummaryGroup), 2, 2);
+    qjSummaryLayout->addWidget(qjStressSuccessCountValue, 2, 3);
+
+    QGroupBox *qjUidGroup = new QGroupBox(QStringLiteral("当前 UID"), qjStressPanel);
+    QGridLayout *qjUidLayout = new QGridLayout(qjUidGroup);
+    qjUidLayout->setContentsMargins(8, 8, 8, 8);
+    qjUidLayout->addWidget(new QLabel(QStringLiteral("当前 UID"), qjUidGroup), 0, 0);
+    qjUidLayout->addWidget(qjStressCurrentUidValue, 0, 1, 1, 3);
+    qjUidLayout->addWidget(new QLabel(QStringLiteral("最后成功 UID"), qjUidGroup), 1, 0);
+    qjUidLayout->addWidget(qjStressLastSuccessUidValue, 1, 1, 1, 3);
+    qjUidLayout->addWidget(new QLabel(QStringLiteral("唯一 UID 数"), qjUidGroup), 2, 0);
+    qjUidLayout->addWidget(qjStressUniqueUidCountValue, 2, 1);
+
+    QGroupBox *qjResultGroup = new QGroupBox(QStringLiteral("青桔结果分类"), qjStressPanel);
+    QGridLayout *qjResultLayout = new QGridLayout(qjResultGroup);
+    qjResultLayout->setContentsMargins(8, 8, 8, 8);
+    qjResultLayout->addWidget(new QLabel(QStringLiteral("无标签"), qjResultGroup), 0, 0);
+    qjResultLayout->addWidget(qjStressNoTagCountValue, 0, 1);
+    qjResultLayout->addWidget(new QLabel(QStringLiteral("UID读取失败"), qjResultGroup), 0, 2);
+    qjResultLayout->addWidget(qjStressUidReadErrorValue, 0, 3);
+    qjResultLayout->addWidget(new QLabel(QStringLiteral("密钥/模块错误"), qjResultGroup), 1, 0);
+    qjResultLayout->addWidget(qjStressModuleFaultValue, 1, 1);
+    qjResultLayout->addWidget(new QLabel(QStringLiteral("通信故障"), qjResultGroup), 1, 2);
+    qjResultLayout->addWidget(qjStressCommunicationFaultValue, 1, 3);
+    qjResultLayout->addWidget(new QLabel(QStringLiteral("内容异常"), qjResultGroup), 2, 0);
+    qjResultLayout->addWidget(qjStressContentErrorValue, 2, 1);
+    qjResultLayout->addWidget(new QLabel(QStringLiteral("最大连续失败"), qjResultGroup), 2, 2);
+    qjResultLayout->addWidget(qjStressMaxContinuousFailureValue, 2, 3);
+    qjResultLayout->addWidget(new QLabel(QStringLiteral("失败原因"), qjResultGroup), 3, 0);
+    qjResultLayout->addWidget(qjStressLastFailureReasonValue, 3, 1, 1, 3);
+
+    qjLayout->addWidget(qjSummaryGroup, 0, 0);
+    qjLayout->addWidget(qjUidGroup, 0, 1);
+    qjLayout->addWidget(qjResultGroup, 1, 0, 1, 2);
+    qjLayout->setColumnStretch(0, 1);
+    qjLayout->setColumnStretch(1, 1);
+
+    stressStatsStackedWidget = new QStackedWidget(stressWidget);
+    stressStatsStackedWidget->addWidget(mtStressPanel);
+    stressStatsStackedWidget->addWidget(qjStressPanel);
+
     layout->addWidget(controlGroup, 0, 0);
-    layout->addWidget(summaryGroup, 1, 0);
-    layout->addWidget(tagGroup, 0, 1);
-    layout->addWidget(faultGroup, 1, 1);
+    layout->addWidget(stressStatsStackedWidget, 1, 0);
     layout->setColumnStretch(0, 1);
-    layout->setColumnStretch(1, 1);
+    layout->setRowStretch(1, 1);
 
     connect(stressStartBtn, &QPushButton::clicked, this, [this]() {
         startStressTest();
@@ -1302,8 +1445,16 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
     controlLayout->addWidget(otaQueryBtn, 0, 0);
     controlLayout->addWidget(otaStartUpgradeBtn, 0, 1);
     controlLayout->addWidget(otaAbortUpgradeBtn, 0, 2);
+    qjOtaTargetLabel = new QLabel(QStringLiteral("青桔升级目标"), controlGroup);
+    qjOtaTargetCombo = new QComboBox(controlGroup);
+    qjOtaTargetCombo->addItem(QStringLiteral("RFR (0x0B)"), 0x0B);
+    qjOtaTargetCombo->addItem(QStringLiteral("NPK (0x0A)"), 0x0A);
+    controlLayout->addWidget(qjOtaTargetLabel, 1, 0);
+    controlLayout->addWidget(qjOtaTargetCombo, 1, 1, 1, 2);
+    qjOtaTargetLabel->hide();
+    qjOtaTargetCombo->hide();
 
-    QGroupBox *otaStressGroup = new QGroupBox(QStringLiteral("升级压力测试"), otaWidget);
+    otaStressGroup = new QGroupBox(QStringLiteral("升级压力测试"), otaWidget);
     QGridLayout *stressLayout = new QGridLayout(otaStressGroup);
     stressLayout->setContentsMargins(8, 8, 8, 8);
     stressLayout->setHorizontalSpacing(6);
@@ -1423,7 +1574,7 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
     connect(otaQueryBtn, &QPushButton::clicked, this, [this]() {
         if (appConfig.load().protocolMode == 1) { // 青桔协议
             if (canStarted) {
-                qingjuOtaService->queryProgramStatus();
+                qingjuOtaService->queryProgramStatus(selectedQingjuOtaTarget());
             } else {
                 QMessageBox::warning(this, "警告", "请先启动 CAN 设备！");
             }
@@ -1444,14 +1595,31 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
                 QMessageBox::warning(this, "警告", "请先启动 CAN 设备！");
                 return;
             }
-            m_otaStressRunning = false;
+            if (otaStressTestEnabledCheck != nullptr && otaStressTestEnabledCheck->isChecked()) {
+                m_otaStressRunning = true;
+                m_otaCurrentCycle = 1;
+                m_otaSuccessCount = 0;
+                m_otaFailureCount = 0;
+                m_otaLastFailureReason = "-";
+                m_otaTargetCycles = otaStressCyclesSpin->value();
+
+                m_originalLogEnabled = ui->checkBox_4->isChecked();
+                if (otaStressSuspendLogCheck->isChecked()) {
+                    ui->checkBox_4->setChecked(false);
+                }
+
+                updateOtaStressUI();
+                logService.logRuntime(LogLevel::Info, QString("Qingju OTA stress test started. Target cycles: %1").arg(m_otaTargetCycles));
+            } else {
+                m_otaStressRunning = false;
+            }
             // 获取并下发青桔异常配置
             QingjuOtaErrorConfig cfg;
             if (qjOtaAnomalyEnableCheck != nullptr && qjOtaAnomalyEnableCheck->isChecked()) {
                 cfg.enabled = true;
                 cfg.caseMode = qjOtaAnomalyCombo->currentData().toInt();
             }
-            qingjuOtaService->startUpgrade(firmwarePath, cfg);
+            qingjuOtaService->startUpgrade(firmwarePath, selectedQingjuOtaTarget(), cfg);
         } else { // 美团协议
             otaService.setChannel(static_cast<quint32>(ui->sendPathCombo->currentIndex()));
             otaService.setDeviceVersions(rfidService.vendorCode(), rfidService.hardwareVersion(), rfidService.softwareVersion());
@@ -1481,6 +1649,13 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
     });
     connect(otaAbortUpgradeBtn, &QPushButton::clicked, this, [this]() {
         if (appConfig.load().protocolMode == 1) { // 青桔协议
+            if (m_otaStressRunning) {
+                m_otaStressRunning = false;
+                m_otaCooldownTimer->stop();
+                ui->checkBox_4->setChecked(m_originalLogEnabled);
+                updateOtaStressUI();
+                logService.logRuntime(LogLevel::Info, "Qingju OTA stress test manually aborted.");
+            }
             qingjuOtaService->abortUpgrade();
         } else { // 美团协议
             if (m_otaStressRunning) {
@@ -1538,8 +1713,18 @@ bool MainWindow::parseQingjuAddress(const QString &text, quint8 *address, QStrin
 
 void MainWindow::clearQingjuRfidPanel()
 {
+    setLabelValue(qjRfidResultValue, QString());
+    if (qjRfidResultValue != nullptr) {
+        qjRfidResultValue->setStyleSheet(QString());
+    }
     setLabelValue(qjRfidAppStatusValue, QString());
+    if (qjRfidAppStatusValue != nullptr) {
+        qjRfidAppStatusValue->setStyleSheet(QString());
+    }
     setLabelValue(qjRfidAlarmValue, QString());
+    if (qjRfidAlarmValue != nullptr) {
+        qjRfidAlarmValue->setStyleSheet(QString());
+    }
     setLabelValue(qjRfidUidValue, QString());
     setLabelValue(qjRfidPwdValue, QString());
     setLabelValue(qjRfidModelValue, QString());
@@ -1548,6 +1733,53 @@ void MainWindow::clearQingjuRfidPanel()
     setLabelValue(qjRfidSnValue, QString());
     setLabelValue(qjRfidFirmwareVerValue, QString());
     setLabelValue(qjRfidHardwareVerValue, QString());
+}
+
+void MainWindow::updateQingjuOnlineStatus(bool clearOfflineData)
+{
+    if (!canStarted) {
+        if (topRfidStatusValue != nullptr) {
+            topRfidStatusValue->setText(QStringLiteral("协议：青桔  NPK：未启动  RFR：未启动"));
+            topRfidStatusValue->setStyleSheet(QStringLiteral("color: gray; font-weight: bold;"));
+        }
+        if (rfidOnlineStatusValue != nullptr) {
+            rfidOnlineStatusValue->setText(QStringLiteral("未启动"));
+            rfidOnlineStatusValue->setStyleSheet(QStringLiteral("color: gray; font-weight: bold;"));
+        }
+        return;
+    }
+
+    const QDateTime now = QDateTime::currentDateTime();
+    const bool npkOnline = lastQingjuNpkFrameTime.isValid() && lastQingjuNpkFrameTime.msecsTo(now) < 1500;
+    const bool rfrOnline = lastQingjuRfrFrameTime.isValid() && lastQingjuRfrFrameTime.msecsTo(now) < 1500;
+    const QString npkText = npkOnline ? QStringLiteral("在线") : QStringLiteral("离线");
+    const QString rfrText = rfrOnline ? QStringLiteral("在线") : QStringLiteral("离线");
+
+    if (topRfidStatusValue != nullptr) {
+        topRfidStatusValue->setText(QStringLiteral("协议：青桔  NPK：%1  RFR：%2").arg(npkText, rfrText));
+        if (npkOnline && rfrOnline) {
+            topRfidStatusValue->setStyleSheet(QStringLiteral("color: green; font-weight: bold;"));
+        } else if (npkOnline || rfrOnline) {
+            topRfidStatusValue->setStyleSheet(QStringLiteral("color: #B26A00; font-weight: bold;"));
+        } else {
+            topRfidStatusValue->setStyleSheet(QStringLiteral("color: red; font-weight: bold;"));
+        }
+    }
+
+    if (rfidOnlineStatusValue != nullptr) {
+        rfidOnlineStatusValue->setText(QStringLiteral("NPK：%1 / RFR：%2").arg(npkText, rfrText));
+        if (npkOnline && rfrOnline) {
+            rfidOnlineStatusValue->setStyleSheet(QStringLiteral("color: green; font-weight: bold;"));
+        } else if (npkOnline || rfrOnline) {
+            rfidOnlineStatusValue->setStyleSheet(QStringLiteral("color: #B26A00; font-weight: bold;"));
+        } else {
+            rfidOnlineStatusValue->setStyleSheet(QStringLiteral("color: red; font-weight: bold;"));
+        }
+    }
+
+    if (clearOfflineData && !npkOnline) {
+        clearQingjuRfidPanel();
+    }
 }
 
 void MainWindow::sendRfidFrame(UINT canId, const QByteArray &payload)
@@ -1592,6 +1824,7 @@ void MainWindow::updateRfidPanel(const RfidState &state)
     if (topRfidStatusValue != nullptr) {
         const QString tagText = state.tag.isEmpty() ? QStringLiteral("未识别") : state.tag;
         topRfidStatusValue->setText(QStringLiteral("RFID：%1").arg(tagText));
+        topRfidStatusValue->setStyleSheet(QString());
     }
 }
 
@@ -1613,6 +1846,23 @@ void MainWindow::updateStressTestPanel(const StressTestStats &stats)
     setLabelValue(stressUniqueTagCountValue, QString::number(stats.uniqueTagCount));
     setLabelValue(stressMaxContinuousFailureValue, QString::number(stats.maxContinuousFailure));
     setLabelValue(stressLastFailureReasonValue, stats.lastFailureReason);
+
+    setLabelValue(qjStressStateValue, stats.running ? QStringLiteral("运行中") : QStringLiteral("已停止"));
+    setLabelValue(qjStressElapsedValue, QString("%1 s").arg(stats.elapsedSeconds));
+    setLabelValue(qjStressTotalSamplesValue, QString::number(stats.totalSamples));
+    setLabelValue(qjStressSuccessCountValue, QString::number(stats.successCount));
+    setLabelValue(qjStressSuccessRateValue, QString("%1%").arg(stats.successRate, 0, 'f', 2));
+    setLabelValue(qjStressCurrentUidValue, stats.currentTag);
+    setLabelValue(qjStressLastSuccessUidValue, stats.lastSuccessTag);
+    setLabelValue(qjStressUniqueUidCountValue, QString::number(stats.uniqueTagCount));
+    setLabelValue(qjStressNoTagCountValue, QString::number(stats.noTagCount));
+    setLabelValue(qjStressUidReadErrorValue, QString::number(stats.tagLengthErrorCount));
+    setLabelValue(qjStressModuleFaultValue, QString::number(stats.moduleFaultCount));
+    setLabelValue(qjStressCommunicationFaultValue, QString::number(stats.communicationFaultCount));
+    setLabelValue(qjStressContentErrorValue, QString::number(stats.tagContentErrorCount));
+    setLabelValue(qjStressMaxContinuousFailureValue, QString::number(stats.maxContinuousFailure));
+    setLabelValue(qjStressLastFailureReasonValue, stats.lastFailureReason);
+
     if (topStressStatusValue != nullptr) {
         topStressStatusValue->setText(QStringLiteral("压测：%1 成功率 %2%")
                                       .arg(stats.running ? QStringLiteral("运行中") : QStringLiteral("已停止"))
@@ -1640,7 +1890,39 @@ void MainWindow::addCanFrameToList(const CanFrame &frame)
     messageList << QString::number(frame.dlc());
     messageList << frame.protocolText();
     messageList << (frame.remoteFrame ? QString() : frame.dataText());
+    messageList << protocolDecodeText(frame);
     AddDataToList(messageList);
+}
+
+QString MainWindow::protocolDecodeText(const CanFrame &frame) const
+{
+    if (protocolModeCombo == nullptr || protocolModeCombo->currentIndex() != 1 || !frame.extendedFrame) {
+        return QStringLiteral("-");
+    }
+
+    const QingjuCanId id = QingjuCanId::parse(frame.id);
+    QString text = QString("QJ src=%1 dst=%2 pri=%3 q=%4 idx=%5")
+        .arg(qingjuAddressName(id.srcAddr))
+        .arg(qingjuAddressName(id.destAddr))
+        .arg(id.priority)
+        .arg(id.queue)
+        .arg(id.index);
+
+    if (!frame.remoteFrame && !frame.data.isEmpty() && id.index == 0) {
+        const quint8 funcCode = static_cast<quint8>(frame.data.at(0));
+        text += QString(" func=0x%1").arg(funcCode, 2, 16, QChar('0')).toUpper();
+    }
+    return text;
+}
+
+QString MainWindow::qingjuAddressName(quint8 address) const
+{
+    switch (address) {
+    case 0x01: return QStringLiteral("ECU(0x01)");
+    case 0x0A: return QStringLiteral("NPK(0x0A)");
+    case 0x0B: return QStringLiteral("RFR(0x0B)");
+    default: return QString("0x%1").arg(address, 2, 16, QChar('0')).toUpper();
+    }
 }
 
 void MainWindow::setupCanLogSaveButton()
@@ -1832,10 +2114,15 @@ void MainWindow::handleRecvedFrames(const QVector<CanFrame> &frames)
         if (appConfig.load().protocolMode == 1) { // 青桔协议
             if (frame.extendedFrame) {
                 QingjuCanId qjId = QingjuCanId::parse(frame.id);
-                if (qjId.srcAddr == 0x0A || qjId.srcAddr == 0x0B) {
+                if (qjId.srcAddr == 0x0A) {
+                    lastQingjuNpkFrameTime = QDateTime::currentDateTime();
+                    lastRfidFrameTime = lastQingjuNpkFrameTime;
+                } else if (qjId.srcAddr == 0x0B) {
+                    lastQingjuRfrFrameTime = QDateTime::currentDateTime();
                     lastRfidFrameTime = QDateTime::currentDateTime();
                 }
                 qingjuCanManager->handleIncomingFrame(frame);
+                updateQingjuOnlineStatus(false);
             }
         } else { // 美团协议
             if ((frame.id >= 0x2C0 && frame.id <= 0x2DF) || frame.id == 0x107) {
@@ -2140,6 +2427,49 @@ void MainWindow::handleOtaStateChangeForStressTest(OtaService::State state, cons
     }
 }
 
+void MainWindow::handleQingjuOtaStateChangeForStressTest(QingjuOtaService::State state, const QString &message)
+{
+    if (!m_otaStressRunning) return;
+
+    if (state == QingjuOtaService::State::Completed) {
+        m_otaSuccessCount++;
+    } else if (state == QingjuOtaService::State::Failed) {
+        m_otaFailureCount++;
+        m_otaLastFailureReason = message;
+    } else if (state == QingjuOtaService::State::Abort) {
+        m_otaStressRunning = false;
+        m_otaCooldownTimer->stop();
+        ui->checkBox_4->setChecked(m_originalLogEnabled);
+        updateOtaStressUI();
+        return;
+    } else {
+        return;
+    }
+
+    updateOtaStressUI();
+
+    if (m_otaCurrentCycle >= m_otaTargetCycles) {
+        m_otaStressRunning = false;
+        m_otaCooldownTimer->stop();
+        ui->checkBox_4->setChecked(m_originalLogEnabled);
+        updateOtaStressUI();
+
+        if (m_otaFailureCount == 0) {
+            logService.logRuntime(LogLevel::Info, QString("Qingju OTA stress test completed successfully. Total cycles: %1").arg(m_otaTargetCycles));
+            QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("青桔 OTA 升级压力测试全部成功完成。"));
+        } else {
+            logService.logRuntime(LogLevel::Warning, QString("Qingju OTA stress test finished with failures. Success: %1, Failure: %2, Last error: %3")
+                                  .arg(m_otaSuccessCount).arg(m_otaFailureCount).arg(message));
+            QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("青桔 OTA 升级压力测试已完成，但存在失败记录。"));
+        }
+        return;
+    }
+
+    const int cooldownMs = otaCooldownSpin != nullptr ? otaCooldownSpin->value() : 2000;
+    otaMessageValue->setText(QStringLiteral("第 %1 轮青桔 OTA 已结束，冷却 %2 ms 后发起下一轮。").arg(m_otaCurrentCycle).arg(cooldownMs));
+    m_otaCooldownTimer->start(cooldownMs);
+}
+
 void MainWindow::onOtaInjectMasterToggled(bool checked)
 {
     if (otaInjectCrcErrorCheck != nullptr) otaInjectCrcErrorCheck->setEnabled(checked);
@@ -2167,6 +2497,24 @@ OtaErrorConfig MainWindow::getOtaErrorConfig() const
     return config;
 }
 
+QingjuOtaErrorConfig MainWindow::getQingjuOtaErrorConfig() const
+{
+    QingjuOtaErrorConfig config;
+    if (qjOtaAnomalyEnableCheck != nullptr && qjOtaAnomalyEnableCheck->isChecked()) {
+        config.enabled = true;
+        config.caseMode = qjOtaAnomalyCombo != nullptr ? qjOtaAnomalyCombo->currentData().toInt() : 0;
+    }
+    return config;
+}
+
+quint8 MainWindow::selectedQingjuOtaTarget() const
+{
+    if (qjOtaTargetCombo == nullptr) {
+        return 0x0B;
+    }
+    return static_cast<quint8>(qjOtaTargetCombo->currentData().toUInt());
+}
+
 void MainWindow::onProtocolModeChanged(int index)
 {
     AppConfigData config = appConfig.load();
@@ -2175,11 +2523,23 @@ void MainWindow::onProtocolModeChanged(int index)
 
     if (index == 0) { // 美团协议
         qingjuRfidService->stopScan();
+        if (topRfidStatusValue != nullptr) {
+            topRfidStatusValue->setText(QStringLiteral("RFID：未识别"));
+            topRfidStatusValue->setStyleSheet(QString());
+        }
+        if (stressStatsStackedWidget != nullptr && mtStressPanel != nullptr) {
+            stressStatsStackedWidget->setCurrentWidget(mtStressPanel);
+        }
         if (rfidStackedWidget != nullptr && mtRfidPanel != nullptr) {
             rfidStackedWidget->setCurrentWidget(mtRfidPanel);
         }
         if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->hide();
         if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->show();
+        if (otaStressGroup != nullptr) otaStressGroup->show();
+        if (qjOtaTargetLabel != nullptr) qjOtaTargetLabel->hide();
+        if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->hide();
+        if (otaQueryBtn != nullptr) otaQueryBtn->setText(QStringLiteral("查询APP/BOOT"));
+        if (otaStartUpgradeBtn != nullptr) otaStartUpgradeBtn->setText(QStringLiteral("开始升级"));
         
         otaStateValue->setText(otaService.stateText());
         otaMessageValue->setText(otaService.lastMessage().isEmpty() ? QStringLiteral("点击“开始升级”或“查询APP/BOOT”启动") : otaService.lastMessage());
@@ -2193,27 +2553,69 @@ void MainWindow::onProtocolModeChanged(int index)
         if (rfidStackedWidget != nullptr && qjRfidPanel != nullptr) {
             rfidStackedWidget->setCurrentWidget(qjRfidPanel);
         }
+        if (stressStatsStackedWidget != nullptr && qjStressPanel != nullptr) {
+            stressStatsStackedWidget->setCurrentWidget(qjStressPanel);
+        }
         if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->show();
         if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->hide();
+        if (otaStressGroup != nullptr) otaStressGroup->show();
+        if (qjOtaTargetLabel != nullptr) qjOtaTargetLabel->show();
+        if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->show();
+        if (otaQueryBtn != nullptr) otaQueryBtn->setText(QStringLiteral("查询目标 APP/BOOT"));
+        if (otaStartUpgradeBtn != nullptr) otaStartUpgradeBtn->setText(QStringLiteral("开始目标升级"));
         
         otaStateValue->setText(qingjuOtaService->stateText());
-        otaMessageValue->setText(qingjuOtaService->lastMessage().isEmpty() ? QStringLiteral("点击“开始升级”或“查询APP/BOOT”启动") : qingjuOtaService->lastMessage());
+        otaMessageValue->setText(qingjuOtaService->lastMessage().isEmpty() ? QStringLiteral("选择 NPK/RFR 后，点击“开始目标升级”或“查询目标 APP/BOOT”启动") : qingjuOtaService->lastMessage());
     }
 
     rfidOnlineStatusValue->setText("-");
     rfidOnlineStatusValue->setStyleSheet("color: gray; font-weight: bold;");
     lastRfidFrameTime = QDateTime();
+    lastQingjuNpkFrameTime = QDateTime();
+    lastQingjuRfrFrameTime = QDateTime();
+    if (index == 1) {
+        updateQingjuOnlineStatus(false);
+    }
 
     updateControlsState();
+    updateStressTestPanel(stressTestService.stats());
 }
 
 void MainWindow::updateQingjuRfidPanel(const QingjuNpkState &state)
 {
+    if (qjRfidResultValue != nullptr) {
+        qjRfidResultValue->setText(state.statusText.isEmpty() ? "-" : state.statusText);
+        if (state.result == 1) {
+            qjRfidResultValue->setStyleSheet(QStringLiteral("color: green; font-weight: bold;"));
+        } else if (state.result == 2) {
+            qjRfidResultValue->setStyleSheet(QStringLiteral("color: gray; font-weight: bold;"));
+        } else if (state.result == 3) {
+            qjRfidResultValue->setStyleSheet(QStringLiteral("color: #B26A00; font-weight: bold;"));
+        } else if (state.result >= 4 && state.result <= 7) {
+            qjRfidResultValue->setStyleSheet(QStringLiteral("color: red; font-weight: bold;"));
+        } else {
+            qjRfidResultValue->setStyleSheet(QString());
+        }
+    }
     if (qjRfidAppStatusValue != nullptr) {
         qjRfidAppStatusValue->setText(state.appStatus.isEmpty() ? "-" : state.appStatus);
+        if (state.appStatus.compare(QStringLiteral("app"), Qt::CaseInsensitive) == 0) {
+            qjRfidAppStatusValue->setStyleSheet(QStringLiteral("color: green; font-weight: bold;"));
+        } else if (state.appStatus.compare(QStringLiteral("boot"), Qt::CaseInsensitive) == 0) {
+            qjRfidAppStatusValue->setStyleSheet(QStringLiteral("color: #B26A00; font-weight: bold;"));
+        } else {
+            qjRfidAppStatusValue->setStyleSheet(QString());
+        }
     }
     if (qjRfidAlarmValue != nullptr) {
         qjRfidAlarmValue->setText(state.alarmText.isEmpty() ? "-" : state.alarmText);
+        if (state.alarmText.isEmpty()) {
+            qjRfidAlarmValue->setStyleSheet(QString());
+        } else if (state.alarm == 0) {
+            qjRfidAlarmValue->setStyleSheet(QStringLiteral("color: green; font-weight: bold;"));
+        } else {
+            qjRfidAlarmValue->setStyleSheet(QStringLiteral("color: red; font-weight: bold;"));
+        }
     }
     if (qjRfidUidValue != nullptr) {
         qjRfidUidValue->setText(state.uidText.isEmpty() ? "-" : state.uidText);
@@ -2223,6 +2625,14 @@ void MainWindow::updateQingjuRfidPanel(const QingjuNpkState &state)
             qjRfidPwdValue->setText("-");
         } else {
             qjRfidPwdValue->setText(QString("0x%1").arg(state.password, 8, 16, QChar('0')).toUpper());
+            if (qjRegisterPresetCombo != nullptr &&
+                qjRegisterPresetCombo->currentData().toInt() == 5 &&
+                qjRegValueEdit != nullptr) {
+                qjRegValueEdit->setText(QString("%1 %2")
+                    .arg((state.password >> 16) & 0xFFFF, 4, 16, QChar('0'))
+                    .arg(state.password & 0xFFFF, 4, 16, QChar('0'))
+                    .toUpper());
+            }
         }
     }
     if (qjRfidModelValue != nullptr) {
@@ -2501,6 +2911,7 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     statusLayout->setVerticalSpacing(3);
 
     qjRfidAddrValue = new QLabel("0x0A", statusGroup);
+    qjRfidResultValue = new QLabel("-", statusGroup);
     qjRfidAppStatusValue = new QLabel("-", statusGroup);
     qjRfidAlarmValue = new QLabel("-", statusGroup);
     qjRfidUidValue = new QLabel("-", statusGroup);
@@ -2508,14 +2919,16 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
 
     statusLayout->addWidget(new QLabel(QStringLiteral("读卡器地址"), statusGroup), 0, 0);
     statusLayout->addWidget(qjRfidAddrValue, 0, 1);
-    statusLayout->addWidget(new QLabel(QStringLiteral("当前程序状态"), statusGroup), 1, 0);
-    statusLayout->addWidget(qjRfidAppStatusValue, 1, 1);
-    statusLayout->addWidget(new QLabel(QStringLiteral("芯片异常告警"), statusGroup), 2, 0);
-    statusLayout->addWidget(qjRfidAlarmValue, 2, 1);
-    statusLayout->addWidget(new QLabel(QStringLiteral("标签64位UID"), statusGroup), 3, 0);
-    statusLayout->addWidget(qjRfidUidValue, 3, 1);
-    statusLayout->addWidget(new QLabel(QStringLiteral("计算的密码"), statusGroup), 4, 0);
-    statusLayout->addWidget(qjRfidPwdValue, 4, 1);
+    statusLayout->addWidget(new QLabel(QStringLiteral("读取结果 0xA904"), statusGroup), 1, 0);
+    statusLayout->addWidget(qjRfidResultValue, 1, 1);
+    statusLayout->addWidget(new QLabel(QStringLiteral("当前程序状态"), statusGroup), 2, 0);
+    statusLayout->addWidget(qjRfidAppStatusValue, 2, 1);
+    statusLayout->addWidget(new QLabel(QStringLiteral("芯片异常告警 0xA919"), statusGroup), 3, 0);
+    statusLayout->addWidget(qjRfidAlarmValue, 3, 1);
+    statusLayout->addWidget(new QLabel(QStringLiteral("标签64位UID"), statusGroup), 4, 0);
+    statusLayout->addWidget(qjRfidUidValue, 4, 1);
+    statusLayout->addWidget(new QLabel(QStringLiteral("计算的密码"), statusGroup), 5, 0);
+    statusLayout->addWidget(qjRfidPwdValue, 5, 1);
 
     QGroupBox *assetGroup = new QGroupBox(QStringLiteral("标签资产信息"), panel);
     QGridLayout *assetLayout = new QGridLayout(assetGroup);
@@ -2557,6 +2970,14 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     customLayout->setHorizontalSpacing(6);
     customLayout->setVerticalSpacing(4);
 
+    qjRegisterPresetCombo = new QComboBox(customGroup);
+    qjRegisterPresetCombo->addItem(QStringLiteral("手动输入"), 0);
+    qjRegisterPresetCombo->addItem(QStringLiteral("读 NPK 状态 0xA904~0xA919"), 1);
+    qjRegisterPresetCombo->addItem(QStringLiteral("读 RFR APP/BOOT 0xA02A"), 2);
+    qjRegisterPresetCombo->addItem(QStringLiteral("启动 NPK 检测"), 3);
+    qjRegisterPresetCombo->addItem(QStringLiteral("停止 NPK 检测"), 4);
+    qjRegisterPresetCombo->addItem(QStringLiteral("写一机一密 0xA902/0xA903"), 5);
+
     qjDestAddrCombo = new QComboBox(customGroup);
     qjDestAddrCombo->addItem(QStringLiteral("NPK (0x0A)"), 0x0A);
     qjDestAddrCombo->addItem(QStringLiteral("RFR (0x0B)"), 0x0B);
@@ -2579,20 +3000,80 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     qjCustomLog->setReadOnly(true);
     qjCustomLog->setMaximumHeight(80);
 
-    customLayout->addWidget(new QLabel(QStringLiteral("目标设备"), customGroup), 0, 0);
-    customLayout->addWidget(qjDestAddrCombo, 0, 1);
-    customLayout->addWidget(new QLabel(QStringLiteral("功能码"), customGroup), 0, 2);
-    customLayout->addWidget(qjFuncCodeCombo, 0, 3);
-    
-    customLayout->addWidget(new QLabel(QStringLiteral("寄存器地址"), customGroup), 1, 0);
-    customLayout->addWidget(qjRegAddrEdit, 1, 1);
-    customLayout->addWidget(new QLabel(QStringLiteral("写入数值(Hex)"), customGroup), 1, 2);
-    customLayout->addWidget(qjRegValueEdit, 1, 3);
+    customLayout->addWidget(new QLabel(QStringLiteral("快捷模板"), customGroup), 0, 0);
+    customLayout->addWidget(qjRegisterPresetCombo, 0, 1, 1, 3);
 
-    customLayout->addWidget(qjCustomWriteBtn, 2, 0, 1, 2);
-    customLayout->addWidget(qjCustomReadBtn, 2, 2, 1, 2);
-    customLayout->addWidget(qjCustomLog, 3, 0, 1, 4);
+    customLayout->addWidget(new QLabel(QStringLiteral("目标设备"), customGroup), 1, 0);
+    customLayout->addWidget(qjDestAddrCombo, 1, 1);
+    customLayout->addWidget(new QLabel(QStringLiteral("功能码"), customGroup), 1, 2);
+    customLayout->addWidget(qjFuncCodeCombo, 1, 3);
 
+    customLayout->addWidget(new QLabel(QStringLiteral("寄存器地址"), customGroup), 2, 0);
+    customLayout->addWidget(qjRegAddrEdit, 2, 1);
+    customLayout->addWidget(new QLabel(QStringLiteral("值/数量"), customGroup), 2, 2);
+    customLayout->addWidget(qjRegValueEdit, 2, 3);
+
+    customLayout->addWidget(qjCustomWriteBtn, 3, 0, 1, 2);
+    customLayout->addWidget(qjCustomReadBtn, 3, 2, 1, 2);
+    customLayout->addWidget(qjCustomLog, 4, 0, 1, 4);
+
+    connect(qjRegisterPresetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
+        if (index <= 0) {
+            qjRegValueEdit->setPlaceholderText(QStringLiteral("Hex: e.g. 0001 0002；读取时填写数量"));
+            return;
+        }
+
+        const int preset = qjRegisterPresetCombo->itemData(index).toInt();
+        qjRegValueEdit->setPlaceholderText(QStringLiteral("Hex: e.g. 0001 0002；读取时填写数量"));
+
+        switch (preset) {
+        case 1:
+            qjDestAddrCombo->setCurrentIndex(0);
+            qjFuncCodeCombo->setCurrentIndex(2);
+            qjRegAddrEdit->setText(QStringLiteral("A904"));
+            qjRegValueEdit->setText(QStringLiteral("22"));
+            break;
+        case 2:
+            qjDestAddrCombo->setCurrentIndex(1);
+            qjFuncCodeCombo->setCurrentIndex(2);
+            qjRegAddrEdit->setText(QStringLiteral("A02A"));
+            qjRegValueEdit->setText(QStringLiteral("1"));
+            break;
+        case 3: {
+            const int intervalMs = qjRfidPeriodSpin == nullptr ? 100 : qjRfidPeriodSpin->value();
+            const quint16 periodValue = static_cast<quint16>(0x8000 | (qBound(100, intervalMs, 25500) / 100));
+            qjDestAddrCombo->setCurrentIndex(0);
+            qjFuncCodeCombo->setCurrentIndex(0);
+            qjRegAddrEdit->setText(QStringLiteral("A900"));
+            qjRegValueEdit->setText(QString("0001 %1").arg(periodValue, 4, 16, QChar('0')).toUpper());
+            break;
+        }
+        case 4:
+            qjDestAddrCombo->setCurrentIndex(0);
+            qjFuncCodeCombo->setCurrentIndex(0);
+            qjRegAddrEdit->setText(QStringLiteral("A900"));
+            qjRegValueEdit->setText(QStringLiteral("0001 0000"));
+            break;
+        case 5: {
+            qjDestAddrCombo->setCurrentIndex(0);
+            qjFuncCodeCombo->setCurrentIndex(0);
+            qjRegAddrEdit->setText(QStringLiteral("A902"));
+            QString passwordText = qjRfidPwdValue == nullptr ? QString() : qjRfidPwdValue->text().trimmed();
+            if (passwordText.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
+                passwordText = passwordText.mid(2);
+            }
+            if (passwordText.length() == 8) {
+                qjRegValueEdit->setText(QString("%1 %2").arg(passwordText.left(4), passwordText.mid(4, 4)).toUpper());
+            } else {
+                qjRegValueEdit->clear();
+                qjRegValueEdit->setPlaceholderText(QStringLiteral("等待 UID 后自动填入密码"));
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    });
     connect(qjCustomWriteBtn, &QPushButton::clicked, this, &MainWindow::onQjCustomWriteClicked);
     connect(qjCustomReadBtn, &QPushButton::clicked, this, &MainWindow::onQjCustomReadClicked);
 
