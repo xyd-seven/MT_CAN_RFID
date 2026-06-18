@@ -103,18 +103,18 @@ void Rs485RfidService::queryDeviceInfo()
     if (m_protocolMode == 2) {
         // BB: Query hardware version (type 0x00)
         sendBbPacket(0x00, 0x03, QByteArray::fromHex("00"));
+        m_pendingCmdCode = 0x03;
         startTimeoutGuard();
     } else {
         // FF: Query version (0x04)
         sendFfPacket(0x04, QByteArray());
+        m_pendingCmdCode = 0x05;
         startTimeoutGuard();
     }
 }
 
 void Rs485RfidService::triggerSingleQuery()
 {
-    if (!m_isScanning) return;
-    
     if (m_protocolMode == 2) {
         sendBbPacket(0x00, 0x22, QByteArray());
         m_pendingCmdCode = 0x22;
@@ -126,9 +126,9 @@ void Rs485RfidService::triggerSingleQuery()
     }
 }
 
-void Rs485RfidService::setPower(int powerDbm)
+void Rs485RfidService::setPower(int powerRaw01Dbm)
 {
-    quint16 rawPower = powerDbm * 100; // e.g. 20 -> 2000
+    quint16 rawPower = static_cast<quint16>(powerRaw01Dbm);
     QByteArray payload;
     payload.append(static_cast<char>((rawPower >> 8) & 0xFF));
     payload.append(static_cast<char>(rawPower & 0xFF));
@@ -201,6 +201,11 @@ void Rs485RfidService::ffQueryCardSwitch()
 void Rs485RfidService::onPollTimeout()
 {
     if (!m_isScanning) return;
+
+    if (m_waitingForResponse) {
+        emit pollSkipped();
+        return;
+    }
     
     // In auto polling mode, trigger read
     if (m_protocolMode == 2) {
@@ -216,7 +221,9 @@ void Rs485RfidService::onPollTimeout()
 
 void Rs485RfidService::onPacketReceived(quint8 cmdCode, const QByteArray &payload)
 {
-    stopTimeoutGuard();
+    if (m_waitingForResponse && isExpectedResponse(cmdCode)) {
+        stopTimeoutGuard();
+    }
     m_state.isCommunicationTimeout = false;
     m_state.errorMsg.clear();
 
@@ -253,13 +260,23 @@ void Rs485RfidService::onResponseTimeout()
             m_infoStep++;
             if (m_protocolMode == 2) {
                 // BB sequence steps: 1: HW version, 2: SW version, 3: Manufacturer, 4: Device ID
-                if (m_infoStep == 2) sendBbPacket(0x00, 0x03, QByteArray::fromHex("01"));
-                else if (m_infoStep == 3) sendBbPacket(0x00, 0x03, QByteArray::fromHex("02"));
-                else if (m_infoStep == 4) sendBbPacket(0x00, 0x15, QByteArray::fromHex("01"));
+                if (m_infoStep == 2) {
+                    sendBbPacket(0x00, 0x03, QByteArray::fromHex("01"));
+                    m_pendingCmdCode = 0x03;
+                } else if (m_infoStep == 3) {
+                    sendBbPacket(0x00, 0x03, QByteArray::fromHex("02"));
+                    m_pendingCmdCode = 0x03;
+                } else if (m_infoStep == 4) {
+                    sendBbPacket(0x00, 0x15, QByteArray::fromHex("01"));
+                    m_pendingCmdCode = 0x15;
+                }
                 else m_infoStep = 0;
             } else {
                 // FF sequence steps: 1: version, 2: ID
-                if (m_infoStep == 2) sendFfPacket(0x0C, QByteArray());
+                if (m_infoStep == 2) {
+                    sendFfPacket(0x0C, QByteArray());
+                    m_pendingCmdCode = 0x0D;
+                }
                 else m_infoStep = 0;
             }
             if (m_infoStep > 0) {
@@ -277,14 +294,23 @@ void Rs485RfidService::handleBbResponse(quint8 cmdCode, const QByteArray &payloa
         m_state.errCode = 0;
         if (payload.size() >= 17) {
             // Success format: RSSI (1 byte) + PC (2 bytes) + Tag ID (12 bytes) + CRC (2 bytes)
+            m_state.bbRssi = QString("0x%1").arg(static_cast<quint8>(payload.at(0)), 2, 16, QChar('0')).toUpper();
+            m_state.bbPc = payload.mid(1, 2).toHex(' ').toUpper();
             m_state.tagId = payload.mid(3, 12).toHex().toUpper();
+            m_state.bbCrc = payload.mid(15, 2).toHex(' ').toUpper();
         } else {
+            m_state.bbRssi.clear();
+            m_state.bbPc.clear();
+            m_state.bbCrc.clear();
             m_state.tagId = payload.toHex().toUpper();
         }
         emit stateUpdated(m_state);
     } 
     else if (cmdCode == 0xFF) {
         m_state.tagId.clear();
+        m_state.bbRssi.clear();
+        m_state.bbPc.clear();
+        m_state.bbCrc.clear();
         m_state.errCode = payload.isEmpty() ? 0xFF : static_cast<quint8>(payload.at(0));
         m_state.errorMsg = (m_state.errCode == 0x15) ? QStringLiteral("未扫描到标签") : QStringLiteral("读卡失败");
         emit stateUpdated(m_state);
@@ -303,23 +329,23 @@ void Rs485RfidService::handleBbResponse(quint8 cmdCode, const QByteArray &payloa
         if (m_infoStep == 1) {
             m_infoStep = 2;
             sendBbPacket(0x00, 0x03, QByteArray::fromHex("01")); // SW version query
+            m_pendingCmdCode = 0x03;
             startTimeoutGuard();
         } else if (m_infoStep == 2) {
             m_infoStep = 3;
             sendBbPacket(0x00, 0x03, QByteArray::fromHex("02")); // Manufacturer query
+            m_pendingCmdCode = 0x03;
             startTimeoutGuard();
         } else if (m_infoStep == 3) {
             m_infoStep = 4;
             sendBbPacket(0x00, 0x15, QByteArray::fromHex("01")); // Device ID query
+            m_pendingCmdCode = 0x15;
             startTimeoutGuard();
         }
     }
     else if (cmdCode == 0x15) {
         if (!payload.isEmpty()) {
-            m_state.deviceId = QString::fromLatin1(payload).trimmed();
-            if (m_state.deviceId.isEmpty()) {
-                m_state.deviceId = payload.toHex().toUpper();
-            }
+            m_state.deviceId = payload.toHex().toUpper();
         }
         emit stateUpdated(m_state);
         if (m_infoStep == 4) {
@@ -334,7 +360,7 @@ void Rs485RfidService::handleBbResponse(quint8 cmdCode, const QByteArray &payloa
     else if (cmdCode == 0xB7) {
         if (payload.size() >= 2) {
             quint16 rawPower = (static_cast<quint8>(payload.at(0)) << 8) | static_cast<quint8>(payload.at(1));
-            m_state.transmitPower = rawPower / 100;
+            m_state.transmitPower = rawPower;
         }
         emit stateUpdated(m_state);
     }
@@ -375,6 +401,7 @@ void Rs485RfidService::handleFfResponse(quint8 cmdCode, const QByteArray &payloa
         if (m_infoStep == 1) {
             m_infoStep = 2;
             sendFfPacket(0x0C, QByteArray()); // Query ID
+            m_pendingCmdCode = 0x0D;
             startTimeoutGuard();
         }
     }
@@ -405,7 +432,7 @@ void Rs485RfidService::handleFfResponse(quint8 cmdCode, const QByteArray &payloa
     else if (cmdCode == 0x11) {
         if (payload.size() >= 2) {
             quint16 rawPower = (static_cast<quint8>(payload.at(0)) << 8) | static_cast<quint8>(payload.at(1));
-            m_state.transmitPower = rawPower / 100;
+            m_state.transmitPower = rawPower;
         }
         emit stateUpdated(m_state);
     }
@@ -439,6 +466,19 @@ void Rs485RfidService::stopTimeoutGuard()
 {
     m_waitingForResponse = false;
     m_timeoutTimer->stop();
+}
+
+bool Rs485RfidService::isExpectedResponse(quint8 cmdCode) const
+{
+    if (m_pendingCmdCode == 0) {
+        return false;
+    }
+
+    if (m_protocolMode == 2 && m_pendingCmdCode == 0x22 && cmdCode == 0xFF) {
+        return true;
+    }
+
+    return cmdCode == m_pendingCmdCode;
 }
 
 bool Rs485RfidService::sendBbPacket(quint8 type, quint8 code, const QByteArray &payload)

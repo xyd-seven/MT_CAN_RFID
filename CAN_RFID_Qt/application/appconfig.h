@@ -10,7 +10,7 @@ struct AppConfigData
     int defaultChannel = 0;
     bool resistanceEnabled = false;
     int scanPeriod10ms = 30;
-    int maxLogRows = 5000;
+    int maxLogRows = 1000;
     bool canAutoSaveCsv = false;
     bool stressAutoSaveCsv = false;
     bool stressAutoExportSummary = false;

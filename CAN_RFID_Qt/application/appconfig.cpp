@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QSettings>
 #include <QStandardPaths>
+#include <QtGlobal>
 
 AppConfig::AppConfig()
 {
@@ -19,7 +20,7 @@ AppConfigData AppConfig::load() const
     config.defaultChannel = settings.value("device/channel", config.defaultChannel).toInt();
     config.resistanceEnabled = settings.value("device/resistanceEnabled", config.resistanceEnabled).toBool();
     config.scanPeriod10ms = settings.value("rfid/scanPeriod10ms", config.scanPeriod10ms).toInt();
-    config.maxLogRows = settings.value("log/maxRows", config.maxLogRows).toInt();
+    config.maxLogRows = qBound(1, settings.value("log/maxRows", config.maxLogRows).toInt(), 1000);
     config.canAutoSaveCsv = settings.value("log/canAutoSaveCsv", config.canAutoSaveCsv).toBool();
     config.stressAutoSaveCsv = settings.value("stress/autoSaveCsv", config.stressAutoSaveCsv).toBool();
     config.stressAutoExportSummary = settings.value("stress/autoExportSummary", config.stressAutoExportSummary).toBool();

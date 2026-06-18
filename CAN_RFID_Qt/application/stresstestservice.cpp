@@ -84,6 +84,7 @@ bool StressTestService::exportSummary(const QString &filePath) const
     stream << "module_fault_count," << snapshot.moduleFaultCount << '\n';
     stream << "communication_fault_count," << snapshot.communicationFaultCount << '\n';
     stream << "tag_content_error_count," << snapshot.tagContentErrorCount << '\n';
+    stream << "poll_skipped_count," << snapshot.pollSkippedCount << '\n';
     stream << "valid_tag_count," << snapshot.validTagCount << '\n';
     stream << "success_rate," << QString::number(snapshot.successRate, 'f', 2) << '\n';
     stream << "tag_valid_rate," << QString::number(snapshot.tagValidRate, 'f', 2) << '\n';
@@ -258,6 +259,19 @@ bool StressTestService::handleRs485State(int protocolMode, const QString &tagId,
     return true;
 }
 
+void StressTestService::recordRs485PollSkipped()
+{
+    if (!currentStats.running) {
+        return;
+    }
+
+    ++currentStats.pollSkippedCount;
+    if (elapsedTimer.isValid()) {
+        currentStats.elapsedMilliseconds = elapsedTimer.elapsed();
+        currentStats.elapsedSeconds = currentStats.elapsedMilliseconds / 1000;
+    }
+}
+
 StressTestStats StressTestService::stats() const
 {
     StressTestStats snapshot = currentStats;
@@ -429,6 +443,7 @@ void StressTestService::writeSampleCsv(const CanFrame &frame, const RfidStatus &
     stream << csvEscape(frame.hostDateTime.toString("yyyy-MM-dd HH:mm:ss.zzz")) << ','
            << currentStats.elapsedMilliseconds << ','
            << currentStats.totalSamples << ','
+           << currentStats.pollSkippedCount << ','
            << static_cast<int>(status.workMode) << ','
            << static_cast<int>(status.cardStatus) << ','
            << static_cast<int>(status.faultStatus) << ','
@@ -464,6 +479,7 @@ void StressTestService::writeQingjuSampleCsv(const QingjuNpkState &state, bool s
     stream << csvEscape(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")) << ','
            << currentStats.elapsedMilliseconds << ','
            << currentStats.totalSamples << ','
+           << currentStats.pollSkippedCount << ','
            << "qingju" << ','
            << static_cast<int>(state.result) << ','
            << static_cast<int>(state.alarm) << ','
@@ -499,6 +515,7 @@ void StressTestService::writeRs485SampleCsv(int protocolMode, const QString &tag
     stream << csvEscape(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")) << ','
            << currentStats.elapsedMilliseconds << ','
            << currentStats.totalSamples << ','
+           << currentStats.pollSkippedCount << ','
            << (protocolMode == 2 ? "rs485_bb" : "rs485_ff") << ','
            << errCode << ','
            << (isCommunicationTimeout ? 1 : 0) << ','
@@ -536,7 +553,7 @@ void StressTestService::ensureSampleCsvOpen()
     pendingSampleRows = 0;
 
     QTextStream stream(&sampleCsvFile);
-    stream << "pc_time,elapsed_ms,total_samples,work_mode,card_status,fault_status,scan_period_ms,"
+    stream << "pc_time,elapsed_ms,total_samples,poll_skipped_count,work_mode,card_status,fault_status,scan_period_ms,"
               "current_tag,tag_length,success,tag_valid,result,success_rate,tag_valid_rate,"
               "continuous_failure,max_continuous_failure,zlg_timestamp_raw\n";
 }

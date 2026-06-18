@@ -32,7 +32,7 @@ MainWindow::MainWindow(QWidget *parent) :
     QMainWindow(parent),
     ui(new Ui::MainWindow),
     canthread(nullptr),
-    maxLogRows(5000),
+    maxLogRows(1000),
     canStarted(false),
     stressRefreshTimer(new QTimer(this)),
     canAutoSaveCheckBox(nullptr),
@@ -41,6 +41,9 @@ MainWindow::MainWindow(QWidget *parent) :
     topCanStatusValue(nullptr),
     topRfidStatusValue(nullptr),
     topStressStatusValue(nullptr),
+    manualSendIdLabel(nullptr),
+    manualSendDataLabel(nullptr),
+    manualSendHintLabel(nullptr),
     testerPresentTimer(new QTimer(this)),
     rfidControlTimer(new QTimer(this)),
     rfidOnlineCheckTimer(new QTimer(this)),
@@ -182,6 +185,12 @@ MainWindow::MainWindow(QWidget *parent) :
     });
     connect(rs485Manager, &Rs485Manager::portDisconnected, this, &MainWindow::handleRs485Disconnect);
     connect(rs485RfidService, &Rs485RfidService::stateUpdated, this, &MainWindow::updateRs485RfidPanel);
+    connect(rs485RfidService, &Rs485RfidService::pollSkipped, this, [this]() {
+        if (stressTestService.stats().running && protocolModeCombo != nullptr && protocolModeCombo->currentIndex() >= 2) {
+            stressTestService.recordRs485PollSkipped();
+            updateStressTestPanel(stressTestService.stats());
+        }
+    });
     connect(rs485RfidService, &Rs485RfidService::commandFinished, this, &MainWindow::onRs485CommandFinished);
 
     ui->filterModeCombo->setCurrentIndex(2);
@@ -516,6 +525,7 @@ void MainWindow::setupCompactMainLayout()
     serialBaudRateCombo->addItem("38400", 38400);
     serialBaudRateCombo->addItem("57600", 57600);
     serialBaudRateCombo->addItem("115200", 115200);
+    serialBaudRateCombo->setToolTip(QStringLiteral("协议示例主要使用 9600/115200；选择其他波特率前请确认设备支持。"));
     
     serialOpenCloseBtn = new QPushButton(QStringLiteral("打开串口"), serialDevicePanel);
     serialRefreshBtn = new QPushButton(QStringLiteral("刷新串口"), serialDevicePanel);
@@ -563,15 +573,20 @@ void MainWindow::setupCompactMainLayout()
     ui->CANFDaccCheck->setParent(sendPanel);
     ui->sendDataEdit->setParent(sendPanel);
     ui->sendBtn->setParent(sendPanel);
+    manualSendIdLabel = new QLabel(QStringLiteral("ID"), sendPanel);
+    manualSendDataLabel = new QLabel(QStringLiteral("数据"), sendPanel);
+    manualSendHintLabel = new QLabel(QStringLiteral("CAN手动发送：输入 CAN ID 与数据字节"), sendPanel);
+    manualSendHintLabel->setStyleSheet(QStringLiteral("color: gray;"));
 
-    sendLayout->addWidget(new QLabel(QStringLiteral("ID"), sendPanel), 0, 0);
+    sendLayout->addWidget(manualSendIdLabel, 0, 0);
     sendLayout->addWidget(ui->sendIDEdit, 0, 1, 1, 2);
     sendLayout->addWidget(ui->sendBtn, 0, 3);
-    sendLayout->addWidget(new QLabel(QStringLiteral("数据"), sendPanel), 1, 0);
+    sendLayout->addWidget(manualSendDataLabel, 1, 0);
     sendLayout->addWidget(ui->sendDataEdit, 1, 1, 1, 3);
     sendLayout->addWidget(ui->frameTypeCombo, 2, 0, 1, 2);
     sendLayout->addWidget(ui->protocolCombo, 2, 2);
     sendLayout->addWidget(ui->CANFDaccCheck, 2, 3);
+    sendLayout->addWidget(manualSendHintLabel, 3, 0, 1, 4);
 
     QVBoxLayout *groupLayout2 = new QVBoxLayout(ui->groupBox_2);
     groupLayout2->setContentsMargins(10, 20, 10, 10);
@@ -685,12 +700,16 @@ void MainWindow::updateCanControlState(bool deviceOpened, bool canInitialized, b
     if (topCanStatusValue != nullptr) {
         if (canStarted) {
             topCanStatusValue->setText(QStringLiteral("CAN：已启动"));
+            topCanStatusValue->setStyleSheet(QStringLiteral("color: green; font-weight: bold;"));
         } else if (canInitialized) {
             topCanStatusValue->setText(QStringLiteral("CAN：已初始化"));
+            topCanStatusValue->setStyleSheet(QStringLiteral("color: #B26A00; font-weight: bold;"));
         } else if (deviceOpened) {
             topCanStatusValue->setText(QStringLiteral("CAN：设备已打开"));
+            topCanStatusValue->setStyleSheet(QStringLiteral("color: #B26A00; font-weight: bold;"));
         } else {
             topCanStatusValue->setText(QStringLiteral("CAN：未启动"));
+            topCanStatusValue->setStyleSheet(QStringLiteral("color: gray; font-weight: bold;"));
         }
     }
     if (topRfidStatusValue != nullptr) {
@@ -714,7 +733,33 @@ void MainWindow::updateCanControlState(bool deviceOpened, bool canInitialized, b
         }
         logService.logRuntime(LogLevel::Warning, QStringLiteral("Stress test stopped because CAN is not started"));
     }
+    updateManualSendPanelMode();
     updateControlsState();
+}
+
+void MainWindow::updateManualSendPanelMode()
+{
+    const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
+    const bool is485Mode = (protocolMode == 2 || protocolMode == 3);
+
+    ui->groupBox_2->setTitle(is485Mode ? QStringLiteral("串口手动发送") : QStringLiteral("手动发送"));
+    if (manualSendIdLabel != nullptr) manualSendIdLabel->setVisible(!is485Mode);
+    ui->sendIDEdit->setVisible(!is485Mode);
+    ui->frameTypeCombo->setVisible(!is485Mode);
+    ui->protocolCombo->setVisible(!is485Mode);
+    ui->CANFDaccCheck->setVisible(!is485Mode);
+
+    if (manualSendDataLabel != nullptr) {
+        manualSendDataLabel->setText(is485Mode ? QStringLiteral("串口HEX") : QStringLiteral("数据"));
+    }
+    if (manualSendHintLabel != nullptr) {
+        manualSendHintLabel->setText(is485Mode
+            ? QStringLiteral("串口原始帧发送：请输入完整 HEX 字节，如 BB 00 22 00 00 22 7E")
+            : QStringLiteral("CAN手动发送：输入 CAN ID 与数据字节"));
+    }
+    ui->sendDataEdit->setPlaceholderText(is485Mode
+        ? QStringLiteral("完整串口帧 HEX，例如 BB 00 22 00 00 22 7E")
+        : QString());
 }
 
 bool MainWindow::isOtaRunning() const
@@ -746,6 +791,7 @@ void MainWindow::updateControlsState()
 
     if (is485Mode) {
         const bool rs485Scanning = rs485RfidService != nullptr && rs485RfidService->isScanning();
+        updateRs485TopStatus();
         
         // 串口面板
         if (serialPortCombo != nullptr) serialPortCombo->setEnabled(!serialOpened);
@@ -810,7 +856,7 @@ void MainWindow::updateControlsState()
         ui->StartCANBtn->setEnabled(false);
         ui->reSetCANBtn->setEnabled(false);
         ui->closeDeviceBtn->setEnabled(false);
-        ui->sendBtn->setEnabled(false);
+        ui->sendBtn->setEnabled(serialOpened && !rs485Scanning && !stressRunning);
         if (oneClickStartButton != nullptr) oneClickStartButton->setEnabled(false);
         
         if (otaQueryBtn != nullptr) otaQueryBtn->setEnabled(false);
@@ -1066,15 +1112,15 @@ void MainWindow::startStressTest()
 
     if (is485Mode) {
         int intervalMs = 500;
-        int queryMode = 1;
         if (protocolMode == 2) { // BB
             intervalMs = bbHostPollPeriodSpin->value();
-            queryMode = bbQueryModeCombo->currentData().toInt();
         } else { // FF
             intervalMs = ffHostPollPeriodSpin->value();
-            queryMode = ffQueryModeCombo->currentData().toInt();
         }
-        rs485RfidService->startScan(intervalMs, queryMode);
+        constexpr int AutoPollReadMode = 1;
+        rs485RfidService->startScan(intervalMs, AutoPollReadMode);
+        logService.logRuntime(LogLevel::Info,
+                              QString("RS485 stress test polling interval: %1 ms").arg(intervalMs));
     } else {
         const bool qingjuMode = (protocolMode == 1);
         if (qingjuMode) {
@@ -2095,6 +2141,7 @@ void MainWindow::updateStressTestPanel(const StressTestStats &stats)
     setLabelValue(rs485StressStateValue, stats.running ? QStringLiteral("运行中") : QStringLiteral("已停止"));
     setLabelValue(rs485StressElapsedValue, QString("%1 s").arg(stats.elapsedSeconds));
     setLabelValue(rs485StressTotalSamplesValue, QString::number(stats.totalSamples));
+    setLabelValue(rs485StressPollSkippedValue, QString::number(stats.pollSkippedCount));
     setLabelValue(rs485StressSuccessCountValue, QString::number(stats.successCount));
     setLabelValue(rs485StressSuccessRateValue, QString("%1%").arg(stats.successRate, 0, 'f', 2));
     setLabelValue(rs485StressCurrentTagValue, stats.currentTag);
@@ -2627,6 +2674,37 @@ void MainWindow::on_reSetCANBtn_clicked()
 
 void MainWindow::on_sendBtn_clicked()
 {
+    const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
+    if (protocolMode == 2 || protocolMode == 3) {
+        if (!serialOpened || rs485Manager == nullptr || !rs485Manager->isOpen()) {
+            QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("发送失败，串口未打开！"));
+            return;
+        }
+
+        QStringList byteTextList = ui->sendDataEdit->text().split(QRegExp("\\s+"), Qt::SkipEmptyParts);
+        if (byteTextList.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("发送失败，串口数据不能为空！"));
+            return;
+        }
+
+        QByteArray payload;
+        payload.reserve(byteTextList.count());
+        for (int index = 0; index < byteTextList.count(); ++index) {
+            bool byteOk = false;
+            const int byteValue = byteTextList.at(index).toInt(&byteOk, 16);
+            if (!byteOk || byteValue < 0 || byteValue > 0xFF) {
+                QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("发送失败，第%1个串口字节不是有效十六进制值！").arg(index + 1));
+                return;
+            }
+            payload.append(static_cast<char>(byteValue));
+        }
+
+        if (!rs485Manager->sendRawData(payload)) {
+            QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口发送失败，请检查串口状态！"));
+        }
+        return;
+    }
+
     bool idOk = false;
     const UINT canId = ui->sendIDEdit->text().trimmed().toUInt(&idOk, 16);
     if (!idOk) {
@@ -2916,6 +2994,10 @@ void MainWindow::onProtocolModeChanged(int index)
         }
     }
 
+    if (index == 0 || index == 1) {
+        updateCanControlState(deviceOpened, canInitialized, canStarted);
+    }
+
     if (index == 0) { // 美团协议
         qingjuRfidService->stopScan();
         if (topRfidStatusValue != nullptr) {
@@ -2990,6 +3072,7 @@ void MainWindow::onProtocolModeChanged(int index)
         if (stressStatsStackedWidget != nullptr && rs485StressPanel != nullptr) {
             stressStatsStackedWidget->setCurrentWidget(rs485StressPanel);
         }
+        updateRs485TopStatus();
     }
 
     if (index == 0 || index == 1) {
@@ -3011,6 +3094,7 @@ void MainWindow::onProtocolModeChanged(int index)
         }
     }
 
+    updateManualSendPanelMode();
     updateControlsState();
     updateStressTestPanel(stressTestService.stats());
 }
@@ -3643,6 +3727,45 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
 // RS485 (BB/FF) Integration Implementations
 // ==========================================
 
+void MainWindow::updateRs485TopStatus()
+{
+    const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 2;
+    if (protocolMode != 2 && protocolMode != 3) {
+        return;
+    }
+
+    const QString protocolName = protocolMode == 2 ? QStringLiteral("BB") : QStringLiteral("FF");
+    const bool rs485Scanning = rs485RfidService != nullptr && rs485RfidService->isScanning();
+
+    if (topCanStatusValue != nullptr) {
+        if (serialOpened) {
+            topCanStatusValue->setText(QStringLiteral("RS485：已连接"));
+            topCanStatusValue->setStyleSheet(QStringLiteral("color: green; font-weight: bold;"));
+        } else {
+            topCanStatusValue->setText(QStringLiteral("RS485：未连接"));
+            topCanStatusValue->setStyleSheet(QStringLiteral("color: red; font-weight: bold;"));
+        }
+    }
+
+    if (topRfidStatusValue != nullptr) {
+        QString rfidStateText;
+        QString styleSheet;
+        if (!serialOpened) {
+            rfidStateText = QStringLiteral("离线");
+            styleSheet = QStringLiteral("color: red; font-weight: bold;");
+        } else if (rs485Scanning) {
+            rfidStateText = QStringLiteral("轮询中");
+            styleSheet = QStringLiteral("color: green; font-weight: bold;");
+        } else {
+            rfidStateText = QStringLiteral("待查询");
+            styleSheet = QStringLiteral("color: gray; font-weight: bold;");
+        }
+
+        topRfidStatusValue->setText(QStringLiteral("协议：%1  RFID：%2").arg(protocolName, rfidStateText));
+        topRfidStatusValue->setStyleSheet(styleSheet);
+    }
+}
+
 void MainWindow::onSerialOpenCloseClicked()
 {
     if (serialOpened) {
@@ -3654,10 +3777,7 @@ void MainWindow::onSerialOpenCloseClicked()
         serialStatusLabel->setText(QStringLiteral("串口已关闭"));
         serialStatusLabel->setStyleSheet("color: red; font-weight: bold;");
         serialOpenCloseBtn->setText(QStringLiteral("打开串口"));
-        if (topRfidStatusValue != nullptr) {
-            topRfidStatusValue->setText(QStringLiteral("RFID：离线"));
-            topRfidStatusValue->setStyleSheet("color: red; font-weight: bold;");
-        }
+        updateRs485TopStatus();
     } else {
         QString portName = serialPortCombo->currentText();
         int baudRate = serialBaudRateCombo->currentData().toInt();
@@ -3670,6 +3790,7 @@ void MainWindow::onSerialOpenCloseClicked()
             serialStatusLabel->setText(QStringLiteral("已连接 (%1, %2)").arg(portName).arg(baudRate));
             serialStatusLabel->setStyleSheet("color: green; font-weight: bold;");
             serialOpenCloseBtn->setText(QStringLiteral("关闭串口"));
+            updateRs485TopStatus();
             
             rs485RfidService->queryDeviceInfo();
         } else {
@@ -3713,6 +3834,7 @@ void MainWindow::onSerialOneClickStartClicked()
             serialStatusLabel->setText(QStringLiteral("已连接 (%1, %2)").arg(portName).arg(baudRate));
             serialStatusLabel->setStyleSheet("color: green; font-weight: bold;");
             serialOpenCloseBtn->setText(QStringLiteral("关闭串口"));
+            updateRs485TopStatus();
             
             if (protocolModeCombo->currentIndex() == 2) {
                 rs485RfidService->startScan(bbHostPollPeriodSpin->value(), bbQueryModeCombo->currentData().toInt());
@@ -3737,10 +3859,7 @@ void MainWindow::handleRs485Disconnect()
         serialStatusLabel->setText(QStringLiteral("串口异常断开"));
         serialStatusLabel->setStyleSheet("color: red; font-weight: bold;");
         serialOpenCloseBtn->setText(QStringLiteral("打开串口"));
-        if (topRfidStatusValue != nullptr) {
-            topRfidStatusValue->setText(QStringLiteral("RFID：断开"));
-            topRfidStatusValue->setStyleSheet("color: red; font-weight: bold;");
-        }
+        updateRs485TopStatus();
 
         // 自动终止压测进程，防止界面状态挂死
         if (stressTestService.stats().running) {
@@ -3754,9 +3873,21 @@ void MainWindow::handleRs485Disconnect()
 
 void MainWindow::updateRs485RfidPanel(const Rs485State &state)
 {
+    auto powerDisplayText = [](int powerRaw01Dbm) {
+        if (powerRaw01Dbm < 0) {
+            return QStringLiteral("-");
+        }
+        return QStringLiteral("%1 (%2 dBm)")
+            .arg(powerRaw01Dbm)
+            .arg(QString::number(powerRaw01Dbm / 100.0, 'f', 2));
+    };
+
     if (state.protocolMode == 2) { // BB
         setLabelValue(bbTagIdVal, state.tagId.isEmpty() ? QStringLiteral("-") : state.tagId);
-        setLabelValue(bbPowerVal, state.transmitPower >= 0 ? QString("%1 (0.01dBm)").arg(state.transmitPower) : QString("-"));
+        setLabelValue(bbRssiVal, state.bbRssi.isEmpty() ? QStringLiteral("-") : state.bbRssi);
+        setLabelValue(bbPcVal, state.bbPc.isEmpty() ? QStringLiteral("-") : state.bbPc);
+        setLabelValue(bbCrcVal, state.bbCrc.isEmpty() ? QStringLiteral("-") : state.bbCrc);
+        setLabelValue(bbPowerVal, powerDisplayText(state.transmitPower));
         
         setLabelValue(bbRfidMfgVal, state.manufacturer.isEmpty() ? QString("-") : state.manufacturer);
         setLabelValue(bbRfidDevIdVal, state.deviceId.isEmpty() ? QString("-") : state.deviceId);
@@ -3764,16 +3895,31 @@ void MainWindow::updateRs485RfidPanel(const Rs485State &state)
         setLabelValue(bbRfidSwVerVal, state.swVersion.isEmpty() ? QString("-") : state.swVersion);
     } else { // FF
         setLabelValue(ffTagIdVal, state.tagId.isEmpty() ? QStringLiteral("-") : state.tagId);
-        setLabelValue(ffPowerVal, state.transmitPower >= 0 ? QString("%1 (0.01dBm)").arg(state.transmitPower) : QString("-"));
+        setLabelValue(ffPowerVal, powerDisplayText(state.transmitPower));
         setLabelValue(ffMixerVal, state.ffMixer >= 0 ? QString::number(state.ffMixer) : QString("-"));
         setLabelValue(ffIfAmpVal, state.ffIfAmp >= 0 ? QString::number(state.ffIfAmp) : QString("-"));
-        setLabelValue(ffThrdVal, state.ffThrd >= 0 ? QString::number(state.ffThrd) : QString("-"));
+        setLabelValue(ffThrdVal, state.ffThrd >= 0 ? QStringLiteral("%1 (0x%2)").arg(state.ffThrd).arg(state.ffThrd, 4, 16, QChar('0')).toUpper() : QString("-"));
         setLabelValue(ffCardSwitchVal, state.ffCardSwitch ? QStringLiteral("启用") : QStringLiteral("关闭"));
 
         setLabelValue(ffRfidMfgVal, state.manufacturer.isEmpty() ? QString("-") : state.manufacturer);
         setLabelValue(ffRfidDevIdVal, state.deviceId.isEmpty() ? QString("-") : state.deviceId);
         setLabelValue(ffRfidHwVerVal, state.hwVersion.isEmpty() ? QString("-") : state.hwVersion);
         setLabelValue(ffRfidSwVerVal, state.swVersion.isEmpty() ? QString("-") : state.swVersion);
+    }
+
+    if (protocolModeCombo != nullptr && (protocolModeCombo->currentIndex() == 2 || protocolModeCombo->currentIndex() == 3)) {
+        updateRs485TopStatus();
+        if (topRfidStatusValue != nullptr && serialOpened) {
+            const QString protocolName = state.protocolMode == 2 ? QStringLiteral("BB") : QStringLiteral("FF");
+            if (!state.tagId.isEmpty()) {
+                topRfidStatusValue->setText(QStringLiteral("协议：%1  RFID：已读到标签").arg(protocolName));
+                topRfidStatusValue->setStyleSheet(QStringLiteral("color: green; font-weight: bold;"));
+            } else if (state.errCode != 0 || state.isCommunicationTimeout) {
+                const QString statusText = state.errorMsg.isEmpty() ? QStringLiteral("未读到标签") : state.errorMsg;
+                topRfidStatusValue->setText(QStringLiteral("协议：%1  RFID：%2").arg(protocolName, statusText));
+                topRfidStatusValue->setStyleSheet(QStringLiteral("color: #B26A00; font-weight: bold;"));
+            }
+        }
     }
 
     // 更新压测数据
@@ -3788,6 +3934,10 @@ void MainWindow::updateRs485RfidPanel(const Rs485State &state)
                 state.errorMsg
             );
             updateStressTestPanel(stressTestService.stats());
+            const int targetSamples = stressTargetSamplesSpin == nullptr ? 0 : stressTargetSamplesSpin->value();
+            if (targetSamples > 0 && stressTestService.stats().totalSamples >= static_cast<quint64>(targetSamples)) {
+                stopStressTest(true);
+            }
         }
     }
 }
@@ -3845,6 +3995,7 @@ QWidget *MainWindow::createBbRfidMonitorPanel(QWidget *parent)
     bbHostPollPeriodSpin->setRange(100, 10000);
     bbHostPollPeriodSpin->setSuffix(" ms");
     bbHostPollPeriodSpin->setValue(500);
+    bbHostPollPeriodSpin->setToolTip(QStringLiteral("上位机自动轮询尝试间隔。若上一条请求尚未收到响应或超时，本周期会跳过发送，避免请求堆积。"));
 
     controlLayout->addWidget(new QLabel(QStringLiteral("工作模式"), controlGroup), 0, 0);
     controlLayout->addWidget(bbQueryModeCombo, 0, 1);
@@ -3863,6 +4014,7 @@ QWidget *MainWindow::createBbRfidMonitorPanel(QWidget *parent)
     bbPowerSpin->setRange(0, 3300);
     bbPowerSpin->setSuffix(" (0.01dBm)");
     bbPowerSpin->setValue(2000);
+    bbPowerSpin->setToolTip(QStringLiteral("协议单位：0.01dBm，20dBm = 2000。"));
     bbSetPowerBtn = new QPushButton(QStringLiteral("设置功率"), powerGroup);
     bbQueryPowerBtn = new QPushButton(QStringLiteral("读取功率"), powerGroup);
     bbPowerVal = new QLabel("-", powerGroup);
@@ -3997,9 +4149,10 @@ QWidget *MainWindow::createFfRfidMonitorPanel(QWidget *parent)
     ffHostPollPeriodSpin->setRange(100, 10000);
     ffHostPollPeriodSpin->setSuffix(" ms");
     ffHostPollPeriodSpin->setValue(500);
+    ffHostPollPeriodSpin->setToolTip(QStringLiteral("上位机自动轮询尝试间隔。若上一条请求尚未收到响应或超时，本周期会跳过发送，避免请求堆积。"));
 
     ffRebootBtn = new QPushButton(QStringLiteral("设备重启"), controlGroup);
-    ffQuerySwitchBtn = new QPushButton(QStringLiteral("启闭检测"), controlGroup);
+    ffQuerySwitchBtn = new QPushButton(QStringLiteral("查询读卡开关"), controlGroup);
     ffCardSwitchVal = new QLabel("-", controlGroup);
 
     controlLayout->addWidget(new QLabel(QStringLiteral("工作模式"), controlGroup), 0, 0);
@@ -4027,6 +4180,7 @@ QWidget *MainWindow::createFfRfidMonitorPanel(QWidget *parent)
     ffPowerSpin->setRange(0, 3300);
     ffPowerSpin->setSuffix(" (0.01dBm)");
     ffPowerSpin->setValue(2000);
+    ffPowerSpin->setToolTip(QStringLiteral("协议单位：0.01dBm，20dBm = 2000。"));
     ffSetPowerBtn = new QPushButton(QStringLiteral("设置功率"), powerGroup);
     ffQueryPowerBtn = new QPushButton(QStringLiteral("读取功率"), powerGroup);
     ffPowerVal = new QLabel("-", powerGroup);
@@ -4047,12 +4201,16 @@ QWidget *MainWindow::createFfRfidMonitorPanel(QWidget *parent)
     ffMixerSpin = new QSpinBox(demodGroup);
     ffMixerSpin->setRange(0, 7);
     ffMixerSpin->setPrefix(QStringLiteral("混频增益: "));
+    ffMixerSpin->setToolTip(QStringLiteral("协议字段 Mixer_G，示例 0x03 对应 9dB。"));
     ffIfAmpSpin = new QSpinBox(demodGroup);
     ffIfAmpSpin->setRange(0, 7);
     ffIfAmpSpin->setPrefix(QStringLiteral("中频增益: "));
+    ffIfAmpSpin->setToolTip(QStringLiteral("协议字段 IF_G，示例 0x06 对应 36dB。"));
     ffThrdSpin = new QSpinBox(demodGroup);
-    ffThrdSpin->setRange(0, 255);
+    ffThrdSpin->setRange(0, 65535);
     ffThrdSpin->setPrefix(QStringLiteral("解调阈值: "));
+    ffThrdSpin->setValue(432);
+    ffThrdSpin->setToolTip(QStringLiteral("协议字段 Thrd，2字节阈值；推荐最小值 0x01B0 = 432。"));
     
     ffMixerVal = new QLabel("-", demodGroup);
     ffIfAmpVal = new QLabel("-", demodGroup);
@@ -4201,6 +4359,7 @@ QWidget *MainWindow::createRs485StressPanel(QWidget *parent)
     rs485StressStateValue = new QLabel("-", panel);
     rs485StressElapsedValue = new QLabel("-", panel);
     rs485StressTotalSamplesValue = new QLabel("-", panel);
+    rs485StressPollSkippedValue = new QLabel("-", panel);
     rs485StressSuccessCountValue = new QLabel("-", panel);
     rs485StressSuccessRateValue = new QLabel("-", panel);
     rs485StressNoTagCountValue = new QLabel("-", panel);
@@ -4229,6 +4388,8 @@ QWidget *MainWindow::createRs485StressPanel(QWidget *parent)
     summaryLayout->addWidget(rs485StressTotalSamplesValue, 2, 1);
     summaryLayout->addWidget(new QLabel(QStringLiteral("读卡成功"), summaryGroup), 2, 2);
     summaryLayout->addWidget(rs485StressSuccessCountValue, 2, 3);
+    summaryLayout->addWidget(new QLabel(QStringLiteral("轮询跳过"), summaryGroup), 3, 0);
+    summaryLayout->addWidget(rs485StressPollSkippedValue, 3, 1);
 
     QGroupBox *tagGroup = new QGroupBox(QStringLiteral("标签信息"), panel);
     QGridLayout *tagLayout = new QGridLayout(tagGroup);

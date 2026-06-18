@@ -1,4 +1,4 @@
-#ifndef MAINWINDOW_H
+﻿#ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
 #include <QMainWindow>
@@ -84,6 +84,8 @@ private:
     void setupCompactMainLayout();
     void updateCanControlState(bool deviceOpened, bool canInitialized, bool canStarted);
     void updateControlsState();
+    void updateRs485TopStatus();
+    void updateManualSendPanelMode();
     bool isOtaRunning() const;
     void oneClickStartCan();
     void startStressTest();
@@ -141,6 +143,9 @@ private:
     QLabel *topCanStatusValue;
     QLabel *topRfidStatusValue;
     QLabel *topStressStatusValue;
+    QLabel *manualSendIdLabel;
+    QLabel *manualSendDataLabel;
+    QLabel *manualSendHintLabel;
     QString logDirectory;
     OtaService otaService;
     QLabel *otaStateValue;
@@ -391,6 +396,7 @@ private:
     QLabel *rs485StressElapsedValue;
     QLabel *rs485StressSuccessRateValue;
     QLabel *rs485StressTotalSamplesValue;
+    QLabel *rs485StressPollSkippedValue;
     QLabel *rs485StressSuccessCountValue;
     QLabel *rs485StressNoTagCountValue;
     QLabel *rs485StressModuleFaultValue;

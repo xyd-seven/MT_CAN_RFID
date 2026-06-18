@@ -10,6 +10,9 @@ struct Rs485State
 {
     int protocolMode = 2; // 2: BB, 3: FF
     QString tagId;
+    QString bbRssi;
+    QString bbPc;
+    QString bbCrc;
     int errCode = 0;
     bool isCommunicationTimeout = false;
     QString errorMsg;
@@ -21,7 +24,7 @@ struct Rs485State
     QString deviceId;
     
     // Configuration states
-    int transmitPower = -1; // in dBm
+    int transmitPower = -1; // in 0.01dBm units
     int ffMixer = -1;
     int ffIfAmp = -1;
     int ffThrd = -1;
@@ -46,7 +49,7 @@ public:
     // Downlink commands
     void queryDeviceInfo();
     void triggerSingleQuery();
-    void setPower(int powerDbm);
+    void setPower(int powerRaw01Dbm);
     void queryPower();
     
     // FF exclusive commands
@@ -57,6 +60,7 @@ public:
 
 signals:
     void stateUpdated(const Rs485State &state);
+    void pollSkipped();
     // Emitted when a setting command finishes (success or failure)
     void commandFinished(bool success, const QString &message);
 
@@ -73,8 +77,9 @@ private:
     void handleBbResponse(quint8 cmdCode, const QByteArray &payload);
     void handleFfResponse(quint8 cmdCode, const QByteArray &payload);
     
-    void startTimeoutGuard(int timeoutMs = 250);
+    void startTimeoutGuard(int timeoutMs = 500);
     void stopTimeoutGuard();
+    bool isExpectedResponse(quint8 cmdCode) const;
 
     Rs485Manager *m_manager;
     QTimer *m_pollTimer;

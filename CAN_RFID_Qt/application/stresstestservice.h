@@ -25,6 +25,7 @@ struct StressTestStats
     quint64 moduleFaultCount = 0;
     quint64 communicationFaultCount = 0;
     quint64 tagContentErrorCount = 0;
+    quint64 pollSkippedCount = 0;
     quint64 validTagCount = 0;
     quint64 tagChangeCount = 0;
     quint64 uniqueTagCount = 0;
@@ -52,6 +53,7 @@ public:
     bool handleFrame(const CanFrame &frame);
     bool handleQingjuState(const QingjuNpkState &state);
     bool handleRs485State(int protocolMode, const QString &tagId, int errCode, bool isCommunicationTimeout, const QString &errorMsg);
+    void recordRs485PollSkipped();
     StressTestStats stats() const;
 
 private:
