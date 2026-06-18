@@ -30,6 +30,11 @@ struct AppConfigData
     int rs485PollIntervalMs = 500;
     int bbPower = 2000;
     int ffPower = 2000;
+    int hlScanTimeMs = -1; // -1 means 0xFFFFFFFF (infinite)
+    int hlScanIntervalMs = 1000;
+    int hlSavedTagCount = 1;
+    bool hlClearAfterRead = false;
+    bool hlDecryptEnable = true;
 };
 
 class AppConfig

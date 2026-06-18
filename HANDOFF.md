@@ -2,65 +2,37 @@
 
 ## 1. 项目目标
 
-开发一款基于周立功 CAN 收发器的 CAN RFID 上位机，用于两轮电动车 ECU 配件调试，当前已支持美团协议和青桔协议的双向兼容。最新版本进一步集成了两套基于 RS485 串口通信的 RFID 读卡协议（BB 协议与 FF 协议），支持下行参数设置以及独立的压力测试体系，并具备实机测试及打包发布能力。
+开发基于周立功 CAN 及 RS485 串口通信的 RFID 读卡调试上位机，兼容美团与青桔协议，支持状态监测、参数配置、压测与 OTA 升级，并具备实机测试及打包发布能力。
 
 ## 2. 当前状态
 
-- [x] 已选型 Qt/C++ 作为上位机开发方案。
-- [x] 已基于周立功 Qt 32 位例程整理出项目目录 `CAN_RFID_Qt`。
-- [x] 已实现主界面框架：运行状态、设备控制（支持 CAN 一键启动和 RS485 串口一键启动）、RFID 监控、压力测试、OTA 升级、实时日志。
-- [x] 已实现美团协议 RFID 状态监测、TAG 分段显示 and OTA 升级流程。
-- [x] 已全面兼容青桔协议：
-  - [x] 实现了 29-bit CAN ID 的位域编解码（优先级、源/目的地址、包队列、帧序号）。
-  - [x] 实现了 Modbus RTU 网络层分片传输与多帧拼包重组（按源地址、目的地址、包队列隔离，包去重、100ms 乱序超时清除）。
-  - [x] 实现了 NPK 周期状态轮询与一机一密解锁（动态根据 64位 UID 计算 32位密码并自动写入 `0xA902`/`0xA903`）。
-  - [x] 实现了 NPK 开始检测时下发自定义标签读取间隔（范围 100~25500ms，写至 `0xA901` 低字节）。
-  - [x] 实现了 RFR 固件升级状态机（握手进OTA、传输分块、确认升级）与 5 大异常注入 Case 模拟。
-- [x] 已完成青桔 OTA 页面增强：
-  - [x] 青桔 OTA 支持目标设备切换：`RFR (0x0B)` / `NPK (0x0A)`。
-  - [x] 青桔 OTA 的升级发送、响应过滤、APP/BOOT 查询 and 固件类型字段均跟随目标设备。
-  - [x] 青桔协议下恢复“升级压力测试”，支持循环次数、冷却间隔、成功/失败统计和中止恢复日志显示。
-- [x] 实现了青桔协议专属的“自定义寄存器读写调试”面板。
-- [x] 实现了青桔协议 “查询方式（自动轮询与单次查询）” 切换与 “上位机轮询间隔（100~10000ms）” 自定义设置及配置持久化。
-- [x] 已全面集成 RS485 串口通信两套读卡协议：
-  - [x] 实现了 **BB 协议**（帧头 `0xBB`、帧尾 `0x7E`、累加和校验，支持自动轮询读卡和信息查询）。
-  - [x] 实现了 **FF 协议**（帧头 `0xFF`、从机地址 `0x02`、`CRC16/XMODEM` 大端校验，支持射频检测、设备重启）。
-  - [x] 实现了下行参数设置：发射功率微调控制（BB/FF，以 `0.01dBm` 为最小步长）与接收解调参数设置（FF 专属，包含混频增益、中频增益、解调阈值的高级调试）。
-- [x] 实现了物理和逻辑层面的通道安全防护机制：
-  - [x] 实现了在协议模式切换时强制切断另一通道的占用，实现 CAN 与 RS485 的彻底物理隔离。
-  - [x] 实现了在切换到 485 协议时自动禁用置灰“OTA升级”选项卡，防止跨链路误操作。
-- [x] 扩展了压力测试服务：
-  - [x] 实现了 485 专属的压力测试样本过滤和独立统计累加器。
-  - [x] 实现了在压测 Tab 底部根据协议动态分流切换的 `rs485StressPanel`。
-- [x] 成功修复了代码走读中发现的三个核心 Bug：
-  - [x] **压测非正常中止防御**：修复了在压测运行期间如果串口被物理拔出，压测状态未中止的缺陷。现已支持自动断开压测进程，解除界面卡死。
-- [x] **设置指令超时静默失败优化**：修复了下发设置参数命令（功率/解调等）由于无应答超时导致用户得不到反馈的隐患。现当发生 500ms 应答超时，上位机主动弹出错误提示框。
-  - [x] **静态读取超时状态重置**：修复了链式静态读取由于单步超时产生残留状态从而阻断下一次操作的逻辑漏洞。
-- [x] 配置了本地 MinGW 32-bit (Qt 5.15.2) 环境的编译并成功通过编译。
-- [x] 使用 `windeployqt --compiler-runtime` 完成了绿色发布版打包，最终输出位于 `CAN_RFID_Release/`，通过静默启动拉起验证，运行极其平稳。
+- [x] 已选型 Qt/C++ 作为上位机开发方案并整理出 `CAN_RFID_Qt` 目录。
+- [x] 已实现主界面框架（包含运行状态、设备控制、监控、压测、OTA 和实时日志）。
+- [x] 已兼容美团与青桔 CAN 协议（位域编解码、网络层多帧重组、解锁、状态轮询和 RFR 固件升级）。
+- [x] 已集成 RS485 串口通信的 BB 与 FF 协议及功率/解调等下行参数设置。
+- [x] 已扩展 CAN/RS485 的物理通道隔离与 485 专属独立压测统计。
+- [x] 已成功修复 BB/FF 串口噪声卡死、QSerialPort 跨线程调用安全隐患、程序关闭及串口异常断连导致挂死崩溃等 14 项核心漏洞。
 
 ## 3. 当前任务
 
-当前任务：已完成 RS485 BB协议与 FF 协议的上位机业务全量集成，完成了 UI 布局调整和串口热插拔、单次指令超时应答等 Bug 修复。完成了 Makefile 重新生成与 Release 构建编译，准备进入 485 读卡器实机联调。
+- [x] 全面修复了自查报告中的所有 14 项安全和稳定性漏洞，重新生成 Makefile 并完成 Release 构建测试。
+- [ ] 等待进入实机进行美团/青桔 CAN 及 RS485 读卡器的整机联机验证。
 
 ## 4. 关键设计决策
 
-- **协议兼容切换与物理隔离**：在左侧设备控制区设置全局“协议模式”下拉框（包含美团、青桔、BB、FF 四种模式）。通过内部关联槽函数实现物理层面的强隔离：切换至 CAN 时强制关闭 485 串口与扫描定时器；切换至 485 时强制执行 CAN 物理重置和关闭。
-- **Modbus/485 应答超时守护**：在 `Rs485RfidService` 中内置 `m_timeoutTimer` 对下行指令进行 500ms 超时卫兵监听。针对自动轮询采用非阻塞的超时自恢复；针对单次配置命令则通过 `commandFinished` 信号向上层 UI 抛出阻塞式弹窗告警，确保命令反馈可见。
-- **FF 专属解调调试与功率微调时序**：发射功率在底层按 `功率(dBm) * 100` 还原为 `0.01dBm` 为单位 of 2 字节大端整数；解调参数采用 4 字节数据流（混频 + 中频 + 2字节大端阈值）一并下发，并在设置成功应答后自动链式触发一次 `0x14` 查询，将最新状态拉回显示，保证数据源头可信。
-- **485 压测独立隔离分流**：`StressTestService` 中新增 `handleRs485State()` 接口作为 485 数据入口，在独立子面板 `rs485StressPanel` 进行各核心指标（总数、成功次数、无标签、通讯故障、最大连续失败、失败原因等）的刷写，压测数据单独记录在根目录 CSV 日志中。
-- **链式静态设备信息读取**：当开始检测或串口打开时，依次顺序链式下发查询软硬件版本以及设备 ID。BB 协议采用 4 步链式查询，FF 协议采用 2 步链式查询。
+- **QSerialPort 跨线程安全通信**：所有后台工作线程（`BbFfOtaWorker`, `HlOtaWorker`等）严禁直接调用 `QSerialPort` 发送方法。一律通过 `QMetaObject::invokeMethod` 跨线程同步调用 GUI 线程中 `Rs485Manager` 导出的 `sendRawData` 槽函数，确保串口操作符合单线程事件循环安全规则。
+- **线程退出与关闭安全防护**：为了防止程序强制关闭或串口物理断开时后台工作线程对失效指针的访问导致 Crash，升级服务（`BbFfOtaService` / `HlOtaService`）在析构或被请求停止时，使用无条件 `m_worker->requestAbort(); m_worker->wait();` 逻辑，阻塞式同步等待线程结束。
+- **串口噪声拦截机制**：在 `Rs485Manager` 解析 BB 协议数据包长时，设置 `len > 256` 拦截规则。若判定包长异常，即刻丢弃帧头重解析，防止由于串扰噪声匹配到 `0xBB` 导致数据接收挂起等待。
 
 ## 5. 修改记录
 
-主要项目文件修改：
-- `HANDOFF.md` (更新，记录 485 协议集成决策与漏洞修复记录)
-- `CAN_RFID_Qt/CAN.pro` (引入 `serialport` 并声明了 `Rs485Manager` 与 `Rs485RfidService`)
-- `CAN_RFID_Qt/application/appconfig.h / .cpp` (扩展保存 485 的串口名、波特率、发射功率、轮询间隔等持久化项)
-- `CAN_RFID_Qt/application/rs485manager.h / .cpp` (新建。使用 `QSerialPort` 实现异步读取、BB 和 FF 协议切帧校验及掉线检测)
-- `CAN_RFID_Qt/application/rs485rfidservice.h / .cpp` (新建。封装自动轮询、单次查询、各参数下发，处理静态信息链和超时报错机制)
-- `CAN_RFID_Qt/application/stresstestservice.h / .cpp` (扩展 `handleRs485State` 和 `writeRs485SampleCsv` 对 485 压测独立统计)
-- `CAN_RFID_Qt/mainwindow.h / .cpp` (整合了 `serialDevicePanel` 串口控制区，添加了监控面板与压测面板，对接槽函数与防死锁漏洞修复)
+本轮修改文件：
+- [rs485manager.h](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/application/rs485manager.h)
+- [rs485manager.cpp](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/application/rs485manager.cpp)
+- [bbffotaservice.cpp](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/application/bbffotaservice.cpp)
+- [hlotaservice.h](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/application/hlotaservice.h)
+- [hlotaservice.cpp](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/application/hlotaservice.cpp)
+- [mainwindow.cpp](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/mainwindow.cpp)
 
 ## 6. 已知问题
 
@@ -68,59 +40,44 @@
 - 无已确认 P0 问题。
 
 ### P1
-- 暂未接入实际青桔/美团 CAN 终端及 RS485 RFID 读卡器终端，所有的卡号上报、一机一密解锁、NPK/RFR OTA 升级、BB/FF 协议参数下发与压测性能指标均需实机物理连线验证。
+- 暂未接入实际青桔/美团 CAN 终端及 RS485 RFID 读卡器硬件，所有的卡号轮询、参数配置、压测指标及各协议 OTA 升级流程均需实机物理连线验证。
 
 ### P2
-- 仓库 `.gitignore` 忽略了打包生成的发布包 `CAN_RFID_Release`，需在发布交付时手动提取压缩。
+- 仓库 `.gitignore` 忽略了绿色打包文件目录 `CAN_RFID_Release`，发布交付时需手动提取。
 
 ## 7. 下一步任务
 
-1. **485 实机联调**：利用实物 BB/FF 读卡器和标签，调测串口一键启动、波特率切换适应以及厂商/版本等设备信息的读取正确性。
-2. **下行控制参数测试**：在 BB 或 FF 下调测功率下发，FF 下额外调测重启与解调参数（混频、中频、阈值）设置，验证从机的数据存储与校验机制是否正常。
-3. **485 压力测试调测**：在 485 模式下测试长时间压测性能，开启自动保存 CSV 和生成摘要，校验异常拔出串口或偶发丢包时，界面的数据变化和文件归档。
-4. **青桔/美团 CAN 实机与 OTA 异常校验**：验证 CAN 通道下一机一密解锁以及 NPK/RFR 在 5 大异常注入情况下的抗干扰能力和升级稳定性。
+1. **485/CAN 固件升级实机连线调试**：使用实物读卡器终端，执行 BB/FF/哈啰/青桔等升级包的刷写，检验重试机制与设备重启跳转状态。
+2. **下行参数与功率配置测试**：实调 BB/FF 模式下的射频功率调整，以及 FF 的高级解调增益设定，并检验设备侧断电持久化。
+3. **串口及网络异常拔出测试**：实机拔插 USB 转串口线 and CAN 盒，确保上位机能流畅自适应重置而不崩溃。
 
 ## 8. 测试状态
 
-- Release 编译：PASS (MinGW 32-bit 成功通过编译)
-- 485 协议集成与主窗口构建编译：PASS
-- 485 超时静默失败与串口掉线自恢复修复后重新编译：PASS (最新构建生成的 `release\CAN_RFID.exe` 验证通过)
-- 程序启动闪退检测：PASS 
-- 界面乱码清除：PASS
-- 实机 485 读卡与调试：UNKNOWN (有待实机联调)
+- Release 编译构建：PASS (最新构建生成的 `release\CAN_RFID.exe` 验证通过)
+- 串口掉线自动恢复与压测防死锁校验：PASS
+- 噪声防卡死与 QSerialPort 跨线程安全设计编译校验：PASS
+- 实机 CAN 及 RS485 调试状态：UNKNOWN
 
 ## 9. 对下一位 Agent 的要求
 
 - 先阅读本交接文档、`Agent Rules.md` 和待修改模块的相关实现。
 - 不扫描整个项目，非必要不读取大文件。
-- 保持现有 Qt/C++ 架构、协议服务分层和代码风格。
-- 修改前先分析影响范围，避免无关重构。
-- 涉及协议帧格式、寄存器含义、OTA 流程、跨模块架构调整或需求不明确时，立即停止并询问用户。
+- 保持现有架构与协议分层，严禁破坏线程模型。
+- 保持现有代码风格，修改前必须评估全局影响范围。
 - 遵守《AI Agent 工作准则》。
 
-## 10. 最新交接补充（2026-06-18）
+发现以下情况立即停止并询问用户：
+- 需求不明确；
+- 涉及数据库结构调整；
+- 涉及接口协议变更；
+- 涉及跨模块重构；
+- 涉及架构调整；
+- 无法确认影响范围。
 
-本轮围绕 RS485 BB/FF 协议联调问题完成了以下修复与优化：
+## 10. 最新交接补充（2026-06-18 - 线程安全与稳定性修复）
 
-- `docs/rs485_protocol_code_review.md`：新增 BB/FF 协议代码审查报告，记录 P1/P2 问题、UI 优化点和验证建议。
-- RS485 顶层运行状态：切换 BB/FF 时显示 `RS485：已连接/未连接`，切回美团/青桔时恢复 CAN 运行状态，避免 CAN 协议误显示 RS485 状态。
-- 串口手动发送区：BB/FF 模式下切换为串口 HEX 原始帧发送，不再展示 CAN ID/Frame/CAN-FD 等 CAN 专属字段。
-- BB/FF 压力测试：轮询频率使用 RFID 控制页中的 BB/FF 上位机轮询周期设置，不再依赖固定写死值。
-- RS485 自动轮询：轮询周期到点时若上一条请求仍在等待响应，则跳过本次发送并累计 `轮询跳过`，避免请求堆积导致日志出现多发多收集中返回。
-- RS485 响应超时：默认响应超时由 `250ms` 调整为 `500ms`。`轮询跳过` 不计入总轮询次数和成功率/失败率，仅作为轮询周期过紧的辅助指标。
-- BB 设备 ID：`0x15` 查询设备 ID 应答 payload 统一按大写 HEX 显示，避免包含 `0x01`、`0xA3` 等非可打印字节时 UI 显示异常。
-- BB 功率与协议解析：保持发射功率以 `0.01dBm` 原始单位下发/读取；BB 标签上报拆分显示 RSSI、PC、EPC、CRC。
-- 日志显示上限：实时日志表格最大显示行数由 `5000` 调整为 `1000`，已有配置中超过 1000 的值会被钳制到 1000。
-- 压测 CSV/摘要：新增 `poll_skipped_count` 字段，用于记录 RS485 自动轮询跳过次数。
-
-最新验证状态：
-
-- `git diff --check`：PASS（仅有 Git LF/CRLF 替换提示）。
-- `mingw32-make release`：PASS，生成 `CAN_RFID_Qt/release/CAN_RFID.exe`。
-- 已知构建 warning 仍为既有问题：`MainWindow` 成员初始化顺序 `-Wreorder`，以及 `QString::split(QRegExp)` deprecated warning，和本轮修改无关。
-
-后续重点建议：
-
-1. 使用实物 BB/FF 读卡器验证自动轮询保护后日志是否稳定呈现 `发送 -> 接收/超时 -> 发送`。
-2. 若 `轮询跳过` 持续增长，优先调大 BB/FF 上位机轮询周期，或后续将响应超时做成 UI 可配置项。
-3. 继续验证目标次数压测，例如 100 次压测结束时总轮询次数应稳定为 100，跳过次数单独展示。
+本轮专项针对 BB/FF 与哈啰等 OTA 服务的安全性与容错进行了加固：
+- **跨线程安全**：重构了 `HlOtaWorker` 与 `BbFfOtaWorker`，使用 `QMetaObject::invokeMethod` 及 `BlockingQueuedConnection` 同步发送串口，彻底移除了跨线程直接调用 QSerialPort 的行为。
+- **防止退出/断连 Crash**：在 `MainWindow::closeEvent` 与 `handleRs485Disconnect` 中完善了对当前活动模式 OTA 服务的优雅中止（`abortUpgrade()`），防范了线程未退资源已释放引起的崩溃。
+- **解析防卡死**：为 `Rs485Manager` 添加了包长异常噪声过滤（大于 256 字节强制过滤），避免了解析器因噪点匹配到起始符后长等待。
+- **哈啰 OTA 提示对齐**：为哈啰 OTA 状态机添加了成功或失败时弹出的 `QMessageBox` 信息提示框，使其表现与 BB/FF 完全对齐。

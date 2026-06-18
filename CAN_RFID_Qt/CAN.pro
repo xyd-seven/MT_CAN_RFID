@@ -22,7 +22,9 @@ SOURCES += \
     application/qingjurfidservice.cpp \
     application/qingjuotaservice.cpp \
     application/rs485manager.cpp \
-    application/rs485rfidservice.cpp
+    application/rs485rfidservice.cpp \
+    application/hlotaservice.cpp \
+    application/bbffotaservice.cpp
 
 HEADERS += \
     mainwindow.h \
@@ -42,6 +44,8 @@ HEADERS += \
     application/qingjuotaservice.h \
     application/rs485manager.h \
     application/rs485rfidservice.h \
+    application/hlotaservice.h \
+    application/bbffotaservice.h \
     third_party/zlgcan/zlgcan.h \
     third_party/zlgcan/config.h
 

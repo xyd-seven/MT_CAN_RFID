@@ -203,6 +203,16 @@ bool StressTestService::handleRs485State(int protocolMode, const QString &tagId,
     bool tagValid = false;
     QString cleanTag = tagId.trimmed();
 
+    bool isSuccess = false;
+    bool isNoTag = false;
+    if (protocolMode == 4) {
+        isSuccess = (errCode == 2);
+        isNoTag = (errCode == 1);
+    } else {
+        isSuccess = (errCode == 0);
+        isNoTag = (protocolMode == 2 && errCode == 0x15) || (protocolMode == 3 && errCode == -1);
+    }
+
     if (isCommunicationTimeout) {
         ++currentStats.communicationFaultCount;
         ++currentStats.currentContinuousFailure;
@@ -212,7 +222,7 @@ bool StressTestService::handleRs485State(int protocolMode, const QString &tagId,
         }
         currentStats.lastFailureReason = errorMsg.isEmpty() ? QStringLiteral("从机应答超时") : errorMsg;
     } 
-    else if (errCode == 0) { // Success tag reading
+    else if (isSuccess) { // Success tag reading
         success = true;
         currentStats.currentTag = cleanTag;
         ++currentStats.successCount;
@@ -245,7 +255,7 @@ bool StressTestService::handleRs485State(int protocolMode, const QString &tagId,
             currentStats.maxContinuousFailure = currentStats.currentContinuousFailure;
         }
 
-        if ((protocolMode == 2 && errCode == 0x15) || (protocolMode == 3 && errCode == -1)) {
+        if (isNoTag) {
             ++currentStats.noTagCount;
             currentStats.lastFailureReason = QStringLiteral("未扫描到标签");
         } else {
@@ -516,7 +526,7 @@ void StressTestService::writeRs485SampleCsv(int protocolMode, const QString &tag
            << currentStats.elapsedMilliseconds << ','
            << currentStats.totalSamples << ','
            << currentStats.pollSkippedCount << ','
-           << (protocolMode == 2 ? "rs485_bb" : "rs485_ff") << ','
+           << (protocolMode == 2 ? "rs485_bb" : (protocolMode == 3 ? "rs485_ff" : "rs485_haluo")) << ','
            << errCode << ','
            << (isCommunicationTimeout ? 1 : 0) << ','
            << QString() << ','

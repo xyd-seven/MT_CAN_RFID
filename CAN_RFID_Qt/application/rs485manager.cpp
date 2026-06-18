@@ -1,4 +1,5 @@
 #include "rs485manager.h"
+#include "domain/crc16.h"
 #include <QSerialPortInfo>
 #include <QDebug>
 
@@ -77,7 +78,13 @@ bool Rs485Manager::sendRawData(const QByteArray &data)
         // Parse the code and payload for logging decode
         quint8 cmdCode = 0;
         QByteArray payload;
-        if (m_protocolMode == 2 && data.size() >= 5) {
+        if (data.size() >= 6 && static_cast<quint8>(data.at(0)) == 0xAA && static_cast<quint8>(data.at(1)) == 0x55) {
+            cmdCode = static_cast<quint8>(data.at(3));
+            int len = (static_cast<quint8>(data.at(4)) << 8) | static_cast<quint8>(data.at(5));
+            if (data.size() >= len + 7) {
+                payload = data.mid(6, len);
+            }
+        } else if (m_protocolMode == 2 && data.size() >= 5) {
             cmdCode = static_cast<quint8>(data.at(2));
             int len = (static_cast<quint8>(data.at(3)) << 8) | static_cast<quint8>(data.at(4));
             if (data.size() >= len + 7) {
@@ -89,6 +96,9 @@ bool Rs485Manager::sendRawData(const QByteArray &data)
             if (data.size() >= len + 6) {
                 payload = data.mid(4, len);
             }
+        } else if (m_protocolMode == 4 && data.size() >= 4) {
+            cmdCode = static_cast<quint8>(data.at(1)); // Function code
+            payload = data.mid(2, data.size() - 4); // Exclude Addr, Func, CRC
         }
         
         QString decodeText = decodeFrameText(true, cmdCode, payload);
@@ -118,10 +128,166 @@ void Rs485Manager::onReadyRead()
 {
     m_rxBuffer.append(m_serialPort->readAll());
     
-    if (m_protocolMode == 2) {
-        processBbBuffer();
-    } else {
-        processFfBuffer();
+    while (!m_rxBuffer.isEmpty()) {
+        int oldSize = m_rxBuffer.size();
+        
+        if (m_protocolMode == 2 || m_protocolMode == 3) {
+            // Check if buffer contains AA 55 signature
+            int otaIndex = m_rxBuffer.indexOf(QByteArray::fromHex("AA55"));
+            int bbIndex = (m_protocolMode == 2) ? m_rxBuffer.indexOf(static_cast<char>(0xBB)) : -1;
+            int ffIndex = (m_protocolMode == 3) ? m_rxBuffer.indexOf(static_cast<char>(0xFF)) : -1;
+            
+            bool processAsOta = false;
+            if (otaIndex != -1) {
+                if (m_protocolMode == 2 && bbIndex != -1) {
+                    processAsOta = (otaIndex < bbIndex);
+                } else if (m_protocolMode == 3 && ffIndex != -1) {
+                    processAsOta = (otaIndex < ffIndex);
+                } else {
+                    processAsOta = true;
+                }
+            }
+            
+            if (processAsOta) {
+                processOtaBuffer();
+            } else {
+                if (m_protocolMode == 2) {
+                    processBbBuffer();
+                } else {
+                    processFfBuffer();
+                }
+            }
+        } else if (m_protocolMode == 4) {
+            processHlBuffer();
+        }
+        
+        if (m_rxBuffer.size() == oldSize) {
+            break;
+        }
+    }
+}
+
+void Rs485Manager::processOtaBuffer()
+{
+    while (true) {
+        int index = m_rxBuffer.indexOf(QByteArray::fromHex("AA55"));
+        if (index == -1) {
+            if (m_rxBuffer.endsWith(QByteArray::fromHex("AA"))) {
+                m_rxBuffer = m_rxBuffer.right(1);
+            } else {
+                m_rxBuffer.clear();
+            }
+            break;
+        }
+        if (index > 0) {
+            m_rxBuffer.remove(0, index);
+        }
+
+        if (m_rxBuffer.size() < 6) {
+            break; // Wait for Header (2), Addr (1), Cmd (1), Len (2)
+        }
+
+        quint16 payloadLen = (static_cast<quint8>(m_rxBuffer.at(4)) << 8) | static_cast<quint8>(m_rxBuffer.at(5));
+        int totalLen = payloadLen + 7;
+
+        if (m_rxBuffer.size() < totalLen) {
+            break;
+        }
+
+        QByteArray frame = m_rxBuffer.left(totalLen);
+        quint8 addr = static_cast<quint8>(frame.at(2));
+        if (addr != 0x20 && addr != 0x06) {
+            m_rxBuffer.remove(0, 2);
+            continue;
+        }
+
+        quint8 sum = 0;
+        for (int i = 2; i <= totalLen - 2; ++i) {
+            sum += static_cast<quint8>(frame.at(i));
+        }
+
+        quint8 receivedSum = static_cast<quint8>(frame.at(totalLen - 1));
+        if (sum != receivedSum) {
+            m_rxBuffer.remove(0, 2);
+            continue;
+        }
+
+        quint8 cmdCode = static_cast<quint8>(frame.at(3));
+        QByteArray payload = frame.mid(6, payloadLen);
+
+        QString decodeText = decodeFrameText(false, cmdCode, payload);
+        emit frameReceived(frame, decodeText);
+        emit packetReceived(cmdCode, payload);
+
+        m_rxBuffer.remove(0, totalLen);
+    }
+}
+
+void Rs485Manager::processHlBuffer()
+{
+    while (true) {
+        int index = m_rxBuffer.indexOf(static_cast<char>(0x0D));
+        if (index == -1) {
+            m_rxBuffer.clear();
+            break;
+        }
+        if (index > 0) {
+            m_rxBuffer.remove(0, index);
+        }
+        
+        if (m_rxBuffer.size() < 3) {
+            break; // Wait for at least Addr, Func, and ByteCount/StartReg
+        }
+        
+        quint8 funcCode = static_cast<quint8>(m_rxBuffer.at(1));
+        int totalLen = 0;
+        
+        if (funcCode == 0x03) {
+            // Read holding registers response: [Addr] [Func] [ByteCount] [Data...] [CRC_L] [CRC_H]
+            quint8 byteCount = static_cast<quint8>(m_rxBuffer.at(2));
+            totalLen = byteCount + 5;
+        } else if (funcCode == 0x10) {
+            // Write multiple registers response: [Addr] [Func] [StartRegH] [StartRegL] [RegCountH] [RegCountL] [CRC_L] [CRC_H]
+            totalLen = 8;
+        } else if ((funcCode & 0x80) != 0) {
+            // Modbus Exception: [Addr] [ExceptionFunc] [ExceptionCode] [CRC_L] [CRC_H]
+            totalLen = 5;
+        } else {
+            // Invalid function code, discard device address and try again
+            m_rxBuffer.remove(0, 1);
+            continue;
+        }
+        
+        if (m_rxBuffer.size() < totalLen) {
+            break; // Wait for the rest of the packet
+        }
+        
+        QByteArray frame = m_rxBuffer.left(totalLen);
+        
+        // Modbus RTU CRC16: low byte first, then high byte
+        quint16 receivedCrc = (static_cast<quint8>(frame.at(totalLen - 1)) << 8) | 
+                              static_cast<quint8>(frame.at(totalLen - 2));
+        quint16 calculatedCrc = calculateModbusCrc16(reinterpret_cast<const quint8*>(frame.constData()), totalLen - 2);
+        
+        if (receivedCrc != calculatedCrc) {
+            m_rxBuffer.remove(0, 1);
+            continue;
+        }
+        
+        QByteArray payload;
+        if (funcCode == 0x03) {
+            payload = frame.mid(3, frame.size() - 5);
+        } else if (funcCode == 0x10) {
+            payload = frame.mid(2, 4); // Start Reg (2 bytes) + Reg Count (2 bytes)
+        } else {
+            payload = frame.mid(2, 1); // Exception code (1 byte)
+        }
+        
+        QString decodeText = decodeFrameText(false, funcCode, payload);
+        emit frameReceived(frame, decodeText);
+        emit packetReceived(funcCode, payload);
+        
+        m_rxBuffer.remove(0, totalLen);
     }
 }
 
@@ -143,6 +309,12 @@ void Rs485Manager::processBbBuffer()
         
         int len = (static_cast<quint8>(m_rxBuffer.at(3)) << 8) | static_cast<quint8>(m_rxBuffer.at(4));
         int totalLen = len + 7;
+        
+        if (len > 256) {
+            // Invalid length (likely noise), discard 0xBB header byte and try again
+            m_rxBuffer.remove(0, 1);
+            continue;
+        }
         
         if (m_rxBuffer.size() < totalLen) {
             break; // Wait for the whole packet
@@ -247,6 +419,14 @@ void Rs485Manager::onErrorOccurred(QSerialPort::SerialPortError error)
 
 QString Rs485Manager::decodeFrameText(bool isTx, quint8 cmdCode, const QByteArray &payload) const
 {
+    if (cmdCode == 0x1A) {
+        return isTx ? QStringLiteral("OTA开始升级") : QStringLiteral("OTA开始升级应答");
+    } else if (cmdCode == 0x1B) {
+        return isTx ? QStringLiteral("OTA发送数据包") : QStringLiteral("OTA发送数据包应答");
+    } else if (cmdCode == 0x1C) {
+        return isTx ? QStringLiteral("OTA升级结束") : QStringLiteral("OTA升级结束应答");
+    }
+
     if (m_protocolMode == 2) { // BB
         switch (cmdCode) {
         case 0x03:
@@ -266,7 +446,7 @@ QString Rs485Manager::decodeFrameText(bool isTx, quint8 cmdCode, const QByteArra
         default:
             return QString("BB 0x%1").arg(cmdCode, 2, 16, QChar('0')).toUpper();
         }
-    } else { // FF
+    } else if (m_protocolMode == 3) { // FF
         switch (cmdCode) {
         case 0x00:
             return QStringLiteral("查询标签");
@@ -318,6 +498,18 @@ QString Rs485Manager::decodeFrameText(bool isTx, quint8 cmdCode, const QByteArra
             return QStringLiteral("查询读卡开关应答");
         default:
             return QString("FF 0x%1").arg(cmdCode, 2, 16, QChar('0')).toUpper();
+        }
+    } else { // Hellobike (Modbus RTU)
+        switch (cmdCode) {
+        case 0x03:
+            return isTx ? QStringLiteral("Modbus读寄存器") : QStringLiteral("Modbus读应答");
+        case 0x10:
+            return isTx ? QStringLiteral("Modbus写多个寄存器") : QStringLiteral("Modbus写应答");
+        default:
+            if ((cmdCode & 0x80) != 0) {
+                return QStringLiteral("Modbus异常响应: 0x%1").arg(cmdCode, 2, 16, QChar('0')).toUpper();
+            }
+            return QString("Modbus 0x%1").arg(cmdCode, 2, 16, QChar('0')).toUpper();
         }
     }
 }

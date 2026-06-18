@@ -1,4 +1,4 @@
-﻿#ifndef MAINWINDOW_H
+#ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
 #include <QMainWindow>
@@ -24,6 +24,8 @@
 #include "application/qingjuotaservice.h"
 #include "application/rs485manager.h"
 #include "application/rs485rfidservice.h"
+#include "application/hlotaservice.h"
+#include "application/bbffotaservice.h"
 #include <QProgressBar>
 #include <QStackedWidget>
 #include <QComboBox>
@@ -202,6 +204,8 @@ private:
     QPushButton *otaStartUpgradeBtn;
     QPushButton *otaAbortUpgradeBtn;
     QPushButton *otaSelectFileBtn;
+    QLabel *otaVersionLabel;
+    QLineEdit *otaVersionEdit;
 
     // OTA 升级压力测试 UI 控件
     QCheckBox *otaStressTestEnabledCheck;
@@ -242,6 +246,8 @@ private slots:
     void updateOtaStressUI();
     void handleOtaStateChangeForStressTest(OtaService::State state, const QString &message);
     void handleQingjuOtaStateChangeForStressTest(QingjuOtaService::State state, const QString &message);
+    void handleHlOtaStateChanged(HlOtaService::State state, const QString &message);
+    void handleBbFfOtaStateChanged(BbFfOtaService::State state, const QString &message);
     void onOtaInjectMasterToggled(bool checked);
     OtaErrorConfig getOtaErrorConfig() const;
     QingjuOtaErrorConfig getQingjuOtaErrorConfig() const;
@@ -265,9 +271,12 @@ private slots:
     void onRs485CommandFinished(bool success, const QString &message);
     QWidget *createBbRfidMonitorPanel(QWidget *parent);
     QWidget *createFfRfidMonitorPanel(QWidget *parent);
+    QWidget *createHlRfidMonitorPanel(QWidget *parent);
+    void updateHlRfidPanel(const Rs485State &state);
     QWidget *createRs485StressPanel(QWidget *parent);
     void updateRs485Ports();
     void handleRs485Disconnect();
+    void syncHlConfigToService();
 
 private:
     // 青桔协议服务及管理器
@@ -328,6 +337,8 @@ private:
     // RS485 相关服务、状态与界面控件指针
     Rs485Manager *rs485Manager;
     Rs485RfidService *rs485RfidService;
+    HlOtaService *hlOtaService;
+    BbFfOtaService *bbFfOtaService;
     bool serialOpened;
 
     // 串口设备面板 (左侧)
@@ -389,6 +400,32 @@ private:
     QLabel *ffIfAmpVal;
     QLabel *ffThrdVal;
     QLabel *ffTagIdVal;
+
+    // Hellobike protocol monitor panel
+    QWidget *hlRfidPanel;
+    QPushButton *hlStartBtn;
+    QPushButton *hlStopBtn;
+    QPushButton *hlQueryOnceBtn;
+    QComboBox *hlQueryModeCombo;
+    QSpinBox *hlHostPollPeriodSpin;
+    QPushButton *hlRebootBtn;
+    QPushButton *hlQueryInfoBtn;
+    QLabel *hlRfidHwVerVal;
+    QLabel *hlRfidSwVerVal;
+    QLabel *hlRfidMfgVal;
+    QLabel *hlRfidDevIdVal;
+    QLabel *hlRfidProtoVerVal;
+    QLabel *hlRfidProjectNoVal;
+    
+    QSpinBox *hlScanTimeSpin;
+    QSpinBox *hlScanIntervalSpin;
+    QSpinBox *hlSavedCountSpin;
+    QCheckBox *hlClearAfterReadCheck;
+    QCheckBox *hlDecryptEnableCheck;
+    QPushButton *hlSetControlBtn;
+    QLabel *hlTagIdVal;
+    QLabel *hlScanStateVal;
+    QLabel *hlErrorCodeVal;
 
     // RS485 压力测试统计面板 (QStackedWidget 子面板)
     QWidget *rs485StressPanel;

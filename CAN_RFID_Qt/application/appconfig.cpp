@@ -40,6 +40,11 @@ AppConfigData AppConfig::load() const
     config.rs485PollIntervalMs = settings.value("serial/rs485PollIntervalMs", config.rs485PollIntervalMs).toInt();
     config.bbPower = settings.value("serial/bbPower", config.bbPower).toInt();
     config.ffPower = settings.value("serial/ffPower", config.ffPower).toInt();
+    config.hlScanTimeMs = settings.value("serial/hlScanTimeMs", config.hlScanTimeMs).toInt();
+    config.hlScanIntervalMs = settings.value("serial/hlScanIntervalMs", config.hlScanIntervalMs).toInt();
+    config.hlSavedTagCount = settings.value("serial/hlSavedTagCount", config.hlSavedTagCount).toInt();
+    config.hlClearAfterRead = settings.value("serial/hlClearAfterRead", config.hlClearAfterRead).toBool();
+    config.hlDecryptEnable = settings.value("serial/hlDecryptEnable", config.hlDecryptEnable).toBool();
 
     if (config.logDirectory.isEmpty()) {
         config.logDirectory = QDir(QCoreApplication::applicationDirPath()).filePath("logs");
@@ -75,6 +80,11 @@ void AppConfig::save(const AppConfigData &config) const
     settings.setValue("serial/rs485PollIntervalMs", config.rs485PollIntervalMs);
     settings.setValue("serial/bbPower", config.bbPower);
     settings.setValue("serial/ffPower", config.ffPower);
+    settings.setValue("serial/hlScanTimeMs", config.hlScanTimeMs);
+    settings.setValue("serial/hlScanIntervalMs", config.hlScanIntervalMs);
+    settings.setValue("serial/hlSavedTagCount", config.hlSavedTagCount);
+    settings.setValue("serial/hlClearAfterRead", config.hlClearAfterRead);
+    settings.setValue("serial/hlDecryptEnable", config.hlDecryptEnable);
     settings.sync();
 }
 

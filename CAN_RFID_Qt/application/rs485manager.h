@@ -17,10 +17,12 @@ public:
     void closePort();
     bool isOpen() const;
 
-    bool sendRawData(const QByteArray &data);
     void setProtocolMode(int mode); // 2: BB, 3: FF
 
     static QStringList scanPorts();
+
+public slots:
+    bool sendRawData(const QByteArray &data);
 
 signals:
     // Emitted when a valid packet is sliced and verified
@@ -38,13 +40,15 @@ private slots:
 private:
     void processBbBuffer();
     void processFfBuffer();
+    void processHlBuffer();
+    void processOtaBuffer();
     
     // Decodes frame into a human-readable string for logging
     QString decodeFrameText(bool isTx, quint8 cmdCode, const QByteArray &payload) const;
 
     QSerialPort *m_serialPort;
     QByteArray m_rxBuffer;
-    int m_protocolMode; // 2: BB, 3: FF
+    int m_protocolMode; // 2: BB, 3: FF, 4: Hellobike
 };
 
 #endif // RS485MANAGER_H

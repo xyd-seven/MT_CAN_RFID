@@ -29,6 +29,18 @@ struct Rs485State
     int ffIfAmp = -1;
     int ffThrd = -1;
     bool ffCardSwitch = true;
+
+    // Hellobike states
+    int hlScanState = 0; // 0-not scanned, 1-scanning, 2-stopped
+    int hlScanTagCount = 0;
+    int hlErrorCode = 0; // 0-not scanned, 1-no tag, 2-tag scanned, -1-other
+    int hlDecryptEnable = 1;
+    int hlSavedTagCount = 1;
+    int hlClearAfterRead = 0;
+    int hlScanInterval = 1000;
+    quint32 hlScanTime = 0xFFFFFFFF;
+    int hlProtoVer = -1;
+    int hlProjectNo = -1;
 };
 
 class Rs485RfidService : public QObject
@@ -44,7 +56,8 @@ public:
 
     Rs485State state() const { return m_state; }
     bool isScanning() const { return m_isScanning; }
-    void setProtocolMode(int mode); // 2: BB, 3: FF
+    void setProtocolMode(int mode); // 2: BB, 3: FF, 4: Hellobike
+    void setHlConfig(quint32 timeMs, int intervalMs, int savedCount, int clearAfter, int decrypt);
 
     // Downlink commands
     void queryDeviceInfo();
@@ -57,6 +70,10 @@ public:
     void ffSetDemodulatorParams(int mixer, int ifAmp, int thrd);
     void ffQueryDemodulatorParams();
     void ffQueryCardSwitch();
+
+    // Hellobike exclusive commands
+    void hlWriteScanControl(int startStop, quint32 timeMs, int intervalMs, int savedCount, int clearAfter, int decrypt);
+    void hlRebootDevice();
 
 signals:
     void stateUpdated(const Rs485State &state);
@@ -73,9 +90,12 @@ private:
     // Helper to send packets easily
     bool sendBbPacket(quint8 type, quint8 code, const QByteArray &payload);
     bool sendFfPacket(quint8 code, const QByteArray &payload);
+    bool sendHlReadPacket(quint16 startReg, quint16 count);
+    bool sendHlWritePacket(quint16 startReg, quint16 count, const QByteArray &regData);
     
     void handleBbResponse(quint8 cmdCode, const QByteArray &payload);
     void handleFfResponse(quint8 cmdCode, const QByteArray &payload);
+    void handleHlResponse(quint8 cmdCode, const QByteArray &payload);
     
     void startTimeoutGuard(int timeoutMs = 500);
     void stopTimeoutGuard();

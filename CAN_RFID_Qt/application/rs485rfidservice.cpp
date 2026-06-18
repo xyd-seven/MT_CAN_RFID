@@ -1,4 +1,5 @@
 #include "rs485rfidservice.h"
+#include "domain/crc16.h"
 #include <QDebug>
 
 static quint16 calculateCrc16Xmodem(const char *data, int len)
@@ -50,6 +51,16 @@ void Rs485RfidService::setProtocolMode(int mode)
     reset();
 }
 
+void Rs485RfidService::setHlConfig(quint32 timeMs, int intervalMs, int savedCount, int clearAfter, int decrypt)
+{
+    m_state.hlScanTime = timeMs;
+    m_state.hlScanInterval = intervalMs;
+    m_state.hlSavedTagCount = savedCount;
+    m_state.hlClearAfterRead = clearAfter;
+    m_state.hlDecryptEnable = decrypt;
+    emit stateUpdated(m_state);
+}
+
 void Rs485RfidService::startScan(int hostPollIntervalMs, int readMode)
 {
     if (m_isScanning) return;
@@ -61,6 +72,9 @@ void Rs485RfidService::startScan(int hostPollIntervalMs, int readMode)
     // For FF protocol, send start detection (0x06) command
     if (m_protocolMode == 3) {
         sendFfPacket(0x06, QByteArray());
+    } else if (m_protocolMode == 4) {
+        // For Hellobike, write scan control (start)
+        hlWriteScanControl(1, m_state.hlScanTime, m_state.hlScanInterval, m_state.hlSavedTagCount, m_state.hlClearAfterRead, m_state.hlDecryptEnable);
     }
 
     // Query device info first
@@ -83,6 +97,9 @@ void Rs485RfidService::stopScan()
     // For FF protocol, send stop detection (0x08) command
     if (m_protocolMode == 3) {
         sendFfPacket(0x08, QByteArray());
+    } else if (m_protocolMode == 4) {
+        // For Hellobike, write scan control (stop)
+        hlWriteScanControl(0, m_state.hlScanTime, m_state.hlScanInterval, m_state.hlSavedTagCount, m_state.hlClearAfterRead, m_state.hlDecryptEnable);
     }
 }
 
@@ -105,10 +122,15 @@ void Rs485RfidService::queryDeviceInfo()
         sendBbPacket(0x00, 0x03, QByteArray::fromHex("00"));
         m_pendingCmdCode = 0x03;
         startTimeoutGuard();
-    } else {
+    } else if (m_protocolMode == 3) {
         // FF: Query version (0x04)
         sendFfPacket(0x04, QByteArray());
         m_pendingCmdCode = 0x05;
+        startTimeoutGuard();
+    } else if (m_protocolMode == 4) {
+        // Hellobike: Query universal registers 0 to 6
+        sendHlReadPacket(0, 7);
+        m_pendingCmdCode = 0x03; // Modbus read func code is 0x03
         startTimeoutGuard();
     }
 }
@@ -119,15 +141,25 @@ void Rs485RfidService::triggerSingleQuery()
         sendBbPacket(0x00, 0x22, QByteArray());
         m_pendingCmdCode = 0x22;
         startTimeoutGuard();
-    } else {
+    } else if (m_protocolMode == 3) {
         sendFfPacket(0x00, QByteArray());
         m_pendingCmdCode = 0x01; // FF Query tag ID replies with code 0x01
+        startTimeoutGuard();
+    } else if (m_protocolMode == 4) {
+        // Hellobike: Read Query Tags (Reg 4211, quantity 111)
+        sendHlReadPacket(4211, 111);
+        m_pendingCmdCode = 0x03; // Modbus read func code is 0x03
         startTimeoutGuard();
     }
 }
 
 void Rs485RfidService::setPower(int powerRaw01Dbm)
 {
+    if (m_protocolMode == 4) {
+        emit commandFinished(false, QStringLiteral("哈啰协议不支持设置发射功率"));
+        return;
+    }
+
     quint16 rawPower = static_cast<quint16>(powerRaw01Dbm);
     QByteArray payload;
     payload.append(static_cast<char>((rawPower >> 8) & 0xFF));
@@ -146,6 +178,11 @@ void Rs485RfidService::setPower(int powerRaw01Dbm)
 
 void Rs485RfidService::queryPower()
 {
+    if (m_protocolMode == 4) {
+        emit commandFinished(false, QStringLiteral("哈啰协议不支持查询发射功率"));
+        return;
+    }
+
     if (m_protocolMode == 2) {
         sendBbPacket(0x00, 0xB7, QByteArray());
         m_pendingCmdCode = 0xB7;
@@ -212,9 +249,14 @@ void Rs485RfidService::onPollTimeout()
         sendBbPacket(0x00, 0x22, QByteArray());
         m_pendingCmdCode = 0x22;
         startTimeoutGuard();
-    } else {
+    } else if (m_protocolMode == 3) {
         sendFfPacket(0x00, QByteArray());
         m_pendingCmdCode = 0x01;
+        startTimeoutGuard();
+    } else if (m_protocolMode == 4) {
+        // Read tags query: Reg 4211, count 111
+        sendHlReadPacket(4211, 111);
+        m_pendingCmdCode = 0x03; // Modbus read func code is 0x03
         startTimeoutGuard();
     }
 }
@@ -229,8 +271,10 @@ void Rs485RfidService::onPacketReceived(quint8 cmdCode, const QByteArray &payloa
 
     if (m_protocolMode == 2) {
         handleBbResponse(cmdCode, payload);
-    } else {
+    } else if (m_protocolMode == 3) {
         handleFfResponse(cmdCode, payload);
+    } else if (m_protocolMode == 4) {
+        handleHlResponse(cmdCode, payload);
     }
 }
 
@@ -247,10 +291,14 @@ void Rs485RfidService::onResponseTimeout()
             if (m_pendingCmdCode == 0x11 || m_pendingCmdCode == 0xB6 || m_pendingCmdCode == 0xB7) {
                 emit commandFinished(false, QStringLiteral("指令响应超时"));
             }
-        } else { // FF
+        } else if (m_protocolMode == 3) { // FF
             if (m_pendingCmdCode == 0x03 || m_pendingCmdCode == 0x0F || m_pendingCmdCode == 0x13 ||
                 m_pendingCmdCode == 0x07 || m_pendingCmdCode == 0x09 || m_pendingCmdCode == 0x0B ||
                 m_pendingCmdCode == 0x11 || m_pendingCmdCode == 0x15 || m_pendingCmdCode == 0x17) {
+                emit commandFinished(false, QStringLiteral("指令响应超时"));
+            }
+        } else if (m_protocolMode == 4) { // Hellobike
+            if (m_pendingCmdCode == 0x10) {
                 emit commandFinished(false, QStringLiteral("指令响应超时"));
             }
         }
@@ -271,13 +319,16 @@ void Rs485RfidService::onResponseTimeout()
                     m_pendingCmdCode = 0x15;
                 }
                 else m_infoStep = 0;
-            } else {
+            } else if (m_protocolMode == 3) {
                 // FF sequence steps: 1: version, 2: ID
                 if (m_infoStep == 2) {
                     sendFfPacket(0x0C, QByteArray());
                     m_pendingCmdCode = 0x0D;
                 }
                 else m_infoStep = 0;
+            } else if (m_protocolMode == 4) {
+                // Hellobike does info query in 1 read request, so timeout finishes it
+                m_infoStep = 0;
             }
             if (m_infoStep > 0) {
                 startTimeoutGuard();
@@ -477,6 +528,10 @@ bool Rs485RfidService::isExpectedResponse(quint8 cmdCode) const
     if (m_protocolMode == 2 && m_pendingCmdCode == 0x22 && cmdCode == 0xFF) {
         return true;
     }
+    
+    if (m_protocolMode == 4) {
+        return (cmdCode == m_pendingCmdCode) || (cmdCode == (m_pendingCmdCode | 0x80));
+    }
 
     return cmdCode == m_pendingCmdCode;
 }
@@ -517,4 +572,184 @@ bool Rs485RfidService::sendFfPacket(quint8 code, const QByteArray &payload)
     pkt.append(static_cast<char>(crc & 0xFF));
     
     return m_manager->sendRawData(pkt);
+}
+
+bool Rs485RfidService::sendHlReadPacket(quint16 startReg, quint16 count)
+{
+    // Address (0x0D) + Func (0x03) + StartReg(2 bytes) + RegCount(2 bytes) + CRC (2 bytes)
+    QByteArray pkt;
+    pkt.reserve(8);
+    pkt.append(static_cast<char>(0x0D));
+    pkt.append(static_cast<char>(0x03));
+    pkt.append(static_cast<char>((startReg >> 8) & 0xFF));
+    pkt.append(static_cast<char>(startReg & 0xFF));
+    pkt.append(static_cast<char>((count >> 8) & 0xFF));
+    pkt.append(static_cast<char>(count & 0xFF));
+    
+    quint16 crc = calculateModbusCrc16(reinterpret_cast<const quint8*>(pkt.constData()), pkt.size());
+    pkt.append(static_cast<char>(crc & 0xFF));
+    pkt.append(static_cast<char>((crc >> 8) & 0xFF));
+    
+    return m_manager->sendRawData(pkt);
+}
+
+bool Rs485RfidService::sendHlWritePacket(quint16 startReg, quint16 count, const QByteArray &regData)
+{
+    // Address (0x0D) + Func (0x10) + StartReg(2) + RegCount(2) + ByteCount(1) + RegData(2*Count) + CRC(2)
+    QByteArray pkt;
+    pkt.reserve(9 + regData.size());
+    pkt.append(static_cast<char>(0x0D));
+    pkt.append(static_cast<char>(0x10));
+    pkt.append(static_cast<char>((startReg >> 8) & 0xFF));
+    pkt.append(static_cast<char>(startReg & 0xFF));
+    pkt.append(static_cast<char>((count >> 8) & 0xFF));
+    pkt.append(static_cast<char>(count & 0xFF));
+    pkt.append(static_cast<char>(regData.size()));
+    pkt.append(regData);
+    
+    quint16 crc = calculateModbusCrc16(reinterpret_cast<const quint8*>(pkt.constData()), pkt.size());
+    pkt.append(static_cast<char>(crc & 0xFF));
+    pkt.append(static_cast<char>((crc >> 8) & 0xFF));
+    
+    return m_manager->sendRawData(pkt);
+}
+
+void Rs485RfidService::hlWriteScanControl(int startStop, quint32 timeMs, int intervalMs, int savedCount, int clearAfter, int decrypt)
+{
+    QByteArray regData;
+    regData.reserve(14);
+    
+    // start_stop_scan
+    regData.append(static_cast<char>((startStop >> 8) & 0xFF));
+    regData.append(static_cast<char>(startStop & 0xFF));
+    
+    // scan_time_ms (uint32_t)
+    regData.append(static_cast<char>((timeMs >> 24) & 0xFF));
+    regData.append(static_cast<char>((timeMs >> 16) & 0xFF));
+    regData.append(static_cast<char>((timeMs >> 8) & 0xFF));
+    regData.append(static_cast<char>(timeMs & 0xFF));
+    
+    // scan_interval_ms
+    regData.append(static_cast<char>((intervalMs >> 8) & 0xFF));
+    regData.append(static_cast<char>(intervalMs & 0xFF));
+    
+    // scan_saved_tag_count
+    regData.append(static_cast<char>((savedCount >> 8) & 0xFF));
+    regData.append(static_cast<char>(savedCount & 0xFF));
+    
+    // scan_clare_saved_after_read
+    regData.append(static_cast<char>((clearAfter >> 8) & 0xFF));
+    regData.append(static_cast<char>(clearAfter & 0xFF));
+    
+    // decrypt_enable
+    regData.append(static_cast<char>((decrypt >> 8) & 0xFF));
+    regData.append(static_cast<char>(decrypt & 0xFF));
+    
+    sendHlWritePacket(4101, 7, regData);
+    
+    m_state.hlScanState = startStop ? 1 : 2;
+    m_state.hlScanTime = timeMs;
+    m_state.hlScanInterval = intervalMs;
+    m_state.hlSavedTagCount = savedCount;
+    m_state.hlClearAfterRead = clearAfter;
+    m_state.hlDecryptEnable = decrypt;
+    emit stateUpdated(m_state);
+}
+
+void Rs485RfidService::hlRebootDevice()
+{
+    QByteArray regData;
+    regData.append(static_cast<char>(0));
+    regData.append(static_cast<char>(1));
+    sendHlWritePacket(11, 1, regData);
+}
+
+void Rs485RfidService::handleHlResponse(quint8 cmdCode, const QByteArray &payload)
+{
+    if ((cmdCode & 0x80) != 0) {
+        quint8 exceptionCode = payload.isEmpty() ? 0 : static_cast<quint8>(payload.at(0));
+        QString errMsg;
+        switch (exceptionCode) {
+        case 0x01: errMsg = QStringLiteral("Modbus异常: 不支持的功能码 (01)"); break;
+        case 0x02: errMsg = QStringLiteral("Modbus异常: 非法的数据寄存器地址 (02)"); break;
+        case 0x03: errMsg = QStringLiteral("Modbus异常: 非法的数据寄存器值 (03)"); break;
+        case 0x04: errMsg = QStringLiteral("Modbus异常: 从机设备故障 (04)"); break;
+        default: errMsg = QStringLiteral("Modbus异常响应: 代码 0x%1").arg(exceptionCode, 2, 16, QChar('0')).toUpper(); break;
+        }
+        emit commandFinished(false, errMsg);
+        return;
+    }
+
+    if (cmdCode == 0x03) {
+        // Read response
+        if (payload.size() == 14) {
+            // Universal registers 0 to 6
+            quint16 swVer = (static_cast<quint8>(payload.at(0)) << 8) | static_cast<quint8>(payload.at(1));
+            quint16 hwVer = (static_cast<quint8>(payload.at(2)) << 8) | static_cast<quint8>(payload.at(3));
+            quint16 protoVer = (static_cast<quint8>(payload.at(4)) << 8) | static_cast<quint8>(payload.at(5));
+            quint16 mfgId = (static_cast<quint8>(payload.at(6)) << 8) | static_cast<quint8>(payload.at(7));
+            quint16 verType = (static_cast<quint8>(payload.at(8)) << 8) | static_cast<quint8>(payload.at(9));
+            quint16 projNo = (static_cast<quint8>(payload.at(12)) << 8) | static_cast<quint8>(payload.at(13));
+
+            m_state.swVersion = QString::number(swVer);
+            m_state.hwVersion = QString::number(hwVer);
+            m_state.hlProtoVer = protoVer;
+            m_state.hlProjectNo = projNo;
+            
+            if (mfgId == 10136) {
+                m_state.manufacturer = QStringLiteral("10136 (小安)");
+            } else {
+                m_state.manufacturer = QString::number(mfgId);
+            }
+            
+            m_state.deviceId = QStringLiteral("Proj:%1, Type:%2").arg(projNo).arg(verType == 1 ? "BOOT" : "APP");
+            m_infoStep = 0;
+            emit stateUpdated(m_state);
+        }
+        else if (payload.size() == 222) {
+            // Query tags response: RFID_scan_result_t
+            m_state.hlScanState = static_cast<int>(static_cast<int8_t>(payload.at(0)));
+            m_state.hlScanTagCount = static_cast<int>(static_cast<quint8>(payload.at(1)));
+            
+            // Read latest tag info (index 0)
+            int8_t errCode = static_cast<int8_t>(payload.at(2));
+            int8_t tagLen = static_cast<int8_t>(payload.at(3));
+            
+            m_state.hlErrorCode = errCode;
+            m_state.errCode = errCode;
+            
+            if (errCode == 2 && tagLen > 0 && tagLen <= 20) {
+                m_state.tagId = payload.mid(4, tagLen).toHex().toUpper();
+                m_state.errorMsg.clear();
+            } else {
+                m_state.tagId.clear();
+                if (errCode == 1) {
+                    m_state.errorMsg = QStringLiteral("未扫描到标签");
+                } else if (errCode == -1) {
+                    m_state.errorMsg = QStringLiteral("读卡器故障");
+                } else if (errCode == 0) {
+                    m_state.errorMsg = QStringLiteral("未扫描");
+                } else {
+                    m_state.errorMsg = QStringLiteral("读卡错误");
+                }
+            }
+            emit stateUpdated(m_state);
+        }
+    }
+    else if (cmdCode == 0x10) {
+        // Write response
+        if (payload.size() >= 4) {
+            quint16 startReg = (static_cast<quint8>(payload.at(0)) << 8) | static_cast<quint8>(payload.at(1));
+            quint16 count = (static_cast<quint8>(payload.at(2)) << 8) | static_cast<quint8>(payload.at(3));
+            if (startReg == 4101) {
+                emit commandFinished(true, QStringLiteral("设置扫描配置成功"));
+            } else if (startReg == 11) {
+                emit commandFinished(true, QStringLiteral("从机设备重启成功"));
+            } else {
+                emit commandFinished(true, QStringLiteral("Modbus写寄存器成功: 数量 %1").arg(count));
+            }
+        } else {
+            emit commandFinished(true, QStringLiteral("Modbus写寄存器应答成功"));
+        }
+    }
 }
