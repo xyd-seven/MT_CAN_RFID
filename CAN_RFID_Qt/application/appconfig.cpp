@@ -33,6 +33,12 @@ AppConfigData AppConfig::load() const
     config.qjTargetDevice = settings.value("rfid/qjTargetDevice", config.qjTargetDevice).toInt();
     config.qjQueryMode = settings.value("rfid/qjQueryMode", config.qjQueryMode).toInt();
     config.qjHostPollIntervalMs = settings.value("rfid/qjHostPollIntervalMs", config.qjHostPollIntervalMs).toInt();
+    config.serialPortName = settings.value("serial/portName", config.serialPortName).toString();
+    config.serialBaudRate = settings.value("serial/baudRate", config.serialBaudRate).toInt();
+    config.rs485QueryMode = settings.value("serial/rs485QueryMode", config.rs485QueryMode).toInt();
+    config.rs485PollIntervalMs = settings.value("serial/rs485PollIntervalMs", config.rs485PollIntervalMs).toInt();
+    config.bbPower = settings.value("serial/bbPower", config.bbPower).toInt();
+    config.ffPower = settings.value("serial/ffPower", config.ffPower).toInt();
 
     if (config.logDirectory.isEmpty()) {
         config.logDirectory = QDir(QCoreApplication::applicationDirPath()).filePath("logs");
@@ -62,6 +68,12 @@ void AppConfig::save(const AppConfigData &config) const
     settings.setValue("rfid/qjTargetDevice", config.qjTargetDevice);
     settings.setValue("rfid/qjQueryMode", config.qjQueryMode);
     settings.setValue("rfid/qjHostPollIntervalMs", config.qjHostPollIntervalMs);
+    settings.setValue("serial/portName", config.serialPortName);
+    settings.setValue("serial/baudRate", config.serialBaudRate);
+    settings.setValue("serial/rs485QueryMode", config.rs485QueryMode);
+    settings.setValue("serial/rs485PollIntervalMs", config.rs485PollIntervalMs);
+    settings.setValue("serial/bbPower", config.bbPower);
+    settings.setValue("serial/ffPower", config.ffPower);
     settings.sync();
 }
 

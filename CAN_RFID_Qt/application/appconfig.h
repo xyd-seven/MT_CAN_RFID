@@ -24,6 +24,12 @@ struct AppConfigData
     int qjTargetDevice = 0x0A;
     int qjQueryMode = 0; // 0: Auto Poll, 1: Single Query
     int qjHostPollIntervalMs = 500;
+    QString serialPortName = "";
+    int serialBaudRate = 9600;
+    int rs485QueryMode = 0;
+    int rs485PollIntervalMs = 500;
+    int bbPower = 2000;
+    int ffPower = 2000;
 };
 
 class AppConfig

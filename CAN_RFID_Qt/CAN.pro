@@ -1,4 +1,4 @@
-QT += core gui
+QT += core gui serialport
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
@@ -20,7 +20,9 @@ SOURCES += \
     application/stresstestservice.cpp \
     application/qingjucanmanager.cpp \
     application/qingjurfidservice.cpp \
-    application/qingjuotaservice.cpp
+    application/qingjuotaservice.cpp \
+    application/rs485manager.cpp \
+    application/rs485rfidservice.cpp
 
 HEADERS += \
     mainwindow.h \
@@ -38,6 +40,8 @@ HEADERS += \
     application/qingjucanmanager.h \
     application/qingjurfidservice.h \
     application/qingjuotaservice.h \
+    application/rs485manager.h \
+    application/rs485rfidservice.h \
     third_party/zlgcan/zlgcan.h \
     third_party/zlgcan/config.h
 

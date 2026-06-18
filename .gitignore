@@ -33,3 +33,15 @@ Desktop.ini
 
 # Original vendor examples kept locally only; project uses CAN_RFID_Qt/third_party.
 zlgcan 二次开发库/
+
+# Temp debug texts
+bb_text.txt
+ff_text.txt
+.tmp_pdf/
+
+# Release binary package
+CAN_RFID_Release/
+
+# Protocol docs
+协议文件/
+

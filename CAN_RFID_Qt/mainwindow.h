@@ -22,6 +22,8 @@
 #include "application/qingjucanmanager.h"
 #include "application/qingjurfidservice.h"
 #include "application/qingjuotaservice.h"
+#include "application/rs485manager.h"
+#include "application/rs485rfidservice.h"
 #include <QProgressBar>
 #include <QStackedWidget>
 #include <QComboBox>
@@ -249,6 +251,19 @@ private slots:
     void handleQjCustomLog(const QString &text);
     QWidget *createQjRfidMonitorPanel(QWidget *parent);
 
+    // RS485 界面方法及槽函数
+    void onSerialOpenCloseClicked();
+    void onSerialRefreshClicked();
+    void onSerialOneClickStartClicked();
+    void updateRs485RfidPanel(const Rs485State &state);
+    void addSerialFrameToList(bool isTx, const QByteArray &data, const QString &decodeText);
+    void onRs485CommandFinished(bool success, const QString &message);
+    QWidget *createBbRfidMonitorPanel(QWidget *parent);
+    QWidget *createFfRfidMonitorPanel(QWidget *parent);
+    QWidget *createRs485StressPanel(QWidget *parent);
+    void updateRs485Ports();
+    void handleRs485Disconnect();
+
 private:
     // 青桔协议服务及管理器
     QComboBox *protocolModeCombo;
@@ -304,6 +319,87 @@ private:
     QGroupBox *qjOtaAnomalyGroup;
     QComboBox *qjOtaAnomalyCombo;
     QCheckBox *qjOtaAnomalyEnableCheck;
+
+    // RS485 相关服务、状态与界面控件指针
+    Rs485Manager *rs485Manager;
+    Rs485RfidService *rs485RfidService;
+    bool serialOpened;
+
+    // 串口设备面板 (左侧)
+    QWidget *devicePanel;
+    QWidget *serialDevicePanel;
+    QComboBox *serialPortCombo;
+    QComboBox *serialBaudRateCombo;
+    QPushButton *serialOpenCloseBtn;
+    QPushButton *serialRefreshBtn;
+    QLabel *serialStatusLabel;
+    QPushButton *serialOneClickStartBtn;
+
+    // BB 协议监控面板
+    QWidget *bbRfidPanel;
+    QPushButton *bbStartBtn;
+    QPushButton *bbStopBtn;
+    QPushButton *bbQueryOnceBtn;
+    QComboBox *bbQueryModeCombo;
+    QSpinBox *bbHostPollPeriodSpin;
+    QPushButton *bbQueryInfoBtn;
+    QLabel *bbRfidHwVerVal;
+    QLabel *bbRfidSwVerVal;
+    QLabel *bbRfidMfgVal;
+    QLabel *bbRfidDevIdVal;
+    QSpinBox *bbPowerSpin;
+    QPushButton *bbSetPowerBtn;
+    QPushButton *bbQueryPowerBtn;
+    QLabel *bbPowerVal;
+    QLabel *bbTagIdVal;
+    QLabel *bbRssiVal;
+    QLabel *bbPcVal;
+    QLabel *bbCrcVal;
+
+    // FF 协议监控面板
+    QWidget *ffRfidPanel;
+    QPushButton *ffStartBtn;
+    QPushButton *ffStopBtn;
+    QPushButton *ffQueryOnceBtn;
+    QComboBox *ffQueryModeCombo;
+    QSpinBox *ffHostPollPeriodSpin;
+    QPushButton *ffRebootBtn;
+    QPushButton *ffQuerySwitchBtn;
+    QLabel *ffCardSwitchVal;
+    QPushButton *ffQueryInfoBtn;
+    QLabel *ffRfidHwVerVal;
+    QLabel *ffRfidSwVerVal;
+    QLabel *ffRfidMfgVal;
+    QLabel *ffRfidDevIdVal;
+    QSpinBox *ffPowerSpin;
+    QPushButton *ffSetPowerBtn;
+    QPushButton *ffQueryPowerBtn;
+    QLabel *ffPowerVal;
+    QSpinBox *ffMixerSpin;
+    QSpinBox *ffIfAmpSpin;
+    QSpinBox *ffThrdSpin;
+    QPushButton *ffSetDemodBtn;
+    QPushButton *ffQueryDemodBtn;
+    QLabel *ffMixerVal;
+    QLabel *ffIfAmpVal;
+    QLabel *ffThrdVal;
+    QLabel *ffTagIdVal;
+
+    // RS485 压力测试统计面板 (QStackedWidget 子面板)
+    QWidget *rs485StressPanel;
+    QLabel *rs485StressStateValue;
+    QLabel *rs485StressElapsedValue;
+    QLabel *rs485StressSuccessRateValue;
+    QLabel *rs485StressTotalSamplesValue;
+    QLabel *rs485StressSuccessCountValue;
+    QLabel *rs485StressNoTagCountValue;
+    QLabel *rs485StressModuleFaultValue;
+    QLabel *rs485StressCommunicationFaultValue;
+    QLabel *rs485StressCurrentTagValue;
+    QLabel *rs485StressLastSuccessTagValue;
+    QLabel *rs485StressUniqueTagCountValue;
+    QLabel *rs485StressMaxContinuousFailureValue;
+    QLabel *rs485StressLastFailureReasonValue;
 };
 
 #endif // MAINWINDOW_H

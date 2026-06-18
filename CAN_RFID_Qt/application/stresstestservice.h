@@ -51,6 +51,7 @@ public:
     bool exportSummary(const QString &filePath) const;
     bool handleFrame(const CanFrame &frame);
     bool handleQingjuState(const QingjuNpkState &state);
+    bool handleRs485State(int protocolMode, const QString &tagId, int errCode, bool isCommunicationTimeout, const QString &errorMsg);
     StressTestStats stats() const;
 
 private:
@@ -65,6 +66,7 @@ private:
     void markFailure(const QString &reason);
     void writeSampleCsv(const CanFrame &frame, const RfidStatus &status, bool success, bool tagValid);
     void writeQingjuSampleCsv(const QingjuNpkState &state, bool success, bool tagValid);
+    void writeRs485SampleCsv(int protocolMode, const QString &tagId, int errCode, bool isCommunicationTimeout, const QString &errorMsg, bool success, bool tagValid);
     void ensureSampleCsvOpen();
     QString csvEscape(const QString &value) const;
 

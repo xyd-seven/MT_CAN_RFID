@@ -1,4 +1,4 @@
-﻿#include "stresstestservice.h"
+#include "stresstestservice.h"
 
 #include "qingjurfidservice.h"
 
@@ -183,6 +183,78 @@ bool StressTestService::handleQingjuState(const QingjuNpkState &state)
 
     updateRates();
     writeQingjuSampleCsv(state, success, tagValid);
+    return true;
+}
+
+bool StressTestService::handleRs485State(int protocolMode, const QString &tagId, int errCode, bool isCommunicationTimeout, const QString &errorMsg)
+{
+    if (!currentStats.running) {
+        return false;
+    }
+
+    ++currentStats.totalSamples;
+    if (elapsedTimer.isValid()) {
+        currentStats.elapsedMilliseconds = elapsedTimer.elapsed();
+        currentStats.elapsedSeconds = currentStats.elapsedMilliseconds / 1000;
+    }
+
+    bool success = false;
+    bool tagValid = false;
+    QString cleanTag = tagId.trimmed();
+
+    if (isCommunicationTimeout) {
+        ++currentStats.communicationFaultCount;
+        ++currentStats.currentContinuousFailure;
+        currentStats.currentContinuousSuccess = 0;
+        if (currentStats.currentContinuousFailure > currentStats.maxContinuousFailure) {
+            currentStats.maxContinuousFailure = currentStats.currentContinuousFailure;
+        }
+        currentStats.lastFailureReason = errorMsg.isEmpty() ? QStringLiteral("从机应答超时") : errorMsg;
+    } 
+    else if (errCode == 0) { // Success tag reading
+        success = true;
+        currentStats.currentTag = cleanTag;
+        ++currentStats.successCount;
+        ++currentStats.currentContinuousSuccess;
+        currentStats.currentContinuousFailure = 0;
+        
+        tagValid = isValidTagText(cleanTag);
+        if (tagValid) {
+            ++currentStats.validTagCount;
+            if (currentStats.lastSuccessTag != cleanTag) {
+                currentStats.lastSuccessTag = cleanTag;
+                ++currentStats.tagChangeCount;
+            }
+            currentStats.lastFailureReason.clear();
+            currentStats.lastTagUpdateTime = QDateTime::currentDateTime();
+            if (!cleanTag.isEmpty()) {
+                uniqueTags.insert(cleanTag);
+                currentStats.uniqueTagCount = static_cast<quint64>(uniqueTags.size());
+            }
+        } else {
+            ++currentStats.tagContentErrorCount;
+            currentStats.lastFailureReason = QStringLiteral("识别成功但 UID 内容异常");
+        }
+    } 
+    else { // Reader returned error (e.g. no tag)
+        currentStats.currentTag.clear();
+        ++currentStats.currentContinuousFailure;
+        currentStats.currentContinuousSuccess = 0;
+        if (currentStats.currentContinuousFailure > currentStats.maxContinuousFailure) {
+            currentStats.maxContinuousFailure = currentStats.currentContinuousFailure;
+        }
+
+        if ((protocolMode == 2 && errCode == 0x15) || (protocolMode == 3 && errCode == -1)) {
+            ++currentStats.noTagCount;
+            currentStats.lastFailureReason = QStringLiteral("未扫描到标签");
+        } else {
+            ++currentStats.moduleFaultCount;
+            currentStats.lastFailureReason = errorMsg.isEmpty() ? QStringLiteral("设备返回错误") : errorMsg;
+        }
+    }
+
+    updateRates();
+    writeRs485SampleCsv(protocolMode, cleanTag, errCode, isCommunicationTimeout, errorMsg, success, tagValid);
     return true;
 }
 
@@ -406,6 +478,41 @@ void StressTestService::writeQingjuSampleCsv(const QingjuNpkState &state, bool s
            << currentStats.currentContinuousFailure << ','
            << currentStats.maxContinuousFailure << ','
            << csvEscape(state.statusText) << '\n';
+    ++pendingSampleRows;
+    if (pendingSampleRows >= FlushRowThreshold) {
+        sampleCsvFile.flush();
+        pendingSampleRows = 0;
+    }
+}
+
+void StressTestService::writeRs485SampleCsv(int protocolMode, const QString &tagId, int errCode, bool isCommunicationTimeout, const QString &errorMsg, bool success, bool tagValid)
+{
+    if (!autoSaveCsv) {
+        return;
+    }
+    ensureSampleCsvOpen();
+    if (!sampleCsvFile.isOpen()) {
+        return;
+    }
+
+    QTextStream stream(&sampleCsvFile);
+    stream << csvEscape(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")) << ','
+           << currentStats.elapsedMilliseconds << ','
+           << currentStats.totalSamples << ','
+           << (protocolMode == 2 ? "rs485_bb" : "rs485_ff") << ','
+           << errCode << ','
+           << (isCommunicationTimeout ? 1 : 0) << ','
+           << QString() << ','
+           << csvEscape(tagId) << ','
+           << tagId.length() << ','
+           << (success ? "true" : "false") << ','
+           << (tagValid ? "true" : "false") << ','
+           << csvEscape(currentStats.lastFailureReason) << ','
+           << QString::number(currentStats.successRate, 'f', 2) << ','
+           << QString::number(currentStats.tagValidRate, 'f', 2) << ','
+           << currentStats.currentContinuousFailure << ','
+           << currentStats.maxContinuousFailure << ','
+           << csvEscape(errorMsg) << '\n';
     ++pendingSampleRows;
     if (pendingSampleRows >= FlushRowThreshold) {
         sampleCsvFile.flush();
