@@ -118,8 +118,14 @@ void RfidService::handleResponseFrame(const QByteArray &payload)
     }
 
     if (response.positive) {
-        currentState.response = QString("Positive SID=0x%1")
-            .arg(static_cast<int>(response.sid), 2, 16, QChar('0'));
+        if (response.data.isEmpty()) {
+            currentState.response = QString("Positive SID=0x%1")
+                .arg(static_cast<int>(response.sid), 2, 16, QChar('0'));
+        } else {
+            currentState.response = QString("Positive SID=0x%1 Data=%2")
+                .arg(static_cast<int>(response.sid), 2, 16, QChar('0'))
+                .arg(QString::fromLatin1(response.data.toHex(' ').toUpper()));
+        }
         return;
     }
 

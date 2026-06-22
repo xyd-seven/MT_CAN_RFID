@@ -29,6 +29,7 @@ struct RfidResponse
     quint8 sid = 0;
     quint8 originalSid = 0;
     quint8 negativeCode = 0;
+    QByteArray data;
     bool positive = false;
     bool negative = false;
     bool valid = false;
@@ -58,6 +59,13 @@ public:
     static QByteArray buildSetScanPeriodFrame(quint8 period10ms);
     static QByteArray buildRestartFrame();
 
+    static QByteArray buildBootAppJumpFrame(quint8 targetMode);
+    static QByteArray buildSoftwareResetFrame();
+    static QByteArray buildCommunicationControlFrame(bool enableBroadcast);
+    static QByteArray buildSetBroadcastPeriodFrame(quint16 canId, quint16 periodMs);
+    static QByteArray buildCommunicationDiagnosticFrame(bool enableDiag);
+    static QByteArray buildWriteNonVolatileFrame(quint16 dataId, const QByteArray &data);
+
     static RfidStatus parseStatusFrame(const QByteArray &payload);
     static RfidVersion parseVersionFrame(const QByteArray &payload);
     static RfidResponse parseResponseFrame(const QByteArray &payload);
@@ -70,6 +78,7 @@ public:
 
 private:
     static QByteArray buildFilledFrame();
+    static QByteArray buildSingleFrame(const QByteArray &serviceData);
     static bool isClassicCanPayload(const QByteArray &payload);
     static quint16 readBigEndianUInt16(const QByteArray &payload, int offset);
 };

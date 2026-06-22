@@ -27,6 +27,53 @@ const QStringList DeviceTypeNames = {
 const int DeviceTypeIndexes[] = {42, 3, 42, 3, 42, 3, 41, 4, 41, 4, 200, 201};
 constexpr int MaxManualPayloadBytes = 64;
 constexpr int LogFlushIntervalMs = 50;
+
+QString normalizeHexText(QString text)
+{
+    text.replace(QRegularExpression(QStringLiteral("0[xX]")), QString());
+    text.replace(QStringLiteral(" "), QString());
+    text.replace(QStringLiteral(","), QString());
+    return text.trimmed();
+}
+
+bool parseHexUInt16(const QString &text, quint16 *value)
+{
+    QString normalized = normalizeHexText(text);
+    if (normalized.isEmpty()) {
+        return false;
+    }
+    bool ok = false;
+    uint val = normalized.toUInt(&ok, 16);
+    if (!ok || val > 0xFFFF) {
+        return false;
+    }
+    if (value) {
+        *value = static_cast<quint16>(val);
+    }
+    return true;
+}
+
+bool parseHexByteArray(const QString &text, QByteArray *data)
+{
+    QString normalized = normalizeHexText(text);
+    if (normalized.isEmpty()) {
+        if (data) {
+            data->clear();
+        }
+        return true;
+    }
+    if (normalized.length() % 2 != 0) {
+        return false;
+    }
+    QRegularExpression hexRegex(QStringLiteral("^[0-9a-fA-F]*$"));
+    if (!hexRegex.match(normalized).hasMatch()) {
+        return false;
+    }
+    if (data) {
+        *data = QByteArray::fromHex(normalized.toLatin1());
+    }
+    return true;
+}
 }
 
 MainWindow::MainWindow(QWidget *parent) :
@@ -1485,13 +1532,92 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
     deviceLayout->addWidget(rfidVersionValue, 1, 1);
     deviceLayout->addWidget(new QLabel(QStringLiteral("响应"), deviceGroup), 2, 0);
     deviceLayout->addWidget(rfidResponseValue, 2, 1);
+    // 通用诊断控制分组
+    QGroupBox *diagnosticGroup = new QGroupBox(QStringLiteral("通用诊断控制"), rfidGroup);
+    QGridLayout *diagLayout = new QGridLayout(diagnosticGroup);
+    diagLayout->setContentsMargins(6, 6, 6, 6);
+    diagLayout->setHorizontalSpacing(6);
+    diagLayout->setVerticalSpacing(4);
+
+    // Row 0: 0x10 跳转控制
+    diagLayout->addWidget(new QLabel(QStringLiteral("0x10 跳转"), diagnosticGroup), 0, 0);
+    QComboBox *diagJumpCombo = new QComboBox(diagnosticGroup);
+    diagJumpCombo->addItem(QStringLiteral("APP"), 0x01);
+    diagJumpCombo->addItem(QStringLiteral("BOOT"), 0x02);
+    diagLayout->addWidget(diagJumpCombo, 0, 1);
+    QPushButton *diagJumpBtn = new QPushButton(QStringLiteral("执行跳转"), diagnosticGroup);
+    diagLayout->addWidget(diagJumpBtn, 0, 2);
+
+    // Row 1: 0x11 软件复位
+    diagLayout->addWidget(new QLabel(QStringLiteral("0x11 复位"), diagnosticGroup), 1, 0);
+    QPushButton *diagResetBtn = new QPushButton(QStringLiteral("软件复位"), diagnosticGroup);
+    diagLayout->addWidget(diagResetBtn, 1, 1, 1, 2);
+
+    // Row 2: 0x28 通信控制
+    diagLayout->addWidget(new QLabel(QStringLiteral("0x28 广播控制"), diagnosticGroup), 2, 0);
+    QComboBox *diagBroadcastCombo = new QComboBox(diagnosticGroup);
+    diagBroadcastCombo->addItem(QStringLiteral("禁止周期发送"), 0x00);
+    diagBroadcastCombo->addItem(QStringLiteral("使能周期发送"), 0x01);
+    diagLayout->addWidget(diagBroadcastCombo, 2, 1);
+    QPushButton *diagBroadcastBtn = new QPushButton(QStringLiteral("应用控制"), diagnosticGroup);
+    diagLayout->addWidget(diagBroadcastBtn, 2, 2);
+
+    // Row 3: 0x29 广播周期配置
+    diagLayout->addWidget(new QLabel(QStringLiteral("0x29 周期配置"), diagnosticGroup), 3, 0);
+    QHBoxLayout *periodInputLayout = new QHBoxLayout();
+    QLineEdit *diagPeriodIdEdit = new QLineEdit(diagnosticGroup);
+    diagPeriodIdEdit->setPlaceholderText(QStringLiteral("CAN ID (HEX)"));
+    diagPeriodIdEdit->setToolTip(QStringLiteral("例如: 0x2C0 或 2C0"));
+    QSpinBox *diagPeriodValSpin = new QSpinBox(diagnosticGroup);
+    diagPeriodValSpin->setRange(16, 65535);
+    diagPeriodValSpin->setValue(100);
+    diagPeriodValSpin->setSuffix(QStringLiteral(" ms"));
+    diagPeriodValSpin->setToolTip(QStringLiteral("16~65535 ms; 65535为禁止发送"));
+    periodInputLayout->addWidget(diagPeriodIdEdit);
+    periodInputLayout->addWidget(diagPeriodValSpin);
+    diagLayout->addLayout(periodInputLayout, 3, 1);
+    QPushButton *diagPeriodBtn = new QPushButton(QStringLiteral("设置周期"), diagnosticGroup);
+    diagLayout->addWidget(diagPeriodBtn, 3, 2);
+
+    // Row 4: 0x85 通信故障诊断
+    diagLayout->addWidget(new QLabel(QStringLiteral("0x85 故障诊断"), diagnosticGroup), 4, 0);
+    QComboBox *diagDiagCombo = new QComboBox(diagnosticGroup);
+    diagDiagCombo->addItem(QStringLiteral("禁用诊断"), 0x00);
+    diagDiagCombo->addItem(QStringLiteral("启用诊断"), 0x01);
+    diagLayout->addWidget(diagDiagCombo, 4, 1);
+    QPushButton *diagDiagBtn = new QPushButton(QStringLiteral("应用诊断"), diagnosticGroup);
+    diagLayout->addWidget(diagDiagBtn, 4, 2);
+
+    // Row 5: 0x2E 写非易失
+    diagLayout->addWidget(new QLabel(QStringLiteral("0x2E 写非易失"), diagnosticGroup), 5, 0);
+    QHBoxLayout *writeInputLayout = new QHBoxLayout();
+    QLineEdit *diagWriteDidEdit = new QLineEdit(diagnosticGroup);
+    diagWriteDidEdit->setPlaceholderText(QStringLiteral("DID (HEX)"));
+    diagWriteDidEdit->setToolTip(QStringLiteral("例如: 0x1234"));
+    QLineEdit *diagWriteDataEdit = new QLineEdit(diagnosticGroup);
+    diagWriteDataEdit->setPlaceholderText(QStringLiteral("数据 (HEX)"));
+    diagWriteDataEdit->setToolTip(QStringLiteral("最大4字节，例如: AB CD 01"));
+    writeInputLayout->addWidget(diagWriteDidEdit);
+    writeInputLayout->addWidget(diagWriteDataEdit);
+    diagLayout->addLayout(writeInputLayout, 5, 1);
+    QPushButton *diagWriteBtn = new QPushButton(QStringLiteral("写入"), diagnosticGroup);
+    diagLayout->addWidget(diagWriteBtn, 5, 2);
 
     layout->addWidget(controlGroup, 0, 0);
-    layout->addWidget(tagGroup, 1, 0);
+    layout->addWidget(diagnosticGroup, 1, 0);
+    layout->addWidget(tagGroup, 2, 0);
     layout->addWidget(statusGroup, 0, 1);
-    layout->addWidget(deviceGroup, 1, 1);
+    layout->addWidget(deviceGroup, 1, 1, 2, 1);
     layout->setColumnStretch(0, 1);
     layout->setColumnStretch(1, 1);
+
+    auto ensureCanStarted = [this]() -> bool {
+        if (!canStarted) {
+            QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("请先一键启动或启动 CAN！"));
+            return false;
+        }
+        return true;
+    };
 
     connect(rfidStartScanBtn, &QPushButton::clicked, this, [this]() {
         rfidScanning = true;
@@ -1516,6 +1642,112 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
     connect(rfidRestartBtn, &QPushButton::clicked, this, [this]() {
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
     });
+
+    // 绑定诊断面板事件
+    connect(diagJumpBtn, &QPushButton::clicked, this, [this, diagJumpCombo, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
+        quint8 targetMode = static_cast<quint8>(diagJumpCombo->currentData().toUInt());
+        QString modeText = diagJumpCombo->currentText();
+        
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this, QStringLiteral("跳转确认"),
+            QStringLiteral("确认执行 %1 跳转吗？设备可能会短时离线。").arg(modeText),
+            QMessageBox::Yes | QMessageBox::No
+        );
+        if (reply == QMessageBox::Yes) {
+            sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(targetMode));
+        }
+    });
+
+    connect(diagResetBtn, &QPushButton::clicked, this, [this, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
+        
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this, QStringLiteral("复位确认"),
+            QStringLiteral("确认执行软件复位吗？设备会重启并短时无响应。"),
+            QMessageBox::Yes | QMessageBox::No
+        );
+        if (reply == QMessageBox::Yes) {
+            sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSoftwareResetFrame());
+        }
+    });
+
+    connect(diagBroadcastBtn, &QPushButton::clicked, this, [this, diagBroadcastCombo, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
+        bool enableBroadcast = diagBroadcastCombo->currentData().toBool();
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationControlFrame(enableBroadcast));
+    });
+
+    connect(diagPeriodBtn, &QPushButton::clicked, this, [this, diagPeriodIdEdit, diagPeriodValSpin, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
+        
+        quint16 canId = 0;
+        if (!parseHexUInt16(diagPeriodIdEdit->text(), &canId)) {
+            QMessageBox::warning(this, QStringLiteral("格式错误"), 
+                QStringLiteral("目标ID格式无效，请输入 0x000~0x7FF 范围内的十六进制标准帧ID。"));
+            return;
+        }
+        if (canId > 0x7FF) {
+            QMessageBox::warning(this, QStringLiteral("超出范围"), 
+                QStringLiteral("目标ID格式无效，请输入 0x000~0x7FF 范围内的十六进制标准帧ID。"));
+            return;
+        }
+        
+        if (canId < 0x2C0 || canId > 0x2DF) {
+            QMessageBox::StandardButton reply = QMessageBox::question(
+                this, QStringLiteral("设置确认"),
+                QStringLiteral("目标 ID 0x%1 不在默认的 RFID 广播范围 (0x2C0~0x2DF) 内，确认仍要设置吗？")
+                    .arg(QString::number(canId, 16).toUpper()),
+                QMessageBox::Yes | QMessageBox::No
+            );
+            if (reply != QMessageBox::Yes) {
+                return;
+            }
+        }
+        
+        quint16 periodMs = static_cast<quint16>(diagPeriodValSpin->value());
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(canId, periodMs));
+    });
+
+    connect(diagDiagBtn, &QPushButton::clicked, this, [this, diagDiagCombo, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
+        bool enableDiag = diagDiagCombo->currentData().toBool();
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationDiagnosticFrame(enableDiag));
+    });
+
+    connect(diagWriteBtn, &QPushButton::clicked, this, [this, diagWriteDidEdit, diagWriteDataEdit, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
+        
+        quint16 did = 0;
+        if (!parseHexUInt16(diagWriteDidEdit->text(), &did)) {
+            QMessageBox::warning(this, QStringLiteral("格式错误"), 
+                QStringLiteral("DID格式无效，请输入 0x0000~0xFFFF 范围内的十六进制值。"));
+            return;
+        }
+        
+        QByteArray data;
+        if (!parseHexByteArray(diagWriteDataEdit->text(), &data)) {
+            QMessageBox::warning(this, QStringLiteral("格式错误"), 
+                QStringLiteral("写入数据格式无效，请输入完整HEX字节，例如 AB CD 01。"));
+            return;
+        }
+        
+        if (data.size() > 4) {
+            QMessageBox::warning(this, QStringLiteral("超出长度限制"), 
+                QStringLiteral("当前仅支持 ISO15765-2 单帧，写入数据最多 4 字节。"));
+            return;
+        }
+        
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this, QStringLiteral("写入确认"),
+            QStringLiteral("确认写入非易失存储区吗？该操作可能改变设备持久化配置。"),
+            QMessageBox::Yes | QMessageBox::No
+        );
+        if (reply == QMessageBox::Yes) {
+            sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildWriteNonVolatileFrame(did, data));
+        }
+    });
+
     return rfidGroup;
 }
 
