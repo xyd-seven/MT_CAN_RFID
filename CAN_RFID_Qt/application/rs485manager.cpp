@@ -422,8 +422,6 @@ void Rs485Manager::onErrorOccurred(QSerialPort::SerialPortError error)
 
 QString Rs485Manager::decodeFrameText(bool isTx, quint8 cmdCode, const QByteArray &payload) const
 {
-    Q_UNUSED(payload)
-
     if (cmdCode == 0x1A) {
         return isTx ? QStringLiteral("OTA开始升级") : QStringLiteral("OTA开始升级应答");
     } else if (cmdCode == 0x1B) {
@@ -441,6 +439,20 @@ QString Rs485Manager::decodeFrameText(bool isTx, quint8 cmdCode, const QByteArra
         case 0x15:
             return isTx ? QStringLiteral("查询设备ID") : QStringLiteral("查询设备ID应答");
         case 0x22:
+            if (!isTx) {
+                if (payload.size() >= 17) {
+                    const QString rssi = QString("0x%1")
+                        .arg(static_cast<quint8>(payload.at(0)), 2, 16, QChar('0')).toUpper();
+                    const QString pc = QString::fromLatin1(payload.mid(1, 2).toHex(' ').toUpper());
+                    const QString tag = QString::fromLatin1(payload.mid(3, 12).toHex().toUpper());
+                    const QString crc = QString::fromLatin1(payload.mid(15, 2).toHex(' ').toUpper());
+                    return QStringLiteral("查询标签上报 RSSI=%1 PC=%2 TAG=%3 CRC=%4")
+                        .arg(rssi, pc, tag, crc);
+                }
+                return QStringLiteral("查询标签上报 LEN=%1 DATA=%2")
+                    .arg(payload.size())
+                    .arg(QString::fromLatin1(payload.toHex(' ').toUpper()));
+            }
             return isTx ? QStringLiteral("查询标签") : QStringLiteral("查询标签上报");
         case 0xB6:
             return isTx ? QStringLiteral("设置发射功率") : QStringLiteral("设置发射功率应答");

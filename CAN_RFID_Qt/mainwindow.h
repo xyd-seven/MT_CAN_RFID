@@ -17,6 +17,7 @@
 #include "application/appconfig.h"
 #include "application/logservice.h"
 #include "application/otaservice.h"
+#include "application/rfiddiagnostictransfer.h"
 #include "application/rfidservice.h"
 #include "application/stresstestservice.h"
 #include "application/qingjucanmanager.h"
@@ -175,6 +176,7 @@ private:
     QLabel *manualSendHintLabel;
     QString logDirectory;
     OtaService otaService;
+    RfidDiagnosticTransfer rfidDiagnosticTransfer;
     QLabel *otaStateValue;
     QLabel *otaMessageValue;
     QLabel *otaFirmwarePathValue;

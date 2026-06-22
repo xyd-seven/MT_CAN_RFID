@@ -26,7 +26,8 @@ const QStringList DeviceTypeNames = {
 
 const int DeviceTypeIndexes[] = {42, 3, 42, 3, 42, 3, 41, 4, 41, 4, 200, 201};
 constexpr int MaxManualPayloadBytes = 64;
-constexpr int LogFlushIntervalMs = 50;
+constexpr int LogFlushIntervalMs = 100;
+constexpr int LogPruneBatchRows = 200;
 
 QString normalizeHexText(QString text)
 {
@@ -93,6 +94,9 @@ MainWindow::MainWindow(QWidget *parent) :
     manualSendIdLabel(nullptr),
     manualSendDataLabel(nullptr),
     manualSendHintLabel(nullptr),
+    logDirectory(),
+    otaService(this),
+    rfidDiagnosticTransfer(this),
     testerPresentTimer(new QTimer(this)),
     rfidControlTimer(new QTimer(this)),
     rfidOnlineCheckTimer(new QTimer(this)),
@@ -495,6 +499,21 @@ MainWindow::MainWindow(QWidget *parent) :
     });
     connect(&otaService, &OtaService::transmitFrame, this, [this](quint32 id, const QByteArray &payload) {
         sendRfidFrame(id, payload);
+    });
+
+    connect(&rfidDiagnosticTransfer, &RfidDiagnosticTransfer::frameReady, this, [this](quint32 id, const QByteArray &payload) {
+        sendRfidFrame(static_cast<UINT>(id), payload);
+    });
+    connect(&rfidDiagnosticTransfer, &RfidDiagnosticTransfer::logMessage, this, [this](const QString &message) {
+        logService.logRuntime(LogLevel::Info, message);
+    });
+    connect(&rfidDiagnosticTransfer, &RfidDiagnosticTransfer::finished, this, [this](bool success, const QString &message) {
+        logService.logRuntime(success ? LogLevel::Info : LogLevel::Warning, message);
+        if (success) {
+            QMessageBox::information(this, QStringLiteral("写入完成"), message);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("写入失败"), message);
+        }
     });
 }
 
@@ -1594,10 +1613,14 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
     QLineEdit *diagWriteDidEdit = new QLineEdit(diagnosticGroup);
     diagWriteDidEdit->setPlaceholderText(QStringLiteral("DID (HEX)"));
     diagWriteDidEdit->setToolTip(QStringLiteral("例如: 0x1234"));
+    QComboBox *diagWriteFormatCombo = new QComboBox(diagnosticGroup);
+    diagWriteFormatCombo->addItem(QStringLiteral("HEX"), 0);
+    diagWriteFormatCombo->addItem(QStringLiteral("ASCII"), 1);
     QLineEdit *diagWriteDataEdit = new QLineEdit(diagnosticGroup);
     diagWriteDataEdit->setPlaceholderText(QStringLiteral("数据 (HEX)"));
-    diagWriteDataEdit->setToolTip(QStringLiteral("最大4字节，例如: AB CD 01"));
+    diagWriteDataEdit->setToolTip(QStringLiteral("HEX: AB CD 01；ASCII: SN1234567890。超过4字节自动使用ISO-TP多帧。"));
     writeInputLayout->addWidget(diagWriteDidEdit);
+    writeInputLayout->addWidget(diagWriteFormatCombo);
     writeInputLayout->addWidget(diagWriteDataEdit);
     diagLayout->addLayout(writeInputLayout, 5, 1);
     QPushButton *diagWriteBtn = new QPushButton(QStringLiteral("写入"), diagnosticGroup);
@@ -1715,7 +1738,13 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationDiagnosticFrame(enableDiag));
     });
 
-    connect(diagWriteBtn, &QPushButton::clicked, this, [this, diagWriteDidEdit, diagWriteDataEdit, ensureCanStarted]() {
+    connect(diagWriteFormatCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [diagWriteFormatCombo, diagWriteDataEdit](int) {
+        const bool asciiMode = diagWriteFormatCombo->currentData().toInt() == 1;
+        diagWriteDataEdit->setPlaceholderText(asciiMode ? QStringLiteral("SN1234567890") : QStringLiteral("数据 (HEX)"));
+    });
+
+    connect(diagWriteBtn, &QPushButton::clicked, this, [this, diagWriteDidEdit, diagWriteFormatCombo, diagWriteDataEdit, ensureCanStarted]() {
         if (!ensureCanStarted()) return;
         
         quint16 did = 0;
@@ -1726,25 +1755,39 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
         }
         
         QByteArray data;
-        if (!parseHexByteArray(diagWriteDataEdit->text(), &data)) {
-            QMessageBox::warning(this, QStringLiteral("格式错误"), 
-                QStringLiteral("写入数据格式无效，请输入完整HEX字节，例如 AB CD 01。"));
-            return;
+        const bool asciiMode = diagWriteFormatCombo->currentData().toInt() == 1;
+        if (asciiMode) {
+            const QString text = diagWriteDataEdit->text().trimmed();
+            if (text.isEmpty()) {
+                QMessageBox::warning(this, QStringLiteral("格式错误"),
+                    QStringLiteral("ASCII写入数据不能为空。"));
+                return;
+            }
+            data = text.toLatin1();
+            if (QString::fromLatin1(data) != text) {
+                QMessageBox::warning(this, QStringLiteral("格式错误"),
+                    QStringLiteral("ASCII模式仅支持可按Latin-1保存的字符，请确认SN码内容。"));
+                return;
+            }
+        } else {
+            if (!parseHexByteArray(diagWriteDataEdit->text(), &data)) {
+                QMessageBox::warning(this, QStringLiteral("格式错误"),
+                    QStringLiteral("写入数据格式无效，请输入完整HEX字节，例如 AB CD 01。"));
+                return;
+            }
         }
         
-        if (data.size() > 4) {
-            QMessageBox::warning(this, QStringLiteral("超出长度限制"), 
-                QStringLiteral("当前仅支持 ISO15765-2 单帧，写入数据最多 4 字节。"));
-            return;
-        }
-        
+        const QString transferModeText = data.size() > 4 ? QStringLiteral("ISO-TP多帧") : QStringLiteral("单帧");
         QMessageBox::StandardButton reply = QMessageBox::question(
             this, QStringLiteral("写入确认"),
-            QStringLiteral("确认写入非易失存储区吗？该操作可能改变设备持久化配置。"),
+            QStringLiteral("确认写入非易失存储区吗？\nDID=0x%1\n长度=%2字节\n方式=%3\n\n该操作可能改变设备持久化配置。")
+                .arg(did, 4, 16, QChar('0')).toUpper()
+                .arg(data.size())
+                .arg(transferModeText),
             QMessageBox::Yes | QMessageBox::No
         );
         if (reply == QMessageBox::Yes) {
-            sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildWriteNonVolatileFrame(did, data));
+            rfidDiagnosticTransfer.startWriteNonVolatile(did, data);
         }
     });
 
@@ -2498,6 +2541,10 @@ void MainWindow::sendRfidFrame(UINT canId, const QByteArray &payload)
 
 void MainWindow::handleRfidFrame(const CanFrame &frame)
 {
+    if (frame.id == RfidProtocol::ResponseFrameId) {
+        rfidDiagnosticTransfer.handleResponseFrame(frame);
+    }
+
     if (rfidService.handleFrame(frame)) {
         updateRfidPanel(rfidService.state());
     }
@@ -2606,7 +2653,180 @@ void MainWindow::addCanFrameToList(const CanFrame &frame)
 
 QString MainWindow::protocolDecodeText(const CanFrame &frame) const
 {
-    if (protocolModeCombo == nullptr || protocolModeCombo->currentIndex() != 1 || !frame.extendedFrame) {
+    if (frame.remoteFrame || frame.data.isEmpty()) {
+        return QStringLiteral("-");
+    }
+
+    const int protocolMode = protocolModeCombo == nullptr ? 0 : protocolModeCombo->currentIndex();
+    if (protocolMode == 0 && !frame.extendedFrame) {
+        const QByteArray &payload = frame.data;
+        if (frame.id == RfidProtocol::ControlFrameId && payload.size() >= 1) {
+            const quint8 enableScan = static_cast<quint8>(payload.at(0));
+            return QStringLiteral("美团RFID控制: %1")
+                .arg(enableScan == 0x01 ? QStringLiteral("开始检测") :
+                     (enableScan == 0x00 ? QStringLiteral("停止检测") : QStringLiteral("未知控制值 0x%1").arg(enableScan, 2, 16, QChar('0')).toUpper()));
+        }
+        if (frame.id == RfidProtocol::RequestFrameId && payload.size() >= 2) {
+            const quint8 pci = static_cast<quint8>(payload.at(0));
+            const quint8 pciType = (pci >> 4) & 0x0F;
+            if (pciType == 1 && payload.size() >= 2) {
+                const int totalLength = ((pci & 0x0F) << 8) | static_cast<quint8>(payload.at(1));
+                const QByteArray firstData = payload.mid(2, qMin(6, payload.size() - 2));
+                if (firstData.size() >= 3 && static_cast<quint8>(firstData.at(0)) == 0x2E) {
+                    const quint16 did = (static_cast<quint8>(firstData.at(1)) << 8) | static_cast<quint8>(firstData.at(2));
+                    const QByteArray data = firstData.mid(3);
+                    return QStringLiteral("美团诊断 0x2E 首帧: DID=0x%1 总长=%2 首帧DATA=%3")
+                        .arg(did, 4, 16, QChar('0')).toUpper()
+                        .arg(totalLength)
+                        .arg(QString::fromLatin1(data.toHex(' ').toUpper()));
+                }
+                return QStringLiteral("美团ISO-TP首帧: 总长=%1 DATA=%2")
+                    .arg(totalLength)
+                    .arg(QString::fromLatin1(firstData.toHex(' ').toUpper()));
+            }
+            if (pciType == 2) {
+                const quint8 sequenceNumber = pci & 0x0F;
+                const QByteArray data = payload.mid(1);
+                return QStringLiteral("美团ISO-TP连续帧: SN=%1 DATA=%2")
+                    .arg(sequenceNumber)
+                    .arg(QString::fromLatin1(data.toHex(' ').toUpper()));
+            }
+            if (pciType != 0) {
+                return QStringLiteral("美团ISO-TP请求帧: PCI=0x%1")
+                    .arg(pci, 2, 16, QChar('0')).toUpper();
+            }
+
+            const quint8 sfLength = pci & 0x0F;
+            const quint8 sid = static_cast<quint8>(payload.at(1));
+            switch (sid) {
+            case 0x01:
+                if (payload.size() >= 3) {
+                    return QStringLiteral("美团RFID设置扫描周期: %1 ms")
+                        .arg(static_cast<int>(static_cast<quint8>(payload.at(2))) * 10);
+                }
+                break;
+            case 0x02:
+                return QStringLiteral("美团RFID模块重启");
+            case 0x10:
+                if (payload.size() >= 3) {
+                    const quint8 targetMode = static_cast<quint8>(payload.at(2));
+                    return QStringLiteral("美团诊断 0x10 跳转: %1")
+                        .arg(targetMode == 0x01 ? QStringLiteral("APP") :
+                             (targetMode == 0x02 ? QStringLiteral("BOOT") : QStringLiteral("未知 0x%1").arg(targetMode, 2, 16, QChar('0')).toUpper()));
+                }
+                break;
+            case 0x11:
+                return QStringLiteral("美团诊断 0x11 软件复位");
+            case 0x28:
+                if (payload.size() >= 3) {
+                    const quint8 enabled = static_cast<quint8>(payload.at(2));
+                    return QStringLiteral("美团诊断 0x28 广播控制: %1")
+                        .arg(enabled == 0x01 ? QStringLiteral("使能周期发送") :
+                             (enabled == 0x00 ? QStringLiteral("禁止周期发送") : QStringLiteral("未知 0x%1").arg(enabled, 2, 16, QChar('0')).toUpper()));
+                }
+                break;
+            case 0x29:
+                if (payload.size() >= 6) {
+                    const quint16 canId = (static_cast<quint8>(payload.at(2)) << 8) | static_cast<quint8>(payload.at(3));
+                    const quint16 periodMs = (static_cast<quint8>(payload.at(4)) << 8) | static_cast<quint8>(payload.at(5));
+                    return QStringLiteral("美团诊断 0x29 周期配置: ID=0x%1 周期=%2")
+                        .arg(canId, 3, 16, QChar('0')).toUpper()
+                        .arg(periodMs == 0xFFFF ? QStringLiteral("不发送") : QStringLiteral("%1 ms").arg(periodMs));
+                }
+                break;
+            case 0x85:
+                if (payload.size() >= 3) {
+                    const quint8 enabled = static_cast<quint8>(payload.at(2));
+                    return QStringLiteral("美团诊断 0x85 通信故障诊断: %1")
+                        .arg(enabled == 0x01 ? QStringLiteral("启用") :
+                             (enabled == 0x00 ? QStringLiteral("禁用") : QStringLiteral("未知 0x%1").arg(enabled, 2, 16, QChar('0')).toUpper()));
+                }
+                break;
+            case 0x2E:
+                if (payload.size() >= 4) {
+                    const quint16 did = (static_cast<quint8>(payload.at(2)) << 8) | static_cast<quint8>(payload.at(3));
+                    const int dataLength = qMax(0, static_cast<int>(sfLength) - 3);
+                    const QByteArray data = payload.mid(4, qMin(dataLength, payload.size() - 4));
+                    return QStringLiteral("美团诊断 0x2E 写非易失: DID=0x%1 DATA=%2")
+                        .arg(did, 4, 16, QChar('0')).toUpper()
+                        .arg(QString::fromLatin1(data.toHex(' ').toUpper()));
+                }
+                break;
+            default:
+                return QStringLiteral("美团事件请求 SID=0x%1 SF_DL=%2")
+                    .arg(sid, 2, 16, QChar('0')).toUpper()
+                    .arg(sfLength);
+            }
+        }
+        if (frame.id == RfidProtocol::ResponseFrameId) {
+            const quint8 pci = static_cast<quint8>(payload.at(0));
+            const quint8 pciType = (pci >> 4) & 0x0F;
+            if (pciType == 3 && payload.size() >= 3) {
+                const quint8 flowStatus = pci & 0x0F;
+                const quint8 blockSize = static_cast<quint8>(payload.at(1));
+                const quint8 stMin = static_cast<quint8>(payload.at(2));
+                QString flowStatusText;
+                switch (flowStatus) {
+                case 0: flowStatusText = QStringLiteral("CTS"); break;
+                case 1: flowStatusText = QStringLiteral("WAIT"); break;
+                case 2: flowStatusText = QStringLiteral("OVERFLOW"); break;
+                default: flowStatusText = QStringLiteral("未知"); break;
+                }
+                return QStringLiteral("美团ISO-TP流控帧: FS=%1 BS=%2 STmin=0x%3")
+                    .arg(flowStatusText)
+                    .arg(blockSize)
+                    .arg(stMin, 2, 16, QChar('0')).toUpper();
+            }
+
+            const RfidResponse response = RfidProtocol::parseResponseFrame(payload);
+            if (response.positive) {
+                const QString dataText = response.data.isEmpty()
+                    ? QString()
+                    : QStringLiteral(" DATA=%1").arg(QString::fromLatin1(response.data.toHex(' ').toUpper()));
+                return QStringLiteral("美团诊断肯定响应 SID=0x%1%2")
+                    .arg(response.sid, 2, 16, QChar('0')).toUpper()
+                    .arg(dataText);
+            }
+            if (response.negative) {
+                return QStringLiteral("美团诊断否定响应 SID=0x%1 NRC=0x%2")
+                    .arg(response.originalSid, 2, 16, QChar('0'))
+                    .arg(response.negativeCode, 2, 16, QChar('0')).toUpper();
+            }
+            return QStringLiteral("美团诊断响应: 未识别");
+        }
+        if (frame.id == RfidProtocol::StatusFrameId) {
+            const RfidStatus status = RfidProtocol::parseStatusFrame(payload);
+            if (status.valid) {
+                return QStringLiteral("美团RFID状态: 工作=%1 卡=%2 故障=%3 周期=%4 ms")
+                    .arg(RfidProtocol::workModeText(status.workMode))
+                    .arg(RfidProtocol::cardStatusText(status.cardStatus))
+                    .arg(RfidProtocol::faultStatusText(status.faultStatus))
+                    .arg(static_cast<int>(status.scanPeriod10ms) * 10);
+            }
+        }
+        if (frame.id == RfidProtocol::VersionFrameId) {
+            const RfidVersion version = RfidProtocol::parseVersionFrame(payload);
+            if (version.valid) {
+                return QStringLiteral("美团RFID版本: Boot=%1 Vendor=%2 HW=0x%3 SW=0x%4 MAT=0x%5")
+                    .arg(static_cast<int>(version.bootVersion))
+                    .arg(RfidProtocol::vendorText(version.vendorCode))
+                    .arg(version.hardwareVersion, 4, 16, QChar('0'))
+                    .arg(version.softwareVersion, 4, 16, QChar('0'))
+                    .arg(version.materialRecord, 4, 16, QChar('0')).toUpper();
+            }
+        }
+        if (frame.id == RfidProtocol::TagPart1FrameId ||
+            frame.id == RfidProtocol::TagPart2FrameId ||
+            frame.id == RfidProtocol::TagPart3FrameId) {
+            return QStringLiteral("美团RFID TAG分片: %1").arg(RfidProtocol::parseAsciiPayload(payload));
+        }
+        if (frame.id == RfidProtocol::DeviceIdPart1FrameId ||
+            frame.id == RfidProtocol::DeviceIdPart2FrameId) {
+            return QStringLiteral("美团RFID设备ID分片: %1").arg(RfidProtocol::parseAsciiPayload(payload));
+        }
+    }
+
+    if (protocolMode != 1 || !frame.extendedFrame) {
         return QStringLiteral("-");
     }
 
@@ -3283,7 +3503,10 @@ void MainWindow::flushPendingLogRows()
 
     const int overflow = ui->tableWidget->rowCount() + pendingLogRows.size() - maxLogRows;
     ui->tableWidget->setUpdatesEnabled(false);
-    for (int i = 0; i < overflow; ++i) {
+    const int rowsToRemove = overflow > 0
+        ? qMin(ui->tableWidget->rowCount(), qMax(overflow, LogPruneBatchRows))
+        : 0;
+    for (int i = 0; i < rowsToRemove; ++i) {
         ui->tableWidget->removeRow(0);
     }
 
@@ -4660,6 +4883,9 @@ void MainWindow::addSerialFrameToList(bool isTx, const QByteArray &data, const Q
     if (!ui->checkBox_4->isChecked()) {
         return;
     }
+    static quint64 serialLogSequence = 0;
+    const QString sequenceText = QString("#%1 ")
+        .arg(++serialLogSequence, 6, 10, QChar('0'));
     QStringList messageList;
     messageList << QDateTime::currentDateTime().time().toString("hh:mm:ss zzz");
     messageList << QStringLiteral("RS485");
@@ -4671,7 +4897,7 @@ void MainWindow::addSerialFrameToList(bool isTx, const QByteArray &data, const Q
     messageList << QString::number(data.size());
     messageList << QStringLiteral("-");
     messageList << data.toHex(' ').toUpper();
-    messageList << decodeText;
+    messageList << sequenceText + decodeText;
     AddDataToList(messageList);
 }
 

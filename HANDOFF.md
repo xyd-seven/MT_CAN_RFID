@@ -16,6 +16,8 @@
 ## 3. 当前任务
 
 - [x] 全面修复了自查报告中的所有 14 项安全和稳定性漏洞，重新生成 Makefile 并完成 Release 构建测试。
+- [x] 已补齐美团 0x2E 写非易失存储区的 ISO-TP 多帧发送能力，支持生产写入大于 4 字节的 SN 等数据。
+- [x] 已优化实时日志表刷新与 RS485 BB 标签上报解析展示，降低高频轮询时“看起来卡顿/不刷新”的误判。
 - [ ] 等待进入实机进行美团/青桔 CAN 及 RS485 读卡器的整机联机验证。
 
 ## 4. 关键设计决策
@@ -53,9 +55,10 @@
 
 ## 8. 测试状态
 
-- Release 编译构建：PASS (最新构建生成的 `release\CAN_RFID.exe` 验证通过)
+- Release 编译构建：PASS (2026-06-22 最新构建生成的 `CAN_RFID_Qt\release\CAN_RFID.exe` 验证通过)
 - 串口掉线自动恢复与压测防死锁校验：PASS
 - 噪声防卡死与 QSerialPort 跨线程安全设计编译校验：PASS
+- 美团 0x2E ISO-TP 多帧写入：BUILD PASS，实机响应/流控验证 UNKNOWN
 - 实机 CAN 及 RS485 调试状态：UNKNOWN
 
 ## 9. 对下一位 Agent 的要求
@@ -115,3 +118,13 @@
 - **输入合法性过滤**：对输入的 ID、DID 与数据 HEX 字节增加了本地偶数位、去空格等格式过滤与错误弹窗拦截，同时增加了 CAN 开启状态检测以规避空指针隐患。
 - **发布更新**：Release 构建通过且无 warning，已将新编译的目标文件 `CAN_RFID.exe` 复制部署至绿色分发目录 `CAN_RFID_Release`。
 
+## 15. 最新交接补充（2026-06-22 - 美团 0x2E 非易失写入 ISO-TP 多帧支持与日志优化）
+
+本轮在 7.2 通用诊断指令基础上，补齐生产写入 SN 等大于 4 字节数据的 0x2E 写非易失存储区能力，并同步优化高频日志展示：
+- **新增 `RfidDiagnosticTransfer`**：新增 `application/rfiddiagnostictransfer.h/.cpp`，集中负责 0x2E 写入传输状态机。载荷长度不超过单帧容量时继续使用 ISO15765-2 单帧；超过单帧容量时自动发送首帧 FF，等待设备 0x107 流控帧 FC，再按 BS/STmin 发送连续帧 CF，最后等待 0x6E 肯定响应或 0x7F 否定响应。
+- **流控与超时处理**：支持 CTS、WAIT、OVERFLOW 流控状态；WAIT 连续超过阈值会中止，等待 FC 默认 500ms 超时，等待最终响应默认 3000ms 超时，错误信息会进入运行日志并弹窗提示。
+- **0x2E 写入 UI 增强**：RFID 监控页 0x2E 写入控件新增 `HEX / ASCII` 输入模式。生产写 SN 时可直接选择 ASCII 输入，例如 `SN1234567890`；确认弹窗会显示 DID、写入长度和单帧/ISO-TP 多帧发送方式。
+- **响应接入**：`MainWindow::handleRfidFrame()` 在保留原 `RfidService` UI 展示逻辑的同时，将美团 0x107 诊断响应喂给 `RfidDiagnosticTransfer`，用于判断写入成功、否定响应、DID 不匹配或超时。
+- **CAN 日志协议解析**：美团模式下的日志解析新增 ISO-TP 首帧、连续帧、流控帧显示，便于实机抓包确认设备返回的 FS、BS、STmin 以及连续帧 SN 是否符合预期。
+- **RS485 日志可读性与刷新优化**：BB `0x22` 标签上报解析补充 RSSI、PC、TAG、CRC 展示；实时日志 flush 间隔调整为 100ms，并增加批量裁剪旧行，协议解析列追加递增序号，方便判断内容相同但界面仍在刷新。
+- **构建状态**：已重新执行 qmake 并完成 Release 构建，输出文件为 `CAN_RFID_Qt\release\CAN_RFID.exe`。剩余风险是尚未用真实美团 RFID 模块验证 0x2E 多帧写入的 FC/CF 时序和最终 NVM 持久化结果。

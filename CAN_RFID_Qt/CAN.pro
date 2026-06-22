@@ -17,6 +17,7 @@ SOURCES += \
     application/logservice.cpp \
     application/otaservice.cpp \
     application/rfidservice.cpp \
+    application/rfiddiagnostictransfer.cpp \
     application/stresstestservice.cpp \
     application/qingjucanmanager.cpp \
     application/qingjurfidservice.cpp \
@@ -39,6 +40,7 @@ HEADERS += \
     application/logservice.h \
     application/otaservice.h \
     application/rfidservice.h \
+    application/rfiddiagnostictransfer.h \
     application/stresstestservice.h \
     application/qingjucanmanager.h \
     application/qingjurfidservice.h \
