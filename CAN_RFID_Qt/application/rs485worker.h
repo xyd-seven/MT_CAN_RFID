@@ -19,6 +19,7 @@ public:
 
 public slots:
     void initialize();
+    void shutdown();
     void openPort(const QString &portName, int baudRate);
     void closePort();
     void setProtocolMode(int mode);

@@ -12,6 +12,11 @@ Rs485Worker::Rs485Worker(QObject *parent)
 
 Rs485Worker::~Rs485Worker()
 {
+    shutdown();
+}
+
+void Rs485Worker::shutdown()
+{
     if (m_hlOtaService != nullptr) {
         m_hlOtaService->abortUpgrade();
     }

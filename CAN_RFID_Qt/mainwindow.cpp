@@ -2763,10 +2763,17 @@ void MainWindow::closeEvent(QCloseEvent *event)
 MainWindow::~MainWindow()
 {
     if (rs485Thread != nullptr) {
-        rs485Thread->quit();
-        rs485Thread->wait();
+        if (rs485Thread->isRunning() && rs485Worker != nullptr) {
+            QMetaObject::invokeMethod(rs485Worker, "shutdown", Qt::BlockingQueuedConnection);
+            rs485Worker->deleteLater();
+            rs485Thread->quit();
+            rs485Thread->wait();
+            rs485Worker = nullptr;
+        } else {
+            delete rs485Worker;
+            rs485Worker = nullptr;
+        }
     }
-    delete rs485Worker;
     delete ui;
 }
 

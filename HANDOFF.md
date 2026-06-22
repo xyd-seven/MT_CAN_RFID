@@ -87,7 +87,7 @@
 本轮按 P1 方案将 RS485 串口通信从 GUI 主线程迁移到独立工作线程，降低窗口缩放、日志刷新等 UI 操作导致轮询跳过增加的风险：
 - **新增 `Rs485Worker`**：在工作线程内统一持有 `Rs485Manager`、`Rs485RfidService`、`HlOtaService` 和 `BbFfOtaService`，串口打开/关闭、自动轮询、手动发送、参数配置与 485 OTA 均通过 queued signal/slot 调度到工作线程执行。
 - **MainWindow 仅保留 UI 状态镜像**：主界面不再直接调用 RS485 服务对象，只维护 `serialOpened`、`rs485Scanning`、`hlOtaState`、`bbFfOtaState` 等 UI 展示状态，避免 UI 线程阻塞串口事件循环。
-- **关闭流程与生命周期管理补强**：`MainWindow` 析构时退出并等待 RS485 工作线程，并在主线程显式删除 `rs485Worker`（避开因 QThread 退出导致 `deleteLater` 遗留泄漏的缺陷），从而强力确保后台正在执行的 OTA 升级工作线程被完全同步中止与安全销毁，彻底根除退出时的崩溃（Crash）隐患。
+- **关闭流程与生命周期管理补强**：`MainWindow` 析构时先通过 `BlockingQueuedConnection` 在 RS485 工作线程内同步执行 `Rs485Worker::shutdown()`，停止 OTA、轮询并关闭串口；随后在线程退出前对 `rs485Worker` 调用 `deleteLater()`，确保 worker 及其子 QObject 在所属线程释放，避免主线程跨线程析构 `QSerialPort`/`QTimer` 等对象。
 - **构建状态**：Release 构建已通过；剩余风险是需要实机验证窗口缩放、日志高频刷新、压力测试并行场景下轮询跳过是否明显下降。
 
 ## 12. 最新交接补充（2026-06-18 - 实时日志批量刷新）
