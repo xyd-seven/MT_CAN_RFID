@@ -17,6 +17,7 @@
 #include "application/appconfig.h"
 #include "application/logservice.h"
 #include "application/otaservice.h"
+#include "application/productiontestservice.h"
 #include "application/rfiddiagnostictransfer.h"
 #include "application/rfidservice.h"
 #include "application/stresstestservice.h"
@@ -88,14 +89,25 @@ private slots:
     void AddDataToList(QStringList strList);
 
     void closeEvent(QCloseEvent *event);
+    bool eventFilter(QObject *watched, QEvent *event);
 private:
     void setupRfidPanel();
     QWidget *createRfidMonitorTab(QWidget *parent);
     QWidget *createStressTestTab(QWidget *parent);
     QWidget *createOtaTab(QWidget *parent);
+    QWidget *createProductionTestTab(QWidget *parent);
     void handleRfidFrame(const CanFrame &frame);
     void updateRfidPanel(const RfidState &state);
     void updateStressTestPanel(const StressTestStats &stats);
+    void updateProductionTestPanel(const ProductionTestState &state);
+    void appendProductionTestLog(const QString &message);
+    void startProductionTestFromInput();
+    void startProductionTestFromSn(const QString &sn);
+    void stopProductionTest();
+    void clearProductionTestPanel();
+    void prepareProductionSnInput();
+    void processProductionScanText(const QString &text, bool showError);
+    void sendProductionScanControl(bool enabled);
     void sendRfidFrame(UINT canId, const QByteArray &payload);
     void addCanFrameToList(const CanFrame &frame);
     void flushPendingLogRows();
@@ -104,6 +116,7 @@ private:
     void setLabelValue(QLabel *label, const QString &value);
     bool parseQingjuAddress(const QString &text, quint8 *address, QString *error) const;
     void clearQingjuRfidPanel();
+    void updateMeituanTopStatus();
     void updateQingjuOnlineStatus(bool clearOfflineData);
     void setupCanLogSaveButton();
     void setupStatusPanel();
@@ -138,6 +151,7 @@ private:
     QSpinBox *rfidScanPeriodSpin;
     RfidService rfidService;
     StressTestService stressTestService;
+    ProductionTestService productionTestService;
     AppConfig appConfig;
     LogService logService;
     int maxLogRows;
@@ -177,6 +191,7 @@ private:
     QString logDirectory;
     OtaService otaService;
     RfidDiagnosticTransfer rfidDiagnosticTransfer;
+    bool productionWritePending;
     QLabel *otaStateValue;
     QLabel *otaMessageValue;
     QLabel *otaFirmwarePathValue;
@@ -211,6 +226,27 @@ private:
     QStackedWidget *stressStatsStackedWidget;
     QWidget *mtStressPanel;
     QWidget *qjStressPanel;
+    QWidget *productionTestTab;
+    QLineEdit *productionSnEdit;
+    QLabel *productionResultBanner;
+    QLabel *productionStateValue;
+    QLabel *productionSnValue;
+    QLabel *productionWriteValue;
+    QLabel *productionProgressValue;
+    QLabel *productionSuccessValue;
+    QLabel *productionFailureValue;
+    QLabel *productionRateValue;
+    QLabel *productionTagValue;
+    QLabel *productionFailureReasonValue;
+    QSpinBox *productionPassThresholdSpin;
+    QProgressBar *productionProgressBar;
+    QPushButton *productionStartBtn;
+    QPushButton *productionStopBtn;
+    QPushButton *productionClearBtn;
+    QTextEdit *productionLogText;
+    QTimer *productionScanStableTimer;
+    QString productionScanBuffer;
+    QDateTime productionLastScanKeyTime;
     QLabel *qjStressStateValue;
     QLabel *qjStressElapsedValue;
     QLabel *qjStressTotalSamplesValue;

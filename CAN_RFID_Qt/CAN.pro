@@ -16,6 +16,7 @@ SOURCES += \
     application/appconfig.cpp \
     application/logservice.cpp \
     application/otaservice.cpp \
+    application/productiontestservice.cpp \
     application/rfidservice.cpp \
     application/rfiddiagnostictransfer.cpp \
     application/stresstestservice.cpp \
@@ -39,6 +40,7 @@ HEADERS += \
     application/appconfig.h \
     application/logservice.h \
     application/otaservice.h \
+    application/productiontestservice.h \
     application/rfidservice.h \
     application/rfiddiagnostictransfer.h \
     application/stresstestservice.h \

@@ -14,19 +14,17 @@ QByteArray RfidProtocol::buildControlFrame(bool enableScan)
 
 QByteArray RfidProtocol::buildSetScanPeriodFrame(quint8 period10ms)
 {
-    QByteArray payload = buildFilledFrame();
-    payload[0] = 0x01;
-    payload[1] = 0x01;
-    payload[2] = static_cast<char>(period10ms);
-    return payload;
+    QByteArray data;
+    data.append(static_cast<char>(0x01));
+    data.append(static_cast<char>(period10ms));
+    return buildSingleFrame(data);
 }
 
 QByteArray RfidProtocol::buildRestartFrame()
 {
-    QByteArray payload = buildFilledFrame();
-    payload[0] = 0x02;
-    payload[1] = 0x02;
-    return payload;
+    QByteArray data;
+    data.append(static_cast<char>(0x02));
+    return buildSingleFrame(data);
 }
 
 QByteArray RfidProtocol::buildSingleFrame(const QByteArray &serviceData)

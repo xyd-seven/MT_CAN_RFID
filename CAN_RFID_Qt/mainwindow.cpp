@@ -13,6 +13,10 @@
 #include <QDir>
 #include <QTextStream>
 #include <QIcon>
+#include <QApplication>
+#include <QKeyEvent>
+#include <QScreen>
+#include <QScrollArea>
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QInputDialog>
@@ -97,6 +101,7 @@ MainWindow::MainWindow(QWidget *parent) :
     logDirectory(),
     otaService(this),
     rfidDiagnosticTransfer(this),
+    productionWritePending(false),
     testerPresentTimer(new QTimer(this)),
     rfidControlTimer(new QTimer(this)),
     rfidOnlineCheckTimer(new QTimer(this)),
@@ -121,6 +126,25 @@ MainWindow::MainWindow(QWidget *parent) :
     stressStatsStackedWidget(nullptr),
     mtStressPanel(nullptr),
     qjStressPanel(nullptr),
+    productionTestTab(nullptr),
+    productionSnEdit(nullptr),
+    productionResultBanner(nullptr),
+    productionStateValue(nullptr),
+    productionSnValue(nullptr),
+    productionWriteValue(nullptr),
+    productionProgressValue(nullptr),
+    productionSuccessValue(nullptr),
+    productionFailureValue(nullptr),
+    productionRateValue(nullptr),
+    productionTagValue(nullptr),
+    productionFailureReasonValue(nullptr),
+    productionPassThresholdSpin(nullptr),
+    productionProgressBar(nullptr),
+    productionStartBtn(nullptr),
+    productionStopBtn(nullptr),
+    productionClearBtn(nullptr),
+    productionLogText(nullptr),
+    productionScanStableTimer(new QTimer(this)),
     qjStressStateValue(nullptr),
     qjStressElapsedValue(nullptr),
     qjStressTotalSamplesValue(nullptr),
@@ -221,6 +245,13 @@ MainWindow::MainWindow(QWidget *parent) :
     logFlushTimer->setSingleShot(true);
     logFlushTimer->setInterval(LogFlushIntervalMs);
     connect(logFlushTimer, &QTimer::timeout, this, &MainWindow::flushPendingLogRows);
+    productionScanStableTimer->setSingleShot(true);
+    productionScanStableTimer->setInterval(200);
+    connect(productionScanStableTimer, &QTimer::timeout, this, [this]() {
+        processProductionScanText(productionScanBuffer, false);
+        productionScanBuffer.clear();
+    });
+    qApp->installEventFilter(this);
 
     // Instantiate background services first to avoid nullpointer dereferences during UI setup/loading config
     canthread = new CANThread();
@@ -409,6 +440,7 @@ MainWindow::MainWindow(QWidget *parent) :
         if (!canStarted) {
             rfidOnlineStatusValue->setText(QStringLiteral("未启动"));
             rfidOnlineStatusValue->setStyleSheet("color: gray; font-weight: bold;");
+            updateMeituanTopStatus();
             return;
         }
         const bool qingjuMode = protocolModeCombo != nullptr && protocolModeCombo->currentIndex() == 1;
@@ -419,9 +451,11 @@ MainWindow::MainWindow(QWidget *parent) :
         if (lastRfidFrameTime.isValid() && lastRfidFrameTime.msecsTo(QDateTime::currentDateTime()) < 1500) {
             rfidOnlineStatusValue->setText(QStringLiteral("在线"));
             rfidOnlineStatusValue->setStyleSheet("color: green; font-weight: bold;");
+            updateMeituanTopStatus();
         } else {
             rfidOnlineStatusValue->setText(QStringLiteral("离线"));
             rfidOnlineStatusValue->setStyleSheet("color: red; font-weight: bold;");
+            rfidService.reset();
 
             // 设备离线时清空美团协议显示数据为 -
             rfidWorkModeValue->setText("-");
@@ -435,6 +469,7 @@ MainWindow::MainWindow(QWidget *parent) :
             rfidDeviceIdValue->setText("-");
             rfidVersionValue->setText("-");
             rfidResponseValue->setText("-");
+            updateMeituanTopStatus();
         }
     });
 
@@ -509,11 +544,34 @@ MainWindow::MainWindow(QWidget *parent) :
     });
     connect(&rfidDiagnosticTransfer, &RfidDiagnosticTransfer::finished, this, [this](bool success, const QString &message) {
         logService.logRuntime(success ? LogLevel::Info : LogLevel::Warning, message);
+        if (productionWritePending) {
+            productionWritePending = false;
+            productionTestService.handleWriteFinished(success, message);
+            return;
+        }
         if (success) {
             QMessageBox::information(this, QStringLiteral("写入完成"), message);
         } else {
             QMessageBox::warning(this, QStringLiteral("写入失败"), message);
         }
+    });
+
+    connect(&productionTestService, &ProductionTestService::writeSnRequested, this, [this](quint16 did, const QByteArray &data) {
+        productionWritePending = true;
+        if (!rfidDiagnosticTransfer.startWriteNonVolatile(did, data)) {
+            productionWritePending = false;
+            productionTestService.handleWriteFinished(false, QStringLiteral("0x2E写入通道忙或请求无效"));
+        }
+    });
+    connect(&productionTestService, &ProductionTestService::scanControlRequested, this, &MainWindow::sendProductionScanControl);
+    connect(&productionTestService, &ProductionTestService::stateChanged, this, &MainWindow::updateProductionTestPanel);
+    connect(&productionTestService, &ProductionTestService::logMessage, this, [this](const QString &message) {
+        appendProductionTestLog(message);
+        logService.logRuntime(LogLevel::Info, message);
+    });
+    connect(&productionTestService, &ProductionTestService::finished, this, [this](bool, const ProductionTestState &) {
+        prepareProductionSnInput();
+        updateControlsState();
     });
 }
 
@@ -541,6 +599,16 @@ void MainWindow::setupRfidPanel()
     
     QWidget *t3 = createOtaTab(rfidTabs);
     rfidTabs->addTab(t3, QStringLiteral("OTA升级"));
+
+    productionTestTab = createProductionTestTab(rfidTabs);
+    rfidTabs->addTab(productionTestTab, QStringLiteral("产线检测"));
+
+    connect(rfidTabs, &QTabWidget::currentChanged, this, [this](int) {
+        if (rfidTabs != nullptr && productionTestTab != nullptr &&
+            rfidTabs->currentWidget() == productionTestTab) {
+            prepareProductionSnInput();
+        }
+    });
 }
 
 void MainWindow::setupStatusPanel()
@@ -557,17 +625,24 @@ void MainWindow::setupStatusPanel()
     topCanStatusValue->setMinimumHeight(22);
     topRfidStatusValue->setMinimumHeight(22);
     topStressStatusValue->setMinimumHeight(22);
+    topRfidStatusValue->setMinimumWidth(520);
 
     layout->addWidget(topCanStatusValue, 0, 0);
     layout->addWidget(topRfidStatusValue, 0, 1);
     layout->addWidget(topStressStatusValue, 0, 2);
-    layout->setColumnStretch(3, 1);
+    layout->setColumnStretch(1, 1);
 }
 
 void MainWindow::setupCompactMainLayout()
 {
-    setMinimumSize(1280, 820);
-    resize(1280, 820);
+    QRect availableGeometry(0, 0, 1280, 820);
+    if (QApplication::primaryScreen() != nullptr) {
+        availableGeometry = QApplication::primaryScreen()->availableGeometry();
+    }
+    const int targetWidth = qBound(1024, availableGeometry.width() - 40, 1280);
+    const int targetHeight = qBound(680, availableGeometry.height() - 60, 820);
+    setMinimumSize(1024, 680);
+    resize(targetWidth, targetHeight);
 
     const QList<QWidget *> centralChildren = ui->centralWidget->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly);
     for (QWidget *child : centralChildren) {
@@ -577,7 +652,9 @@ void MainWindow::setupCompactMainLayout()
     }
 
     ui->groupBox->setTitle(QStringLiteral("设备控制"));
-    ui->groupBox->setFixedWidth(250);
+    ui->groupBox->setMinimumWidth(220);
+    ui->groupBox->setMaximumWidth(320);
+    ui->groupBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     const QList<QWidget *> oldConfigChildren = ui->groupBox->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly);
     for (QWidget *child : oldConfigChildren) {
         child->hide();
@@ -689,7 +766,9 @@ void MainWindow::setupCompactMainLayout()
     groupLayout1->addWidget(serialDevicePanel);
 
     ui->groupBox_2->setTitle(QStringLiteral("手动发送"));
-    ui->groupBox_2->setFixedWidth(250);
+    ui->groupBox_2->setMinimumWidth(220);
+    ui->groupBox_2->setMaximumWidth(320);
+    ui->groupBox_2->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
     const QList<QWidget *> oldSendChildren = ui->groupBox_2->findChildren<QWidget *>(QString(), Qt::FindDirectChildrenOnly);
     for (QWidget *child : oldSendChildren) {
         child->hide();
@@ -784,6 +863,60 @@ void MainWindow::setupCompactMainLayout()
     updateCanControlState(false, false, false);
 }
 
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    Q_UNUSED(watched)
+
+    if (event->type() != QEvent::KeyPress ||
+        productionTestTab == nullptr ||
+        rfidTabs == nullptr ||
+        rfidTabs->currentWidget() != productionTestTab ||
+        productionTestService.isRunning() ||
+        protocolModeCombo == nullptr ||
+        protocolModeCombo->currentIndex() != 0 ||
+        QApplication::focusWidget() == productionSnEdit) {
+        return QMainWindow::eventFilter(watched, event);
+    }
+
+    QKeyEvent *keyEvent = static_cast<QKeyEvent *>(event);
+    if (keyEvent->isAutoRepeat()) {
+        return QMainWindow::eventFilter(watched, event);
+    }
+
+    if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
+        if (!productionScanBuffer.isEmpty()) {
+            const QString scanText = productionScanBuffer;
+            productionScanBuffer.clear();
+            productionScanStableTimer->stop();
+            processProductionScanText(scanText, true);
+            return true;
+        }
+        return QMainWindow::eventFilter(watched, event);
+    }
+
+    const QString text = keyEvent->text();
+    if (text.size() != 1 || !text.at(0).isLetterOrNumber()) {
+        return QMainWindow::eventFilter(watched, event);
+    }
+
+    const QChar ch = text.at(0).toUpper();
+    const QDateTime now = QDateTime::currentDateTime();
+    if (!productionLastScanKeyTime.isValid() ||
+        productionLastScanKeyTime.msecsTo(now) > 60 ||
+        productionScanBuffer.size() >= 32) {
+        productionScanBuffer.clear();
+    }
+    productionLastScanKeyTime = now;
+
+    if (productionScanBuffer.isEmpty() && ch != QLatin1Char('R')) {
+        return QMainWindow::eventFilter(watched, event);
+    }
+
+    productionScanBuffer.append(ch);
+    productionScanStableTimer->start(200);
+    return true;
+}
+
 void MainWindow::updateCanControlState(bool deviceOpened, bool canInitialized, bool canStarted)
 {
     this->deviceOpened = deviceOpened;
@@ -799,6 +932,10 @@ void MainWindow::updateCanControlState(bool deviceOpened, bool canInitialized, b
         lastQingjuNpkFrameTime = QDateTime();
         lastQingjuRfrFrameTime = QDateTime();
     } else {
+        if (productionTestService.isRunning()) {
+            productionTestService.stop(QStringLiteral("CAN未启动"));
+            productionWritePending = false;
+        }
         testerPresentTimer->stop();
         rfidControlTimer->stop();
         rfidOnlineCheckTimer->stop();
@@ -856,8 +993,9 @@ void MainWindow::updateCanControlState(bool deviceOpened, bool canInitialized, b
                 topRfidStatusValue->setStyleSheet(QStringLiteral("color: gray; font-weight: bold;"));
             }
         } else if (!canStarted) {
-            topRfidStatusValue->setText(QStringLiteral("RFID：未识别"));
-            topRfidStatusValue->setStyleSheet(QString());
+            updateMeituanTopStatus();
+        } else {
+            updateMeituanTopStatus();
         }
     }
     if (!canStarted && stressTestService.stats().running) {
@@ -932,6 +1070,7 @@ void MainWindow::updateControlsState()
 {
     const bool stressRunning = stressTestService.stats().running;
     const bool otaRunning = isOtaRunning();
+    const bool productionRunning = productionTestService.isRunning();
     const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
     const bool is485Mode = (protocolMode == 2 || protocolMode == 3 || protocolMode == 4);
 
@@ -1051,6 +1190,38 @@ void MainWindow::updateControlsState()
             if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(false);
             if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(false);
         }
+    }
+    else if (productionRunning) {
+        ui->openDeviceBtn->setEnabled(false);
+        ui->initCANBtn->setEnabled(false);
+        ui->StartCANBtn->setEnabled(false);
+        ui->reSetCANBtn->setEnabled(false);
+        ui->closeDeviceBtn->setEnabled(false);
+        ui->sendBtn->setEnabled(false);
+        if (oneClickStartButton != nullptr) oneClickStartButton->setEnabled(false);
+
+        if (rfidStartScanBtn != nullptr) rfidStartScanBtn->setEnabled(false);
+        if (rfidStopScanBtn != nullptr) rfidStopScanBtn->setEnabled(false);
+        if (rfidRestartBtn != nullptr) rfidRestartBtn->setEnabled(false);
+        if (rfidSetPeriodBtn != nullptr) rfidSetPeriodBtn->setEnabled(false);
+        if (rfidScanPeriodSpin != nullptr) rfidScanPeriodSpin->setEnabled(false);
+
+        if (stressStartBtn != nullptr) stressStartBtn->setEnabled(false);
+        if (stressStopBtn != nullptr) stressStopBtn->setEnabled(false);
+        if (stressResetBtn != nullptr) stressResetBtn->setEnabled(false);
+        if (stressExportBtn != nullptr) stressExportBtn->setEnabled(false);
+        if (stressDurationSecondsSpin != nullptr) stressDurationSecondsSpin->setEnabled(false);
+        if (stressTargetSamplesSpin != nullptr) stressTargetSamplesSpin->setEnabled(false);
+        if (stressAutoSaveCheckBox != nullptr) stressAutoSaveCheckBox->setEnabled(false);
+        if (stressAutoExportSummaryCheckBox != nullptr) stressAutoExportSummaryCheckBox->setEnabled(false);
+
+        if (otaQueryBtn != nullptr) otaQueryBtn->setEnabled(false);
+        if (otaStartUpgradeBtn != nullptr) otaStartUpgradeBtn->setEnabled(false);
+        if (otaSelectFileBtn != nullptr) otaSelectFileBtn->setEnabled(false);
+        if (otaAbortUpgradeBtn != nullptr) otaAbortUpgradeBtn->setEnabled(false);
+        if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->setEnabled(false);
+        if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(false);
+        if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(false);
     }
     else if (otaRunning) {
         // 1. OTA 升级期间：
@@ -1201,6 +1372,14 @@ void MainWindow::updateControlsState()
         if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(true);
         if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(true);
     }
+
+    if (rfidTabs != nullptr && productionTestTab != nullptr) {
+        const int productionIndex = rfidTabs->indexOf(productionTestTab);
+        if (productionIndex >= 0) {
+            rfidTabs->setTabEnabled(productionIndex, protocolMode == 0 || productionRunning);
+        }
+    }
+    updateProductionTestPanel(productionTestService.state());
 }
 
 
@@ -1455,7 +1634,12 @@ bool MainWindow::exportStressSummary()
 
 QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
 {
+    QScrollArea *scrollArea = new QScrollArea(parent);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+
     QGroupBox *rfidGroup = new QGroupBox(QStringLiteral("RFID定位器"), parent);
+    rfidGroup->setMinimumWidth(900);
 
     QGridLayout *layout = new QGridLayout(rfidGroup);
     layout->setContentsMargins(8, 8, 8, 8);
@@ -1584,15 +1768,19 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
     // Row 3: 0x29 广播周期配置
     diagLayout->addWidget(new QLabel(QStringLiteral("0x29 周期配置"), diagnosticGroup), 3, 0);
     QHBoxLayout *periodInputLayout = new QHBoxLayout();
-    QLineEdit *diagPeriodIdEdit = new QLineEdit(diagnosticGroup);
-    diagPeriodIdEdit->setPlaceholderText(QStringLiteral("CAN ID (HEX)"));
-    diagPeriodIdEdit->setToolTip(QStringLiteral("例如: 0x2C0 或 2C0"));
+    QComboBox *diagPeriodIdCombo = new QComboBox(diagnosticGroup);
+    diagPeriodIdCombo->setEditable(true);
+    diagPeriodIdCombo->setToolTip(QStringLiteral("可选择 0x2C0~0x2C6，或手动输入 0x000~0x7FF 标准帧ID。"));
+    for (quint16 canId = 0x2C0; canId <= 0x2C6; ++canId) {
+        diagPeriodIdCombo->addItem(QStringLiteral("0x%1")
+                                       .arg(canId, 3, 16, QChar('0')).toUpper());
+    }
     QSpinBox *diagPeriodValSpin = new QSpinBox(diagnosticGroup);
     diagPeriodValSpin->setRange(16, 65535);
     diagPeriodValSpin->setValue(100);
     diagPeriodValSpin->setSuffix(QStringLiteral(" ms"));
     diagPeriodValSpin->setToolTip(QStringLiteral("16~65535 ms; 65535为禁止发送"));
-    periodInputLayout->addWidget(diagPeriodIdEdit);
+    periodInputLayout->addWidget(diagPeriodIdCombo);
     periodInputLayout->addWidget(diagPeriodValSpin);
     diagLayout->addLayout(periodInputLayout, 3, 1);
     QPushButton *diagPeriodBtn = new QPushButton(QStringLiteral("设置周期"), diagnosticGroup);
@@ -1626,6 +1814,21 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
     QPushButton *diagWriteBtn = new QPushButton(QStringLiteral("写入"), diagnosticGroup);
     diagLayout->addWidget(diagWriteBtn, 5, 2);
 
+    // Row 6: 0x2E 常用 DID 快捷写入
+    diagLayout->addWidget(new QLabel(QStringLiteral("0x2E 快捷写入"), diagnosticGroup), 6, 0);
+    QHBoxLayout *quickWriteLayout = new QHBoxLayout();
+    QComboBox *diagQuickWriteCombo = new QComboBox(diagnosticGroup);
+    diagQuickWriteCombo->addItem(QStringLiteral("硬件版本 0xE7E0"), 0xE7E0);
+    diagQuickWriteCombo->addItem(QStringLiteral("ID号 0xE7E1"), 0xE7E1);
+    QLineEdit *diagQuickWriteEdit = new QLineEdit(diagnosticGroup);
+    diagQuickWriteEdit->setPlaceholderText(QStringLiteral("1.0.1 或 0x0101"));
+    diagQuickWriteEdit->setToolTip(QStringLiteral("硬件版本: A.0.B -> AA BB；ID号: 16字节ASCII，例如 R2A3A02625000001"));
+    quickWriteLayout->addWidget(diagQuickWriteCombo);
+    quickWriteLayout->addWidget(diagQuickWriteEdit);
+    diagLayout->addLayout(quickWriteLayout, 6, 1);
+    QPushButton *diagQuickWriteBtn = new QPushButton(QStringLiteral("快捷写入"), diagnosticGroup);
+    diagLayout->addWidget(diagQuickWriteBtn, 6, 2);
+
     layout->addWidget(controlGroup, 0, 0);
     layout->addWidget(diagnosticGroup, 1, 0);
     layout->addWidget(tagGroup, 2, 0);
@@ -1644,10 +1847,12 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
 
     connect(rfidStartScanBtn, &QPushButton::clicked, this, [this]() {
         rfidScanning = true;
+        updateMeituanTopStatus();
         sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
     });
     connect(rfidStopScanBtn, &QPushButton::clicked, this, [this]() {
         rfidScanning = false;
+        updateMeituanTopStatus();
         sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
     });
     connect(rfidControlEnabledCheck, &QCheckBox::stateChanged, this, [this](int state) {
@@ -1701,11 +1906,11 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationControlFrame(enableBroadcast));
     });
 
-    connect(diagPeriodBtn, &QPushButton::clicked, this, [this, diagPeriodIdEdit, diagPeriodValSpin, ensureCanStarted]() {
+    connect(diagPeriodBtn, &QPushButton::clicked, this, [this, diagPeriodIdCombo, diagPeriodValSpin, ensureCanStarted]() {
         if (!ensureCanStarted()) return;
         
         quint16 canId = 0;
-        if (!parseHexUInt16(diagPeriodIdEdit->text(), &canId)) {
+        if (!parseHexUInt16(diagPeriodIdCombo->currentText(), &canId)) {
             QMessageBox::warning(this, QStringLiteral("格式错误"), 
                 QStringLiteral("目标ID格式无效，请输入 0x000~0x7FF 范围内的十六进制标准帧ID。"));
             return;
@@ -1742,6 +1947,16 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
             this, [diagWriteFormatCombo, diagWriteDataEdit](int) {
         const bool asciiMode = diagWriteFormatCombo->currentData().toInt() == 1;
         diagWriteDataEdit->setPlaceholderText(asciiMode ? QStringLiteral("SN1234567890") : QStringLiteral("数据 (HEX)"));
+    });
+
+    connect(diagQuickWriteCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [diagQuickWriteCombo, diagQuickWriteEdit](int) {
+        const quint16 did = static_cast<quint16>(diagQuickWriteCombo->currentData().toUInt());
+        if (did == 0xE7E0) {
+            diagQuickWriteEdit->setPlaceholderText(QStringLiteral("1.0.1 或 0x0101"));
+        } else {
+            diagQuickWriteEdit->setPlaceholderText(QStringLiteral("R2A3A02625000001"));
+        }
     });
 
     connect(diagWriteBtn, &QPushButton::clicked, this, [this, diagWriteDidEdit, diagWriteFormatCombo, diagWriteDataEdit, ensureCanStarted]() {
@@ -1791,12 +2006,232 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
         }
     });
 
-    return rfidGroup;
+    connect(diagQuickWriteBtn, &QPushButton::clicked, this, [this, diagQuickWriteCombo, diagQuickWriteEdit, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
+
+        const quint16 did = static_cast<quint16>(diagQuickWriteCombo->currentData().toUInt());
+        const QString inputText = diagQuickWriteEdit->text().trimmed();
+        if (inputText.isEmpty()) {
+            QMessageBox::warning(this, QStringLiteral("格式错误"), QStringLiteral("快捷写入内容不能为空。"));
+            return;
+        }
+
+        QByteArray data;
+        QString valueText;
+        if (did == 0xE7E0) {
+            quint16 versionValue = 0;
+            const QRegularExpression versionPattern(QStringLiteral("^(\\d+)\\.0\\.(\\d+)$"));
+            const QRegularExpressionMatch versionMatch = versionPattern.match(inputText);
+            if (versionMatch.hasMatch()) {
+                bool majorOk = false;
+                bool revisionOk = false;
+                const int major = versionMatch.captured(1).toInt(&majorOk);
+                const int revision = versionMatch.captured(2).toInt(&revisionOk);
+                if (!majorOk || !revisionOk || major < 0 || major > 0xFF || revision < 0 || revision > 0xFF) {
+                    QMessageBox::warning(this, QStringLiteral("格式错误"),
+                        QStringLiteral("硬件版本范围无效，请输入 A.0.B，A/B 范围为 0~255，例如 1.0.1。"));
+                    return;
+                }
+                versionValue = static_cast<quint16>((major << 8) | revision);
+                valueText = QStringLiteral("%1.0.%2").arg(major).arg(revision);
+            } else if (parseHexUInt16(inputText, &versionValue)) {
+                valueText = QStringLiteral("0x%1")
+                    .arg(versionValue, 4, 16, QChar('0')).toUpper();
+            } else {
+                QMessageBox::warning(this, QStringLiteral("格式错误"),
+                    QStringLiteral("硬件版本请输入 A.0.B 格式，例如 1.0.1；也可输入 0x0101。"));
+                return;
+            }
+
+            data.append(static_cast<char>((versionValue >> 8) & 0xFF));
+            data.append(static_cast<char>(versionValue & 0xFF));
+        } else if (did == 0xE7E1) {
+            data = inputText.toLatin1();
+            if (QString::fromLatin1(data) != inputText) {
+                QMessageBox::warning(this, QStringLiteral("格式错误"),
+                    QStringLiteral("ID号仅支持ASCII字符。"));
+                return;
+            }
+            if (data.size() != 16) {
+                QMessageBox::warning(this, QStringLiteral("格式错误"),
+                    QStringLiteral("ID号必须正好为16个ASCII字符，例如 R2A3A02625000001。"));
+                return;
+            }
+            valueText = inputText;
+        } else {
+            QMessageBox::warning(this, QStringLiteral("格式错误"), QStringLiteral("未知快捷写入项。"));
+            return;
+        }
+
+        const QString didText = QStringLiteral("0x%1").arg(did, 4, 16, QChar('0')).toUpper();
+        const QString dataText = QString::fromLatin1(data.toHex(' ').toUpper());
+        const QString transferModeText = data.size() > 4 ? QStringLiteral("ISO-TP多帧") : QStringLiteral("单帧");
+        QMessageBox::StandardButton reply = QMessageBox::question(
+            this, QStringLiteral("快捷写入确认"),
+            QStringLiteral("确认执行快捷写入吗？\n项目=%1\nDID=%2\n值=%3\n数据=%4\n长度=%5字节\n方式=%6\n\n该操作会写入非易失存储区。")
+                .arg(diagQuickWriteCombo->currentText())
+                .arg(didText)
+                .arg(valueText)
+                .arg(dataText)
+                .arg(data.size())
+                .arg(transferModeText),
+            QMessageBox::Yes | QMessageBox::No
+        );
+        if (reply == QMessageBox::Yes) {
+            rfidDiagnosticTransfer.startWriteNonVolatile(did, data);
+        }
+    });
+
+    scrollArea->setWidget(rfidGroup);
+    return scrollArea;
+}
+
+QWidget *MainWindow::createProductionTestTab(QWidget *parent)
+{
+    QScrollArea *scrollArea = new QScrollArea(parent);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+
+    QWidget *widget = new QWidget(scrollArea);
+    widget->setMinimumWidth(900);
+    QGridLayout *layout = new QGridLayout(widget);
+    layout->setContentsMargins(8, 8, 8, 8);
+    layout->setHorizontalSpacing(8);
+    layout->setVerticalSpacing(8);
+
+    QGroupBox *inputGroup = new QGroupBox(QStringLiteral("扫码输入"), widget);
+    QGridLayout *inputLayout = new QGridLayout(inputGroup);
+    productionSnEdit = new QLineEdit(inputGroup);
+    productionSnEdit->setPlaceholderText(QStringLiteral("扫码输入16位SN，例如 R2A3A02625000001"));
+    productionSnEdit->setMaxLength(32);
+    productionSnEdit->setClearButtonEnabled(true);
+    productionPassThresholdSpin = new QSpinBox(inputGroup);
+    productionPassThresholdSpin->setRange(0, 100);
+    productionPassThresholdSpin->setValue(95);
+    productionPassThresholdSpin->setSuffix(QStringLiteral(" %"));
+    productionStartBtn = new QPushButton(QStringLiteral("开始检测"), inputGroup);
+    productionStopBtn = new QPushButton(QStringLiteral("停止"), inputGroup);
+    productionClearBtn = new QPushButton(QStringLiteral("清空/下一台"), inputGroup);
+
+    inputLayout->addWidget(new QLabel(QStringLiteral("终端SN"), inputGroup), 0, 0);
+    inputLayout->addWidget(productionSnEdit, 0, 1, 1, 4);
+    inputLayout->addWidget(new QLabel(QStringLiteral("通过阈值"), inputGroup), 1, 0);
+    inputLayout->addWidget(productionPassThresholdSpin, 1, 1);
+    inputLayout->addWidget(productionStartBtn, 1, 2);
+    inputLayout->addWidget(productionStopBtn, 1, 3);
+    inputLayout->addWidget(productionClearBtn, 1, 4);
+    inputLayout->setColumnStretch(1, 1);
+
+    QGroupBox *resultGroup = new QGroupBox(QStringLiteral("检测结果"), widget);
+    QGridLayout *resultLayout = new QGridLayout(resultGroup);
+    resultLayout->setContentsMargins(8, 16, 8, 8);
+    resultLayout->setVerticalSpacing(7);
+    resultLayout->setHorizontalSpacing(18);
+    resultGroup->setMinimumHeight(280);
+    productionResultBanner = new QLabel(QStringLiteral("待扫码"), resultGroup);
+    productionResultBanner->setAlignment(Qt::AlignCenter);
+    productionResultBanner->setMinimumHeight(72);
+    productionResultBanner->setMaximumHeight(72);
+    productionResultBanner->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    QFont bannerFont = productionResultBanner->font();
+    bannerFont.setPointSize(22);
+    bannerFont.setBold(true);
+    productionResultBanner->setFont(bannerFont);
+    productionResultBanner->setStyleSheet(QStringLiteral("background:#E5E7EB;color:#374151;border-radius:6px;"));
+    productionProgressBar = new QProgressBar(resultGroup);
+    productionProgressBar->setRange(0, 100);
+    productionProgressBar->setValue(0);
+    productionProgressBar->setMinimumHeight(22);
+    productionProgressBar->setMaximumHeight(22);
+
+    productionStateValue = new QLabel(QStringLiteral("待扫码"), resultGroup);
+    productionSnValue = new QLabel(QStringLiteral("-"), resultGroup);
+    productionWriteValue = new QLabel(QStringLiteral("未写入"), resultGroup);
+    productionProgressValue = new QLabel(QStringLiteral("0 / 100"), resultGroup);
+    productionSuccessValue = new QLabel(QStringLiteral("0"), resultGroup);
+    productionFailureValue = new QLabel(QStringLiteral("0"), resultGroup);
+    productionRateValue = new QLabel(QStringLiteral("0.00%"), resultGroup);
+    productionTagValue = new QLabel(QStringLiteral("-"), resultGroup);
+    productionFailureReasonValue = new QLabel(QStringLiteral("-"), resultGroup);
+    productionTagValue->setWordWrap(true);
+    productionFailureReasonValue->setWordWrap(true);
+
+    resultLayout->addWidget(productionResultBanner, 0, 0, 1, 4);
+    resultLayout->addWidget(productionProgressBar, 1, 0, 1, 4);
+    resultLayout->addWidget(new QLabel(QStringLiteral("状态"), resultGroup), 2, 0);
+    resultLayout->addWidget(productionStateValue, 2, 1);
+    resultLayout->addWidget(new QLabel(QStringLiteral("SN"), resultGroup), 2, 2);
+    resultLayout->addWidget(productionSnValue, 2, 3);
+    resultLayout->addWidget(new QLabel(QStringLiteral("写入"), resultGroup), 3, 0);
+    resultLayout->addWidget(productionWriteValue, 3, 1);
+    resultLayout->addWidget(new QLabel(QStringLiteral("进度"), resultGroup), 3, 2);
+    resultLayout->addWidget(productionProgressValue, 3, 3);
+    resultLayout->addWidget(new QLabel(QStringLiteral("成功"), resultGroup), 4, 0);
+    resultLayout->addWidget(productionSuccessValue, 4, 1);
+    resultLayout->addWidget(new QLabel(QStringLiteral("失败"), resultGroup), 4, 2);
+    resultLayout->addWidget(productionFailureValue, 4, 3);
+    resultLayout->addWidget(new QLabel(QStringLiteral("成功率"), resultGroup), 5, 0);
+    resultLayout->addWidget(productionRateValue, 5, 1);
+    resultLayout->addWidget(new QLabel(QStringLiteral("当前TAG"), resultGroup), 6, 0);
+    resultLayout->addWidget(productionTagValue, 6, 1, 1, 3);
+    resultLayout->addWidget(new QLabel(QStringLiteral("失败原因"), resultGroup), 7, 0);
+    resultLayout->addWidget(productionFailureReasonValue, 7, 1, 1, 3);
+    resultLayout->setRowMinimumHeight(0, 72);
+    resultLayout->setRowMinimumHeight(1, 22);
+    for (int row = 2; row <= 7; ++row) {
+        resultLayout->setRowMinimumHeight(row, 20);
+    }
+    resultLayout->setColumnMinimumWidth(0, 72);
+    resultLayout->setColumnMinimumWidth(2, 72);
+    resultLayout->setColumnStretch(1, 1);
+    resultLayout->setColumnStretch(3, 1);
+
+    QGroupBox *logGroup = new QGroupBox(QStringLiteral("过程日志"), widget);
+    QVBoxLayout *logLayout = new QVBoxLayout(logGroup);
+    productionLogText = new QTextEdit(logGroup);
+    productionLogText->setReadOnly(true);
+    productionLogText->setMinimumHeight(180);
+    logLayout->addWidget(productionLogText);
+
+    layout->addWidget(inputGroup, 0, 0);
+    layout->addWidget(resultGroup, 1, 0);
+    layout->addWidget(logGroup, 2, 0);
+    layout->setRowMinimumHeight(1, 280);
+    layout->setRowStretch(2, 1);
+
+    connect(productionSnEdit, &QLineEdit::returnPressed, this, &MainWindow::startProductionTestFromInput);
+    connect(productionSnEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
+        if (productionTestService.isRunning()) {
+            return;
+        }
+        QString error;
+        if (ProductionTestService::validateSn(text.trimmed().toUpper(), &error)) {
+            QTimer::singleShot(200, this, [this, text]() {
+                if (!productionTestService.isRunning() &&
+                    productionSnEdit != nullptr &&
+                    productionSnEdit->text().trimmed().compare(text.trimmed(), Qt::CaseInsensitive) == 0) {
+                    processProductionScanText(text, false);
+                }
+            });
+        }
+    });
+    connect(productionStartBtn, &QPushButton::clicked, this, &MainWindow::startProductionTestFromInput);
+    connect(productionStopBtn, &QPushButton::clicked, this, &MainWindow::stopProductionTest);
+    connect(productionClearBtn, &QPushButton::clicked, this, &MainWindow::clearProductionTestPanel);
+
+    updateProductionTestPanel(productionTestService.state());
+    scrollArea->setWidget(widget);
+    return scrollArea;
 }
 
 QWidget *MainWindow::createStressTestTab(QWidget *parent)
 {
-    QWidget *stressWidget = new QWidget(parent);
+    QScrollArea *scrollArea = new QScrollArea(parent);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+
+    QWidget *stressWidget = new QWidget(scrollArea);
+    stressWidget->setMinimumWidth(900);
     QGridLayout *layout = new QGridLayout(stressWidget);
     layout->setContentsMargins(8, 8, 8, 8);
     layout->setHorizontalSpacing(6);
@@ -1879,7 +2314,8 @@ QWidget *MainWindow::createStressTestTab(QWidget *parent)
     stressProgressBar->setRange(0, 100);
     stressProgressBar->setValue(0);
     stressProgressBar->setTextVisible(true);
-    stressProgressBar->setFixedHeight(16);
+    stressProgressBar->setMinimumHeight(18);
+    stressProgressBar->setMaximumHeight(24);
 
     stressRemainingLabel = new QLabel(QStringLiteral("剩余目标：不限"), controlGroup);
     stressRemainingLabel->setStyleSheet("color: #555555;");
@@ -2069,12 +2505,18 @@ QWidget *MainWindow::createStressTestTab(QWidget *parent)
     });
 
     updateStressTestPanel(stressTestService.stats());
-    return stressWidget;
+    scrollArea->setWidget(stressWidget);
+    return scrollArea;
 }
 
 QWidget *MainWindow::createOtaTab(QWidget *parent)
 {
-    QWidget *otaWidget = new QWidget(parent);
+    QScrollArea *scrollArea = new QScrollArea(parent);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+
+    QWidget *otaWidget = new QWidget(scrollArea);
+    otaWidget->setMinimumWidth(900);
     QGridLayout *layout = new QGridLayout(otaWidget);
     layout->setContentsMargins(8, 8, 8, 8);
     layout->setHorizontalSpacing(6);
@@ -2402,7 +2844,8 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
     connect(otaInjectMasterCheck, &QCheckBox::toggled, this, &MainWindow::onOtaInjectMasterToggled);
     onOtaInjectMasterToggled(false); // 初始化置灰所有子 Checkbox
 
-    return otaWidget;
+    scrollArea->setWidget(otaWidget);
+    return scrollArea;
 }
 
 void MainWindow::setLabelValue(QLabel *label, const QString &value)
@@ -2461,6 +2904,48 @@ void MainWindow::clearQingjuRfidPanel()
     setLabelValue(qjRfidModelCodeValue, QString());
     setLabelValue(qjRfidFwStrValue, QString());
     setLabelValue(qjRfidHwStrValue, QString());
+}
+
+void MainWindow::updateMeituanTopStatus()
+{
+    if (topRfidStatusValue == nullptr) {
+        return;
+    }
+
+    if (!canStarted) {
+        topRfidStatusValue->setText(QStringLiteral("协议：美团  RFID：未启动  扫描：停"));
+        topRfidStatusValue->setStyleSheet(QStringLiteral("color: gray; font-weight: bold;"));
+        return;
+    }
+
+    const QDateTime now = QDateTime::currentDateTime();
+    const bool online = lastRfidFrameTime.isValid() && lastRfidFrameTime.msecsTo(now) < 1500;
+    const QString onlineText = online ? QStringLiteral("在线") : QStringLiteral("离线");
+    const QString scanText = rfidScanning ? QStringLiteral("开") : QStringLiteral("停");
+
+    const RfidState state = rfidService.state();
+    const QString workModeText = state.workMode.isEmpty() ? QStringLiteral("-") : state.workMode;
+    const QString cardText = state.cardStatus.isEmpty() ? QStringLiteral("-") : state.cardStatus;
+    const QString faultText = state.faultStatus.isEmpty() ? QStringLiteral("-") : state.faultStatus;
+    const QString tagText = state.tag.isEmpty() ? QStringLiteral("未识别") : state.tag;
+
+    QStringList statusParts;
+    statusParts << QStringLiteral("协议：美团")
+                << QStringLiteral("RFID：%1").arg(onlineText)
+                << QStringLiteral("扫描：%1").arg(scanText)
+                << QStringLiteral("工作：%1").arg(workModeText)
+                << QStringLiteral("卡：%1").arg(cardText)
+                << QStringLiteral("故障：%1").arg(faultText)
+                << QStringLiteral("TAG：%1").arg(tagText);
+    topRfidStatusValue->setText(statusParts.join(QStringLiteral("  ")));
+
+    if (!online) {
+        topRfidStatusValue->setStyleSheet(QStringLiteral("color: red; font-weight: bold;"));
+    } else if (!state.faultStatus.isEmpty() && !state.faultStatus.contains(QStringLiteral("无故障"))) {
+        topRfidStatusValue->setStyleSheet(QStringLiteral("color: #B26A00; font-weight: bold;"));
+    } else {
+        topRfidStatusValue->setStyleSheet(QStringLiteral("color: green; font-weight: bold;"));
+    }
 }
 
 void MainWindow::updateQingjuOnlineStatus(bool clearOfflineData)
@@ -2547,6 +3032,13 @@ void MainWindow::handleRfidFrame(const CanFrame &frame)
 
     if (rfidService.handleFrame(frame)) {
         updateRfidPanel(rfidService.state());
+        if (frame.id == RfidProtocol::StatusFrameId) {
+            productionTestService.handleRfidStatus(rfidService.state());
+        } else if (frame.id == RfidProtocol::TagPart1FrameId ||
+                   frame.id == RfidProtocol::TagPart2FrameId ||
+                   frame.id == RfidProtocol::TagPart3FrameId) {
+            productionTestService.handleRfidTagUpdate(rfidService.state().tag);
+        }
     }
 }
 
@@ -2563,11 +3055,7 @@ void MainWindow::updateRfidPanel(const RfidState &state)
     setLabelValue(rfidDeviceIdValue, state.deviceId);
     setLabelValue(rfidVersionValue, state.version);
     setLabelValue(rfidResponseValue, state.response);
-    if (topRfidStatusValue != nullptr) {
-        const QString tagText = state.tag.isEmpty() ? QStringLiteral("未识别") : state.tag;
-        topRfidStatusValue->setText(QStringLiteral("RFID：%1").arg(tagText));
-        topRfidStatusValue->setStyleSheet(QString());
-    }
+    updateMeituanTopStatus();
 }
 
 void MainWindow::updateStressTestPanel(const StressTestStats &stats)
@@ -2625,6 +3113,212 @@ void MainWindow::updateStressTestPanel(const StressTestStats &stats)
                                       .arg(stats.running ? QStringLiteral("运行中") : QStringLiteral("已停止"))
                                       .arg(stats.successRate, 0, 'f', 2));
     }
+}
+
+void MainWindow::updateProductionTestPanel(const ProductionTestState &state)
+{
+    if (productionStateValue == nullptr) {
+        return;
+    }
+
+    const bool running = state.running;
+    setLabelValue(productionStateValue, state.phaseText);
+    setLabelValue(productionSnValue, state.sn);
+    setLabelValue(productionWriteValue,
+                  productionTestService.isWritingSn() ? QStringLiteral("写入中") :
+                  (state.sn.isEmpty() ? QStringLiteral("未写入") :
+                   (state.resultText == QStringLiteral("FAIL") && state.completedSamples == 0 ? QStringLiteral("写入失败") : QStringLiteral("写入完成"))));
+    setLabelValue(productionProgressValue, QStringLiteral("%1 / %2").arg(state.completedSamples).arg(state.totalSamples));
+    setLabelValue(productionSuccessValue, QString::number(state.successCount));
+    setLabelValue(productionFailureValue, QString::number(state.failureCount));
+    setLabelValue(productionRateValue, QStringLiteral("%1%").arg(state.successRate, 0, 'f', 2));
+    setLabelValue(productionTagValue, state.currentTag.isEmpty() ? QStringLiteral("-") : state.currentTag);
+    setLabelValue(productionFailureReasonValue, state.lastFailureReason.isEmpty() ? QStringLiteral("-") : state.lastFailureReason);
+
+    const int progress = state.totalSamples <= 0 ? 0 :
+        qBound(0, static_cast<int>((state.completedSamples * 100) / state.totalSamples), 100);
+    if (productionProgressBar != nullptr) {
+        productionProgressBar->setValue(progress);
+    }
+
+    if (productionResultBanner != nullptr) {
+        QString text = state.resultText;
+        QString style = QStringLiteral("background:#E5E7EB;color:#374151;border-radius:6px;");
+        if (running) {
+            text = state.phaseText.isEmpty() ? QStringLiteral("RUNNING") : state.phaseText;
+            style = QStringLiteral("background:#2563EB;color:white;border-radius:6px;");
+        } else if (state.resultText == QStringLiteral("PASS")) {
+            style = QStringLiteral("background:#16A34A;color:white;border-radius:6px;");
+        } else if (state.resultText == QStringLiteral("FAIL")) {
+            style = QStringLiteral("background:#DC2626;color:white;border-radius:6px;");
+        } else if (state.resultText == QStringLiteral("STOPPED")) {
+            style = QStringLiteral("background:#B26A00;color:white;border-radius:6px;");
+        } else if (text.isEmpty() || text == QStringLiteral("-")) {
+            text = QStringLiteral("待扫码");
+        }
+        productionResultBanner->setText(text);
+        productionResultBanner->setStyleSheet(style);
+    }
+
+    if (productionSnEdit != nullptr) {
+        productionSnEdit->setEnabled(!running);
+    }
+    const bool canStartProduction = canStarted &&
+        !stressTestService.stats().running &&
+        !isOtaRunning() &&
+        protocolModeCombo != nullptr &&
+        protocolModeCombo->currentIndex() == 0;
+    if (productionPassThresholdSpin != nullptr) {
+        productionPassThresholdSpin->setEnabled(!running && canStartProduction);
+    }
+    if (productionStartBtn != nullptr) {
+        productionStartBtn->setEnabled(!running && canStartProduction);
+    }
+    if (productionStopBtn != nullptr) {
+        productionStopBtn->setEnabled(running);
+    }
+    if (productionClearBtn != nullptr) {
+        productionClearBtn->setEnabled(!running);
+    }
+}
+
+void MainWindow::appendProductionTestLog(const QString &message)
+{
+    if (productionLogText == nullptr) {
+        return;
+    }
+    const QString line = QStringLiteral("[%1] %2")
+        .arg(QDateTime::currentDateTime().time().toString(QStringLiteral("hh:mm:ss.zzz")))
+        .arg(message);
+    productionLogText->append(line);
+}
+
+void MainWindow::startProductionTestFromInput()
+{
+    if (productionSnEdit == nullptr) {
+        return;
+    }
+    startProductionTestFromSn(productionSnEdit->text());
+}
+
+void MainWindow::startProductionTestFromSn(const QString &sn)
+{
+    const int protocolMode = protocolModeCombo == nullptr ? 0 : protocolModeCombo->currentIndex();
+    if (protocolMode != 0) {
+        QMessageBox::warning(this, QStringLiteral("产线检测"), QStringLiteral("产线检测仅支持美团协议。"));
+        return;
+    }
+    if (!canStarted) {
+        QMessageBox::warning(this, QStringLiteral("产线检测"), QStringLiteral("请先启动 CAN。"));
+        prepareProductionSnInput();
+        return;
+    }
+    if (stressTestService.stats().running) {
+        QMessageBox::warning(this, QStringLiteral("产线检测"), QStringLiteral("请先停止压力测试。"));
+        prepareProductionSnInput();
+        return;
+    }
+    if (isOtaRunning()) {
+        QMessageBox::warning(this, QStringLiteral("产线检测"), QStringLiteral("OTA 正在运行，不能开始产线检测。"));
+        prepareProductionSnInput();
+        return;
+    }
+    if (rfidDiagnosticTransfer.isBusy() && !productionWritePending) {
+        QMessageBox::warning(this, QStringLiteral("产线检测"), QStringLiteral("当前有 0x2E 写入正在进行，请稍后再试。"));
+        prepareProductionSnInput();
+        return;
+    }
+
+    QString error;
+    ProductionTestConfig config;
+    config.totalSamples = 100;
+    config.passRateThreshold = productionPassThresholdSpin == nullptr ? 95.0 : productionPassThresholdSpin->value();
+    if (!productionTestService.start(sn, config, &error)) {
+        QMessageBox::warning(this, QStringLiteral("SN格式错误"), error);
+        if (productionSnEdit != nullptr) {
+            productionSnEdit->setStyleSheet(QStringLiteral("border:1px solid #DC2626;"));
+        }
+        prepareProductionSnInput();
+        return;
+    }
+
+    if (productionSnEdit != nullptr) {
+        productionSnEdit->setStyleSheet(QString());
+        productionSnEdit->setText(productionTestService.state().sn);
+    }
+    rfidService.reset();
+    updateProductionTestPanel(productionTestService.state());
+    updateControlsState();
+}
+
+void MainWindow::stopProductionTest()
+{
+    productionTestService.stop(QStringLiteral("用户停止"));
+    productionWritePending = false;
+    prepareProductionSnInput();
+    updateControlsState();
+}
+
+void MainWindow::clearProductionTestPanel()
+{
+    if (productionTestService.isRunning()) {
+        return;
+    }
+    productionTestService.reset();
+    if (productionLogText != nullptr) {
+        productionLogText->clear();
+    }
+    if (productionSnEdit != nullptr) {
+        productionSnEdit->setStyleSheet(QString());
+    }
+    prepareProductionSnInput();
+}
+
+void MainWindow::prepareProductionSnInput()
+{
+    if (productionSnEdit == nullptr || productionTestService.isRunning()) {
+        return;
+    }
+    productionSnEdit->clear();
+    productionSnEdit->setEnabled(true);
+    productionSnEdit->setFocus();
+    productionSnEdit->selectAll();
+}
+
+void MainWindow::processProductionScanText(const QString &text, bool showError)
+{
+    if (productionTestService.isRunning()) {
+        appendProductionTestLog(QStringLiteral("检测中收到扫码输入，已忽略"));
+        return;
+    }
+    const QString sn = text.trimmed().toUpper();
+    if (sn.isEmpty()) {
+        return;
+    }
+    QString error;
+    if (!ProductionTestService::validateSn(sn, &error)) {
+        if (showError || sn.size() >= 16) {
+            appendProductionTestLog(QStringLiteral("扫码SN无效：%1，内容=%2").arg(error, sn));
+            if (productionSnEdit != nullptr) {
+                productionSnEdit->setText(sn);
+                productionSnEdit->setStyleSheet(QStringLiteral("border:1px solid #DC2626;"));
+            }
+        }
+        return;
+    }
+    if (productionSnEdit != nullptr) {
+        productionSnEdit->setText(sn);
+    }
+    startProductionTestFromSn(sn);
+}
+
+void MainWindow::sendProductionScanControl(bool enabled)
+{
+    rfidScanning = enabled;
+    if (canStarted) {
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(enabled));
+    }
+    updateMeituanTopStatus();
 }
 
 void MainWindow::addCanFrameToList(const CanFrame &frame)
@@ -3786,6 +4480,23 @@ quint8 MainWindow::selectedQingjuOtaTarget() const
 
 void MainWindow::onProtocolModeChanged(int index)
 {
+    if (productionTestService.isRunning() && index != 0) {
+        const QMessageBox::StandardButton answer = QMessageBox::question(
+            this,
+            QStringLiteral("产线检测运行中"),
+            QStringLiteral("切换协议会停止当前产线检测，确认继续吗？"));
+        if (answer != QMessageBox::Yes) {
+            if (protocolModeCombo != nullptr) {
+                protocolModeCombo->blockSignals(true);
+                protocolModeCombo->setCurrentIndex(0);
+                protocolModeCombo->blockSignals(false);
+            }
+            return;
+        }
+        productionTestService.stop(QStringLiteral("协议切换"));
+        productionWritePending = false;
+    }
+
     AppConfigData config = appConfig.load();
     config.protocolMode = index;
     appConfig.save(config);
@@ -3822,10 +4533,7 @@ void MainWindow::onProtocolModeChanged(int index)
 
     if (index == 0) { // 美团协议
         qingjuRfidService->stopScan();
-        if (topRfidStatusValue != nullptr) {
-            topRfidStatusValue->setText(QStringLiteral("RFID：未识别"));
-            topRfidStatusValue->setStyleSheet(QString());
-        }
+        updateMeituanTopStatus();
         if (stressStatsStackedWidget != nullptr && mtStressPanel != nullptr) {
             stressStatsStackedWidget->setCurrentWidget(mtStressPanel);
         }
@@ -5012,7 +5720,8 @@ QWidget *MainWindow::createBbRfidMonitorPanel(QWidget *parent)
     dataLayout->addWidget(new QLabel(QStringLiteral("RSSI"), dataGroup), 2, 0);
     dataLayout->addWidget(bbRssiVal, 2, 1, 1, 3);
 
-    infoGroup->setFixedWidth(240);
+    infoGroup->setMinimumWidth(220);
+    infoGroup->setMaximumWidth(320);
     infoAndDataLayout->addWidget(infoGroup);
     infoAndDataLayout->addWidget(dataGroup);
 
@@ -5206,7 +5915,8 @@ QWidget *MainWindow::createFfRfidMonitorPanel(QWidget *parent)
     dataLayout->addWidget(ffTagIdVal);
     dataLayout->addStretch();
 
-    infoGroup->setFixedWidth(240);
+    infoGroup->setMinimumWidth(220);
+    infoGroup->setMaximumWidth(320);
     infoAndDataLayout->addWidget(infoGroup);
     infoAndDataLayout->addWidget(dataGroup);
 
