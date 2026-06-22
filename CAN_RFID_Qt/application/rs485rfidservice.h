@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QString>
 #include <QTimer>
+#include <QMetaType>
 #include "rs485manager.h"
 
 struct Rs485State
@@ -42,6 +43,8 @@ struct Rs485State
     int hlProtoVer = -1;
     int hlProjectNo = -1;
 };
+
+Q_DECLARE_METATYPE(Rs485State)
 
 class Rs485RfidService : public QObject
 {

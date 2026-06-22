@@ -381,8 +381,11 @@ void Rs485Manager::processFfBuffer()
         
         QByteArray frame = m_rxBuffer.left(totalLen);
         
-        // Verify Address (must be 0x02, or any valid reply address)
-        // Wait, for flexibility we don't strictly require address 0x02 but we do verify CRC
+        if (static_cast<quint8>(frame.at(1)) != 0x02) {
+            // FF protocol defines the reader address as 0x02.
+            m_rxBuffer.remove(0, 1);
+            continue;
+        }
         
         // Verify CRC16/XMODEM
         quint16 receivedCrc = (static_cast<quint8>(frame.at(totalLen - 2)) << 8) | 
@@ -419,6 +422,8 @@ void Rs485Manager::onErrorOccurred(QSerialPort::SerialPortError error)
 
 QString Rs485Manager::decodeFrameText(bool isTx, quint8 cmdCode, const QByteArray &payload) const
 {
+    Q_UNUSED(payload)
+
     if (cmdCode == 0x1A) {
         return isTx ? QStringLiteral("OTA开始升级") : QStringLiteral("OTA开始升级应答");
     } else if (cmdCode == 0x1B) {

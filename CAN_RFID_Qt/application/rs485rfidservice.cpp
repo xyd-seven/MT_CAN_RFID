@@ -702,7 +702,18 @@ void Rs485RfidService::handleHlResponse(quint8 cmdCode, const QByteArray &payloa
                 m_state.manufacturer = QString::number(mfgId);
             }
             
-            m_state.deviceId = QStringLiteral("Proj:%1, Type:%2").arg(projNo).arg(verType == 1 ? "BOOT" : "APP");
+            QString typeText;
+            if (verType == 1) {
+                typeText = QStringLiteral("BOOT");
+            } else if (verType == 2) {
+                typeText = QStringLiteral("APP");
+            } else {
+                typeText = QStringLiteral("UNKNOWN(%1)").arg(verType);
+            }
+            if (protoVer != 3) {
+                m_state.errorMsg = QStringLiteral("哈啰协议版本异常: %1").arg(protoVer);
+            }
+            m_state.deviceId = QStringLiteral("Proj:%1, Type:%2").arg(projNo).arg(typeText);
             m_infoStep = 0;
             emit stateUpdated(m_state);
         }

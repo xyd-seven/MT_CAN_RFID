@@ -22,15 +22,13 @@
 #include "application/qingjucanmanager.h"
 #include "application/qingjurfidservice.h"
 #include "application/qingjuotaservice.h"
-#include "application/rs485manager.h"
-#include "application/rs485rfidservice.h"
-#include "application/hlotaservice.h"
-#include "application/bbffotaservice.h"
+#include "application/rs485worker.h"
 #include <QProgressBar>
 #include <QStackedWidget>
 #include <QComboBox>
 #include <QLineEdit>
 #include <QTextEdit>
+#include <QVector>
 
 namespace Ui {
 class MainWindow;
@@ -43,6 +41,30 @@ class MainWindow : public QMainWindow
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
+
+signals:
+    void requestRs485OpenPort(const QString &portName, int baudRate);
+    void requestRs485ClosePort();
+    void requestRs485SetProtocolMode(int mode);
+    void requestRs485StartScan(int hostPollIntervalMs, int readMode);
+    void requestRs485StopScan();
+    void requestRs485QueryDeviceInfo();
+    void requestRs485TriggerSingleQuery();
+    void requestRs485SetPower(int powerRaw01Dbm);
+    void requestRs485QueryPower();
+    void requestRs485FfReboot();
+    void requestRs485FfSetDemodulatorParams(int mixer, int ifAmp, int thrd);
+    void requestRs485FfQueryDemodulatorParams();
+    void requestRs485FfQueryCardSwitch();
+    void requestRs485SetHlConfig(quint32 timeMs, int intervalMs, int savedCount, int clearAfter, int decrypt);
+    void requestRs485HlWriteScanControl(int startStop, quint32 timeMs, int intervalMs, int savedCount, int clearAfter, int decrypt);
+    void requestRs485HlRebootDevice();
+    void requestRs485SendRawData(const QByteArray &data);
+    void requestHlOtaQueryProgramStatus();
+    void requestHlOtaStartUpgrade(const QString &firmwarePath);
+    void requestHlOtaAbortUpgrade();
+    void requestBbFfOtaStartUpgrade(const QString &firmwarePath, const QString &versionStr);
+    void requestBbFfOtaAbortUpgrade();
 
 private slots:
     void handleRecvedFrames(const QVector<CanFrame> &frames);
@@ -75,6 +97,7 @@ private:
     void updateStressTestPanel(const StressTestStats &stats);
     void sendRfidFrame(UINT canId, const QByteArray &payload);
     void addCanFrameToList(const CanFrame &frame);
+    void flushPendingLogRows();
     QString protocolDecodeText(const CanFrame &frame) const;
     QString qingjuAddressName(quint8 address) const;
     void setLabelValue(QLabel *label, const QString &value);
@@ -117,6 +140,8 @@ private:
     AppConfig appConfig;
     LogService logService;
     int maxLogRows;
+    QTimer *logFlushTimer;
+    QVector<QStringList> pendingLogRows;
     bool canStarted;
     QTimer *stressRefreshTimer;
     QLabel *stressStateValue;
@@ -269,6 +294,9 @@ private slots:
     void updateRs485RfidPanel(const Rs485State &state);
     void addSerialFrameToList(bool isTx, const QByteArray &data, const QString &decodeText);
     void onRs485CommandFinished(bool success, const QString &message);
+    void onRs485PortOpened(bool success, const QString &message);
+    void onRs485PortClosed();
+    void onRs485ScanStateChanged(bool scanning);
     QWidget *createBbRfidMonitorPanel(QWidget *parent);
     QWidget *createFfRfidMonitorPanel(QWidget *parent);
     QWidget *createHlRfidMonitorPanel(QWidget *parent);
@@ -277,6 +305,8 @@ private slots:
     void updateRs485Ports();
     void handleRs485Disconnect();
     void syncHlConfigToService();
+    QString hlOtaStateText() const;
+    QString bbFfOtaStateText() const;
 
 private:
     // 青桔协议服务及管理器
@@ -335,11 +365,17 @@ private:
     QCheckBox *qjOtaAnomalyEnableCheck;
 
     // RS485 相关服务、状态与界面控件指针
-    Rs485Manager *rs485Manager;
-    Rs485RfidService *rs485RfidService;
-    HlOtaService *hlOtaService;
-    BbFfOtaService *bbFfOtaService;
+    QThread *rs485Thread;
+    Rs485Worker *rs485Worker;
     bool serialOpened;
+    bool rs485Scanning;
+    bool rs485StartAfterOpen;
+    int rs485PendingIntervalMs;
+    int rs485PendingReadMode;
+    HlOtaService::State hlOtaState;
+    QString hlOtaMessage;
+    BbFfOtaService::State bbFfOtaState;
+    QString bbFfOtaMessage;
 
     // 串口设备面板 (左侧)
     QWidget *devicePanel;

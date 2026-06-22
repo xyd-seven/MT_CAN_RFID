@@ -290,6 +290,7 @@ void HlOtaWorker::run()
 
     emit statusUpdated(3, QStringLiteral("数据发送完毕，校验固件并跳转中..."), 98);
 
+    bool jumpCommandSent = false;
     for (int retry = 0; retry < 3; ++retry) {
         if (m_abortRequested.load()) {
             emit statusUpdated(4, QStringLiteral("用户终止升级"), 0);
@@ -306,6 +307,7 @@ void HlOtaWorker::run()
             msleep(150);
             continue;
         }
+        jumpCommandSent = true;
 
         QByteArray resp;
         // The device might restart immediately and not respond, so a timeout here is common.
@@ -315,8 +317,12 @@ void HlOtaWorker::run()
         msleep(150);
     }
 
-    // Treat either response or timeout as success for final command
-    emit statusUpdated(6, QStringLiteral("升级成功! 设备已重启跳转"), 100);
+    if (jumpCommandSent) {
+        // Treat timeout after a successful write as success because the device may reboot immediately.
+        emit statusUpdated(6, QStringLiteral("升级成功! 设备已重启跳转"), 100);
+    } else {
+        emit statusUpdated(5, QStringLiteral("升级跳转失败: %1").arg(m_lastError.isEmpty() ? QStringLiteral("串口写入失败") : m_lastError), 0);
+    }
 }
 
 

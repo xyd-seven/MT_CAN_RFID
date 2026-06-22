@@ -81,3 +81,27 @@
 - **防止退出/断连 Crash**：在 `MainWindow::closeEvent` 与 `handleRs485Disconnect` 中完善了对当前活动模式 OTA 服务的优雅中止（`abortUpgrade()`），防范了线程未退资源已释放引起的崩溃。
 - **解析防卡死**：为 `Rs485Manager` 添加了包长异常噪声过滤（大于 256 字节强制过滤），避免了解析器因噪点匹配到起始符后长等待。
 - **哈啰 OTA 提示对齐**：为哈啰 OTA 状态机添加了成功或失败时弹出的 `QMessageBox` 信息提示框，使其表现与 BB/FF 完全对齐。
+
+## 11. 最新交接补充（2026-06-18 - RS485 通信线程化）
+
+本轮按 P1 方案将 RS485 串口通信从 GUI 主线程迁移到独立工作线程，降低窗口缩放、日志刷新等 UI 操作导致轮询跳过增加的风险：
+- **新增 `Rs485Worker`**：在工作线程内统一持有 `Rs485Manager`、`Rs485RfidService`、`HlOtaService` 和 `BbFfOtaService`，串口打开/关闭、自动轮询、手动发送、参数配置与 485 OTA 均通过 queued signal/slot 调度到工作线程执行。
+- **MainWindow 仅保留 UI 状态镜像**：主界面不再直接调用 RS485 服务对象，只维护 `serialOpened`、`rs485Scanning`、`hlOtaState`、`bbFfOtaState` 等 UI 展示状态，避免 UI 线程阻塞串口事件循环。
+- **关闭流程补强**：`MainWindow` 析构时退出并等待 RS485 工作线程，`closeEvent` 只发送停止轮询、关闭串口与中止 OTA 请求，避免跨线程直接释放串口资源。
+- **构建状态**：Release 构建已通过；剩余风险是需要实机验证窗口缩放、日志高频刷新、压力测试并行场景下轮询跳过是否明显下降。
+
+## 12. 最新交接补充（2026-06-18 - 实时日志批量刷新）
+
+本轮按 P2 方案降低实时日志表格刷新对 GUI 线程的压力：
+- **批量入表**：`AddDataToList` 不再逐帧直接插入 `QTableWidget`，改为写入 `pendingLogRows`，由 50ms 单次定时器统一 flush。
+- **减少重绘**：flush 期间临时关闭表格更新，批量 `setRowCount` 后填充单元格，最后按原逻辑在用户停留底部时滚动到底部。
+- **一致性处理**：清空日志会同步清空待刷新队列；导出日志前会先 flush，避免界面显示与导出内容不一致。
+
+## 13. 最新交接补充（2026-06-22 - RS485/OTA 审查问题修复）
+
+本轮根据 `docs/qingju_rs485_ota_code_review_20260618.md` 执行协议审查问题修复：
+- **哈啰 OTA 成功判定**：寄存器 301 跳转命令至少成功写出一次后，才允许将后续无应答视为设备重启成功；若 3 次写入均失败，明确显示升级跳转失败。
+- **FF 地址校验**：`processFfBuffer()` 已严格校验 FF 协议地址 `0x02`，避免误接收非本设备帧。
+- **BB/FF OTA 分包保护**：保留 PDF 协议的动态分包 size 逻辑；非法 size 回退 256，非 256 size 输出运行日志用于实机确认。
+- **哈啰寄存器诊断**：通用寄存器解析增加版本类型 UNKNOWN 展示与协议版本异常提示。
+- **构建 warning 清理**：调整 `MainWindow` 初始化顺序，并将相关正则处理迁移至 `QRegularExpression`；Release 构建已通过且无 warning。

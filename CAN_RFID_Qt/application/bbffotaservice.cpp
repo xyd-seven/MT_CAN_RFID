@@ -248,9 +248,11 @@ void BbFfOtaWorker::run()
                     return;
                 } else if (rc == 0x00) {
                     negotiateChunkSize = (static_cast<quint8>(resp.at(1)) << 8) | static_cast<quint8>(resp.at(2));
-                    // 钳制单包大小，如非法则默认 256
                     if (negotiateChunkSize < 64 || negotiateChunkSize > 1024) {
+                        qWarning() << "Invalid BB/FF OTA chunk size from device:" << negotiateChunkSize << ", fallback to 256";
                         negotiateChunkSize = 256;
+                    } else if (negotiateChunkSize != 256) {
+                        qWarning() << "BB/FF OTA negotiated chunk size:" << negotiateChunkSize << "(not 256)";
                     }
                     handshakeSuccess = true;
                     break;

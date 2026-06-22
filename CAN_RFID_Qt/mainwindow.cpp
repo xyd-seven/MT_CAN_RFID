@@ -13,7 +13,7 @@
 #include <QDir>
 #include <QTextStream>
 #include <QIcon>
-#include <QRegExp>
+#include <QRegularExpression>
 #include <QScrollBar>
 #include <QInputDialog>
 
@@ -26,6 +26,7 @@ const QStringList DeviceTypeNames = {
 
 const int DeviceTypeIndexes[] = {42, 3, 42, 3, 42, 3, 41, 4, 41, 4, 200, 201};
 constexpr int MaxManualPayloadBytes = 64;
+constexpr int LogFlushIntervalMs = 50;
 }
 
 MainWindow::MainWindow(QWidget *parent) :
@@ -33,6 +34,7 @@ MainWindow::MainWindow(QWidget *parent) :
     ui(new Ui::MainWindow),
     canthread(nullptr),
     maxLogRows(1000),
+    logFlushTimer(new QTimer(this)),
     canStarted(false),
     stressRefreshTimer(new QTimer(this)),
     canAutoSaveCheckBox(nullptr),
@@ -122,6 +124,16 @@ MainWindow::MainWindow(QWidget *parent) :
     qingjuCanManager(nullptr),
     qingjuRfidService(nullptr),
     qingjuOtaService(nullptr),
+    qjRfidPeriodSpin(nullptr),
+    qjStartBtn(nullptr),
+    qjStopBtn(nullptr),
+    qjAutoWritePwdCheckBox(nullptr),
+    qjTargetDeviceCombo(nullptr),
+    qjQueryModeCombo(nullptr),
+    qjHostPollPeriodSpin(nullptr),
+    qjDistanceQueryOnceBtn(nullptr),
+    qjRfidAssetGroup(nullptr),
+    qjRfidStatusGroup(nullptr),
     qjRfidAddrValue(nullptr),
     qjRfidResultValue(nullptr),
     qjRfidAppStatusValue(nullptr),
@@ -131,6 +143,10 @@ MainWindow::MainWindow(QWidget *parent) :
     qjRfidModelValue(nullptr),
     qjRfidSupplierValue(nullptr),
     qjRfidSerialValue(nullptr),
+    qjRfidVendorValue(nullptr),
+    qjRfidModelCodeValue(nullptr),
+    qjRfidFwStrValue(nullptr),
+    qjRfidHwStrValue(nullptr),
     qjRfidSnValue(nullptr),
     qjRfidFirmwareVerValue(nullptr),
     qjRfidHardwareVerValue(nullptr),
@@ -147,56 +163,84 @@ MainWindow::MainWindow(QWidget *parent) :
     qjCustomExpectedFunc(0),
     qjOtaAnomalyGroup(nullptr),
     qjOtaAnomalyCombo(nullptr),
-    qjOtaAnomalyEnableCheck(nullptr),
-    qjRfidPeriodSpin(nullptr),
-    qjStartBtn(nullptr),
-    qjStopBtn(nullptr),
-    qjAutoWritePwdCheckBox(nullptr),
-    qjTargetDeviceCombo(nullptr),
-    qjQueryModeCombo(nullptr),
-    qjHostPollPeriodSpin(nullptr),
-    qjDistanceQueryOnceBtn(nullptr),
-    qjRfidAssetGroup(nullptr),
-    qjRfidStatusGroup(nullptr),
-    qjRfidVendorValue(nullptr),
-    qjRfidModelCodeValue(nullptr),
-    qjRfidFwStrValue(nullptr),
-    qjRfidHwStrValue(nullptr)
+    qjOtaAnomalyEnableCheck(nullptr)
 {
     ui->setupUi(this);
     setWindowIcon(QIcon(":/images/MT_RFID.png"));
+    logFlushTimer->setSingleShot(true);
+    logFlushTimer->setInterval(LogFlushIntervalMs);
+    connect(logFlushTimer, &QTimer::timeout, this, &MainWindow::flushPendingLogRows);
 
     // Instantiate background services first to avoid nullpointer dereferences during UI setup/loading config
     canthread = new CANThread();
     qingjuCanManager = new QingjuCanManager(canthread, this);
     qingjuRfidService = new QingjuRfidService(qingjuCanManager, this);
     qingjuOtaService = new QingjuOtaService(qingjuCanManager, this);
-    rs485Manager = new Rs485Manager(this);
-    rs485RfidService = new Rs485RfidService(rs485Manager, this);
-    hlOtaService = new HlOtaService(rs485Manager, this);
-    bbFfOtaService = new BbFfOtaService(rs485Manager, this);
+    qRegisterMetaType<Rs485State>("Rs485State");
+    qRegisterMetaType<HlOtaService::State>("HlOtaService::State");
+    qRegisterMetaType<BbFfOtaService::State>("BbFfOtaService::State");
+    rs485Thread = new QThread(this);
+    rs485Worker = new Rs485Worker();
+    rs485Worker->moveToThread(rs485Thread);
     serialOpened = false;
+    rs485Scanning = false;
+    rs485StartAfterOpen = false;
+    rs485PendingIntervalMs = 500;
+    rs485PendingReadMode = 1;
+    hlOtaState = HlOtaService::State::Idle;
+    bbFfOtaState = BbFfOtaService::State::Idle;
     devicePanel = nullptr;
     serialDevicePanel = nullptr;
 
-    connect(rs485Manager, &Rs485Manager::frameReceived, this, [this](const QByteArray &data, const QString &decodeText) {
+    connect(rs485Thread, &QThread::started, rs485Worker, &Rs485Worker::initialize);
+    connect(rs485Thread, &QThread::finished, rs485Worker, &QObject::deleteLater);
+    connect(this, &MainWindow::requestRs485OpenPort, rs485Worker, &Rs485Worker::openPort);
+    connect(this, &MainWindow::requestRs485ClosePort, rs485Worker, &Rs485Worker::closePort);
+    connect(this, &MainWindow::requestRs485SetProtocolMode, rs485Worker, &Rs485Worker::setProtocolMode);
+    connect(this, &MainWindow::requestRs485StartScan, rs485Worker, &Rs485Worker::startScan);
+    connect(this, &MainWindow::requestRs485StopScan, rs485Worker, &Rs485Worker::stopScan);
+    connect(this, &MainWindow::requestRs485QueryDeviceInfo, rs485Worker, &Rs485Worker::queryDeviceInfo);
+    connect(this, &MainWindow::requestRs485TriggerSingleQuery, rs485Worker, &Rs485Worker::triggerSingleQuery);
+    connect(this, &MainWindow::requestRs485SetPower, rs485Worker, &Rs485Worker::setPower);
+    connect(this, &MainWindow::requestRs485QueryPower, rs485Worker, &Rs485Worker::queryPower);
+    connect(this, &MainWindow::requestRs485FfReboot, rs485Worker, &Rs485Worker::ffReboot);
+    connect(this, &MainWindow::requestRs485FfSetDemodulatorParams, rs485Worker, &Rs485Worker::ffSetDemodulatorParams);
+    connect(this, &MainWindow::requestRs485FfQueryDemodulatorParams, rs485Worker, &Rs485Worker::ffQueryDemodulatorParams);
+    connect(this, &MainWindow::requestRs485FfQueryCardSwitch, rs485Worker, &Rs485Worker::ffQueryCardSwitch);
+    connect(this, &MainWindow::requestRs485SetHlConfig, rs485Worker, &Rs485Worker::setHlConfig);
+    connect(this, &MainWindow::requestRs485HlWriteScanControl, rs485Worker, &Rs485Worker::hlWriteScanControl);
+    connect(this, &MainWindow::requestRs485HlRebootDevice, rs485Worker, &Rs485Worker::hlRebootDevice);
+    connect(this, &MainWindow::requestRs485SendRawData, rs485Worker, &Rs485Worker::sendRawData);
+    connect(this, &MainWindow::requestHlOtaQueryProgramStatus, rs485Worker, &Rs485Worker::hlOtaQueryProgramStatus);
+    connect(this, &MainWindow::requestHlOtaStartUpgrade, rs485Worker, &Rs485Worker::hlOtaStartUpgrade);
+    connect(this, &MainWindow::requestHlOtaAbortUpgrade, rs485Worker, &Rs485Worker::hlOtaAbortUpgrade);
+    connect(this, &MainWindow::requestBbFfOtaStartUpgrade, rs485Worker, &Rs485Worker::bbFfOtaStartUpgrade);
+    connect(this, &MainWindow::requestBbFfOtaAbortUpgrade, rs485Worker, &Rs485Worker::bbFfOtaAbortUpgrade);
+    connect(rs485Worker, &Rs485Worker::portOpened, this, &MainWindow::onRs485PortOpened);
+    connect(rs485Worker, &Rs485Worker::portClosed, this, &MainWindow::onRs485PortClosed);
+    connect(rs485Worker, &Rs485Worker::scanStateChanged, this, &MainWindow::onRs485ScanStateChanged);
+    connect(rs485Worker, &Rs485Worker::rawDataSent, this, [this](bool success, const QString &) {
+        if (!success) {
+            QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口发送失败，请检查串口状态！"));
+        }
+    });
+    connect(rs485Worker, &Rs485Worker::frameReceived, this, [this](const QByteArray &data, const QString &decodeText) {
         addSerialFrameToList(false, data, decodeText);
     });
-    connect(rs485Manager, &Rs485Manager::frameSent, this, [this](const QByteArray &data, const QString &decodeText) {
+    connect(rs485Worker, &Rs485Worker::frameSent, this, [this](const QByteArray &data, const QString &decodeText) {
         addSerialFrameToList(true, data, decodeText);
     });
-    connect(rs485Manager, &Rs485Manager::portDisconnected, this, &MainWindow::handleRs485Disconnect);
-    connect(rs485RfidService, &Rs485RfidService::stateUpdated, this, &MainWindow::updateRs485RfidPanel);
-    connect(rs485RfidService, &Rs485RfidService::pollSkipped, this, [this]() {
+    connect(rs485Worker, &Rs485Worker::portDisconnected, this, &MainWindow::handleRs485Disconnect);
+    connect(rs485Worker, &Rs485Worker::stateUpdated, this, &MainWindow::updateRs485RfidPanel);
+    connect(rs485Worker, &Rs485Worker::pollSkipped, this, [this]() {
         if (stressTestService.stats().running && protocolModeCombo != nullptr && protocolModeCombo->currentIndex() >= 2) {
             stressTestService.recordRs485PollSkipped();
             updateStressTestPanel(stressTestService.stats());
         }
     });
-    connect(rs485RfidService, &Rs485RfidService::commandFinished, this, &MainWindow::onRs485CommandFinished);
-    
-    connect(hlOtaService, &HlOtaService::otaStateChanged, this, &MainWindow::handleHlOtaStateChanged);
-    connect(hlOtaService, &HlOtaService::otaProgress, this, [this](int percentage) {
+    connect(rs485Worker, &Rs485Worker::commandFinished, this, &MainWindow::onRs485CommandFinished);
+    connect(rs485Worker, &Rs485Worker::hlOtaStateChanged, this, &MainWindow::handleHlOtaStateChanged);
+    connect(rs485Worker, &Rs485Worker::hlOtaProgress, this, [this](int percentage) {
         if (appConfig.load().protocolMode == 4) {
             if (otaProgressBar != nullptr) {
                 otaProgressBar->setValue(percentage);
@@ -204,8 +248,8 @@ MainWindow::MainWindow(QWidget *parent) :
         }
     });
 
-    connect(bbFfOtaService, &BbFfOtaService::otaStateChanged, this, &MainWindow::handleBbFfOtaStateChanged);
-    connect(bbFfOtaService, &BbFfOtaService::otaProgress, this, [this](int percentage) {
+    connect(rs485Worker, &Rs485Worker::bbFfOtaStateChanged, this, &MainWindow::handleBbFfOtaStateChanged);
+    connect(rs485Worker, &Rs485Worker::bbFfOtaProgress, this, [this](int percentage) {
         int mode = appConfig.load().protocolMode;
         if (mode == 2 || mode == 3) {
             if (otaProgressBar != nullptr) {
@@ -213,6 +257,7 @@ MainWindow::MainWindow(QWidget *parent) :
             }
         }
     });
+    rs485Thread->start();
 
     ui->filterModeCombo->setCurrentIndex(2);
     ui->ABIT1Combo->setCurrentIndex(2);
@@ -799,13 +844,13 @@ bool MainWindow::isOtaRunning() const
                state == QingjuOtaService::State::SendData ||
                state == QingjuOtaService::State::FinishUpgrade;
     } else if (protocolMode == 4) {
-        HlOtaService::State state = hlOtaService->state();
+        HlOtaService::State state = hlOtaState;
         return state == HlOtaService::State::QueryProgram ||
                state == HlOtaService::State::StartUpgrade ||
                state == HlOtaService::State::SendData ||
                state == HlOtaService::State::FinishUpgrade;
     } else if (protocolMode == 2 || protocolMode == 3) {
-        BbFfOtaService::State state = bbFfOtaService->state();
+        BbFfOtaService::State state = bbFfOtaState;
         return state == BbFfOtaService::State::StartUpgrade ||
                state == BbFfOtaService::State::SendData ||
                state == BbFfOtaService::State::FinishUpgrade;
@@ -826,7 +871,6 @@ void MainWindow::updateControlsState()
     const bool is485Mode = (protocolMode == 2 || protocolMode == 3 || protocolMode == 4);
 
     if (is485Mode) {
-        const bool rs485Scanning = rs485RfidService != nullptr && rs485RfidService->isScanning();
         updateRs485TopStatus();
         
         // 串口面板
@@ -1197,7 +1241,7 @@ void MainWindow::startStressTest()
             syncHlConfigToService();
         }
         constexpr int AutoPollReadMode = 1;
-        rs485RfidService->startScan(intervalMs, AutoPollReadMode);
+        emit requestRs485StartScan(intervalMs, AutoPollReadMode);
         logService.logRuntime(LogLevel::Info,
                               QString("RS485 stress test polling interval: %1 ms").arg(intervalMs));
     } else {
@@ -1238,7 +1282,7 @@ void MainWindow::stopStressTest(bool autoStopped)
     stressRefreshTimer->stop();
 
     if (is485Mode) {
-        rs485RfidService->stopScan();
+        emit requestRs485StopScan();
     } else {
         const bool qingjuMode = (protocolMode == 1);
         if (qingjuMode) {
@@ -1919,9 +1963,10 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
             logService.logRuntime(LogLevel::Info, QString("OTA firmware selected: %1").arg(filePath));
 
             // 尝试从文件名中提取版本号，如 control_v1.2.255_20201210000.bin
-            QRegExp rx("v(\\d+)\\.(\\d+)\\.(\\d+)");
-            if (rx.indexIn(filePath) != -1) {
-                QString verStr = QString("%1.%2.%3").arg(rx.cap(1)).arg(rx.cap(2)).arg(rx.cap(3));
+            QRegularExpression rx("v(\\d+)\\.(\\d+)\\.(\\d+)");
+            QRegularExpressionMatch match = rx.match(filePath);
+            if (match.hasMatch()) {
+                QString verStr = QString("%1.%2.%3").arg(match.captured(1)).arg(match.captured(2)).arg(match.captured(3));
                 otaVersionEdit->setText(verStr);
             }
         }
@@ -1939,11 +1984,11 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
                 QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("请先打开串口！"));
                 return;
             }
-            if (rs485RfidService != nullptr && rs485RfidService->isScanning()) {
-                rs485RfidService->stopScan();
+            if (rs485Scanning) {
+                emit requestRs485StopScan();
                 updateControlsState();
             }
-            hlOtaService->queryProgramStatus();
+            emit requestHlOtaQueryProgramStatus();
         } else if (protocolMode == 2 || protocolMode == 3) { // BB/FF 协议
             QMessageBox::information(this, QStringLiteral("提示"), QStringLiteral("BB/FF 升级协议不支持单独查询程序状态，请选择固件后直接开始升级。"));
         } else { // 美团协议
@@ -1995,8 +2040,8 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
                 return;
             }
             QString versionStr = otaVersionEdit->text().trimmed();
-            QRegExp rx("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$");
-            if (!rx.exactMatch(versionStr)) {
+            QRegularExpression rx("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$");
+            if (!rx.match(versionStr).hasMatch()) {
                 QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("请输入合法的升级版本号，格式如 1.1.3"));
                 return;
             }
@@ -2005,21 +2050,21 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
                 QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("版本号每个字段的值不能超过 255"));
                 return;
             }
-            if (rs485RfidService != nullptr && rs485RfidService->isScanning()) {
-                rs485RfidService->stopScan();
+            if (rs485Scanning) {
+                emit requestRs485StopScan();
                 updateControlsState();
             }
-            bbFfOtaService->startUpgrade(firmwarePath, versionStr);
+            emit requestBbFfOtaStartUpgrade(firmwarePath, versionStr);
         } else if (protocolMode == 4) { // 哈啰协议
             if (!serialOpened) {
                 QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("请先打开串口！"));
                 return;
             }
-            if (rs485RfidService != nullptr && rs485RfidService->isScanning()) {
-                rs485RfidService->stopScan();
+            if (rs485Scanning) {
+                emit requestRs485StopScan();
                 updateControlsState();
             }
-            hlOtaService->startUpgrade(firmwarePath);
+            emit requestHlOtaStartUpgrade(firmwarePath);
         } else { // 美团协议
             otaService.setChannel(static_cast<quint32>(ui->sendPathCombo->currentIndex()));
             otaService.setDeviceVersions(rfidService.vendorCode(), rfidService.hardwareVersion(), rfidService.softwareVersion());
@@ -2059,9 +2104,9 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
             }
             qingjuOtaService->abortUpgrade();
         } else if (protocolMode == 4) { // 哈啰协议
-            hlOtaService->abortUpgrade();
+            emit requestHlOtaAbortUpgrade();
         } else if (protocolMode == 2 || protocolMode == 3) { // BB/FF 协议
-            bbFfOtaService->abortUpgrade();
+            emit requestBbFfOtaAbortUpgrade();
         } else { // 美团协议
             if (m_otaStressRunning) {
                 m_otaStressRunning = false;
@@ -2367,6 +2412,8 @@ void MainWindow::setupCanLogSaveButton()
 
 void MainWindow::exportCanLogSnapshot()
 {
+    flushPendingLogRows();
+
     const QString defaultFilePath = QDir(logDirectory).filePath(
         QString("can_snapshot_%1.csv").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss")));
     const QString filePath = QFileDialog::getSaveFileName(
@@ -2689,9 +2736,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
         if (protocolMode == 1) {
             qingjuOtaService->abortUpgrade();
         } else if (protocolMode == 4) {
-            hlOtaService->abortUpgrade();
+            emit requestHlOtaAbortUpgrade();
         } else if (protocolMode == 2 || protocolMode == 3) {
-            bbFfOtaService->abortUpgrade();
+            emit requestBbFfOtaAbortUpgrade();
         } else {
             otaService.abortUpgrade();
         }
@@ -2702,12 +2749,8 @@ void MainWindow::closeEvent(QCloseEvent *event)
     }
 
     // 关闭 485
-    if (rs485RfidService != nullptr) {
-        rs485RfidService->stopScan();
-    }
-    if (rs485Manager != nullptr) {
-        rs485Manager->closePort();
-    }
+    emit requestRs485StopScan();
+    emit requestRs485ClosePort();
 
     saveAppConfig();
     logService.logRuntime(LogLevel::Info, QStringLiteral("Application closing"));
@@ -2720,6 +2763,10 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
 MainWindow::~MainWindow()
 {
+    if (rs485Thread != nullptr) {
+        rs485Thread->quit();
+        rs485Thread->wait();
+    }
     delete ui;
 }
 
@@ -2762,6 +2809,8 @@ void MainWindow::handleRecvedFrames(const QVector<CanFrame> &frames)
 
 void MainWindow::on_cleanListBtn_clicked()
 {
+    pendingLogRows.clear();
+    logFlushTimer->stop();
     ui->tableWidget->setRowCount(0);
 }
 
@@ -2875,12 +2924,12 @@ void MainWindow::on_sendBtn_clicked()
 {
     const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
     if (protocolMode == 2 || protocolMode == 3 || protocolMode == 4) {
-        if (!serialOpened || rs485Manager == nullptr || !rs485Manager->isOpen()) {
+        if (!serialOpened) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("发送失败，串口未打开！"));
             return;
         }
 
-        QStringList byteTextList = ui->sendDataEdit->text().split(QRegExp("\\s+"), Qt::SkipEmptyParts);
+        QStringList byteTextList = ui->sendDataEdit->text().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (byteTextList.isEmpty()) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("发送失败，串口数据不能为空！"));
             return;
@@ -2898,9 +2947,7 @@ void MainWindow::on_sendBtn_clicked()
             payload.append(static_cast<char>(byteValue));
         }
 
-        if (!rs485Manager->sendRawData(payload)) {
-            QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口发送失败，请检查串口状态！"));
-        }
+        emit requestRs485SendRawData(payload);
         return;
     }
 
@@ -2919,7 +2966,7 @@ void MainWindow::on_sendBtn_clicked()
         return;
     }
 
-    QStringList byteTextList = ui->sendDataEdit->text().split(QRegExp("\\s+"), Qt::SkipEmptyParts);
+    QStringList byteTextList = ui->sendDataEdit->text().split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
     if (byteTextList.count() > MaxManualPayloadBytes) {
         QMessageBox::warning(this, QStringLiteral("\u8b66\u544a"), QStringLiteral("\u53d1\u9001\u5931\u8d25\uff0c\u6570\u636e\u957f\u5ea6\u4e0d\u80fd\u8d85\u8fc764\u5b57\u8282\uff01"));
         return;
@@ -2973,21 +3020,49 @@ void MainWindow::on_sendBtn_clicked()
 
 void MainWindow::AddDataToList(QStringList strList)
 {
+    if (strList.isEmpty()) {
+        return;
+    }
+    pendingLogRows.append(strList);
+    const int overflow = pendingLogRows.size() - maxLogRows;
+    if (overflow > 0) {
+        pendingLogRows.remove(0, overflow);
+    }
+    if (!logFlushTimer->isActive()) {
+        logFlushTimer->start();
+    }
+}
+
+void MainWindow::flushPendingLogRows()
+{
+    if (pendingLogRows.isEmpty()) {
+        return;
+    }
+
     QScrollBar *vBar = ui->tableWidget->verticalScrollBar();
     bool wasAtBottom = (vBar == nullptr || vBar->value() == vBar->maximum());
 
-    while (ui->tableWidget->rowCount() >= maxLogRows) {
+    const int overflow = ui->tableWidget->rowCount() + pendingLogRows.size() - maxLogRows;
+    ui->tableWidget->setUpdatesEnabled(false);
+    for (int i = 0; i < overflow; ++i) {
         ui->tableWidget->removeRow(0);
     }
-    const int row = ui->tableWidget->rowCount();
-    ui->tableWidget->insertRow(row);
-    for(int i = 0; i < strList.count();i ++)
-    {
-        QTableWidgetItem *item = new QTableWidgetItem(strList.at(i),0);
-        ui->tableWidget->setItem(row, i, item);
-        if(i != strList.count() - 1)
-            item->setTextAlignment(Qt::AlignCenter | Qt::AlignHCenter);
+
+    const int firstRow = ui->tableWidget->rowCount();
+    ui->tableWidget->setRowCount(firstRow + pendingLogRows.size());
+    for (int rowOffset = 0; rowOffset < pendingLogRows.size(); ++rowOffset) {
+        const QStringList &strList = pendingLogRows.at(rowOffset);
+        const int row = firstRow + rowOffset;
+        for (int column = 0; column < strList.count(); ++column) {
+            QTableWidgetItem *item = new QTableWidgetItem(strList.at(column), 0);
+            ui->tableWidget->setItem(row, column, item);
+            if (column != strList.count() - 1) {
+                item->setTextAlignment(Qt::AlignCenter | Qt::AlignHCenter);
+            }
+        }
     }
+    pendingLogRows.clear();
+    ui->tableWidget->setUpdatesEnabled(true);
     if (wasAtBottom) {
         ui->tableWidget->scrollToBottom();
     }
@@ -3076,9 +3151,11 @@ void MainWindow::handleOtaStateChangeForStressTest(OtaService::State state, cons
 
 void MainWindow::handleHlOtaStateChanged(HlOtaService::State state, const QString &message)
 {
+    hlOtaState = state;
+    hlOtaMessage = message;
     if (appConfig.load().protocolMode == 4) {
         if (otaStateValue != nullptr) {
-            otaStateValue->setText(hlOtaService->stateText());
+            otaStateValue->setText(hlOtaStateText());
         }
         if (otaMessageValue != nullptr) {
             otaMessageValue->setText(message);
@@ -3094,10 +3171,12 @@ void MainWindow::handleHlOtaStateChanged(HlOtaService::State state, const QStrin
 
 void MainWindow::handleBbFfOtaStateChanged(BbFfOtaService::State state, const QString &message)
 {
+    bbFfOtaState = state;
+    bbFfOtaMessage = message;
     int mode = appConfig.load().protocolMode;
     if (mode == 2 || mode == 3) {
         if (otaStateValue != nullptr) {
-            otaStateValue->setText(bbFfOtaService->stateText());
+            otaStateValue->setText(bbFfOtaStateText());
         }
         if (otaMessageValue != nullptr) {
             otaMessageValue->setText(message);
@@ -3109,6 +3188,50 @@ void MainWindow::handleBbFfOtaStateChanged(BbFfOtaService::State state, const QS
         }
         updateControlsState();
     }
+}
+
+QString MainWindow::hlOtaStateText() const
+{
+    switch (hlOtaState) {
+    case HlOtaService::State::Idle:
+        return QStringLiteral("空闲");
+    case HlOtaService::State::QueryProgram:
+        return QStringLiteral("查询程序");
+    case HlOtaService::State::StartUpgrade:
+        return QStringLiteral("开始升级");
+    case HlOtaService::State::SendData:
+        return QStringLiteral("发送数据");
+    case HlOtaService::State::FinishUpgrade:
+        return QStringLiteral("完成升级");
+    case HlOtaService::State::Abort:
+        return QStringLiteral("已中止");
+    case HlOtaService::State::Failed:
+        return QStringLiteral("失败");
+    case HlOtaService::State::Completed:
+        return QStringLiteral("完成");
+    }
+    return QStringLiteral("未知");
+}
+
+QString MainWindow::bbFfOtaStateText() const
+{
+    switch (bbFfOtaState) {
+    case BbFfOtaService::State::Idle:
+        return QStringLiteral("空闲");
+    case BbFfOtaService::State::StartUpgrade:
+        return QStringLiteral("开始升级");
+    case BbFfOtaService::State::SendData:
+        return QStringLiteral("发送数据");
+    case BbFfOtaService::State::FinishUpgrade:
+        return QStringLiteral("完成升级");
+    case BbFfOtaService::State::Abort:
+        return QStringLiteral("已中止");
+    case BbFfOtaService::State::Failed:
+        return QStringLiteral("失败");
+    case BbFfOtaService::State::Completed:
+        return QStringLiteral("完成");
+    }
+    return QStringLiteral("未知");
 }
 
 void MainWindow::handleQingjuOtaStateChangeForStressTest(QingjuOtaService::State state, const QString &message)
@@ -3207,11 +3330,12 @@ void MainWindow::onProtocolModeChanged(int index)
 
     // 强制关闭所有通道，清理资源，达到物理通道的隔离！
     if (index == 0 || index == 1) { // CAN 模式下，强制停止 485 并关闭串口
-        if (rs485RfidService != nullptr && rs485RfidService->isScanning()) {
-            rs485RfidService->stopScan();
+        if (rs485Scanning) {
+            emit requestRs485StopScan();
+            rs485Scanning = false;
         }
-        if (rs485Manager != nullptr && rs485Manager->isOpen()) {
-            rs485Manager->closePort();
+        if (serialOpened) {
+            emit requestRs485ClosePort();
             serialOpened = false;
             if (serialStatusLabel != nullptr) {
                 serialStatusLabel->setText(QStringLiteral("串口已关闭"));
@@ -3287,8 +3411,7 @@ void MainWindow::onProtocolModeChanged(int index)
         otaMessageValue->setText(qingjuOtaService->lastMessage().isEmpty() ? QStringLiteral("选择 NPK/RFR 后，点击“开始目标升级”或“查询目标 APP/BOOT”启动") : qingjuOtaService->lastMessage());
     } else { // RS485 协议（2: BB, 3: FF, 4: Hellobike）
         int mode = index;
-        rs485RfidService->setProtocolMode(mode);
-        rs485Manager->setProtocolMode(mode);
+        emit requestRs485SetProtocolMode(mode);
 
         if (devicePanel != nullptr) devicePanel->hide();
         if (serialDevicePanel != nullptr) serialDevicePanel->show();
@@ -3308,8 +3431,8 @@ void MainWindow::onProtocolModeChanged(int index)
                 if (otaQueryBtn != nullptr) otaQueryBtn->setText(QStringLiteral("查询APP/BOOT"));
                 if (otaStartUpgradeBtn != nullptr) otaStartUpgradeBtn->setText(QStringLiteral("开始升级"));
 
-                if (otaStateValue != nullptr) otaStateValue->setText(hlOtaService->stateText());
-                if (otaMessageValue != nullptr) otaMessageValue->setText(hlOtaService->lastMessage().isEmpty() ? QStringLiteral("点击“开始升级”或“查询APP/BOOT”启动") : hlOtaService->lastMessage());
+                if (otaStateValue != nullptr) otaStateValue->setText(hlOtaStateText());
+                if (otaMessageValue != nullptr) otaMessageValue->setText(hlOtaMessage.isEmpty() ? QStringLiteral("点击“开始升级”或“查询APP/BOOT”启动") : hlOtaMessage);
             } else if (mode == 2 || mode == 3) {
                 rfidTabs->setTabEnabled(2, true); // 允许 BB/FF 协议使用 OTA 升级
 
@@ -3325,8 +3448,8 @@ void MainWindow::onProtocolModeChanged(int index)
                 if (otaQueryBtn != nullptr) otaQueryBtn->setText(QStringLiteral("查询APP/BOOT"));
                 if (otaStartUpgradeBtn != nullptr) otaStartUpgradeBtn->setText(QStringLiteral("开始升级"));
 
-                if (otaStateValue != nullptr) otaStateValue->setText(bbFfOtaService->stateText());
-                if (otaMessageValue != nullptr) otaMessageValue->setText(bbFfOtaService->lastMessage().isEmpty() ? QStringLiteral("点击“开始升级”或“查询APP/BOOT”启动") : bbFfOtaService->lastMessage());
+                if (otaStateValue != nullptr) otaStateValue->setText(bbFfOtaStateText());
+                if (otaMessageValue != nullptr) otaMessageValue->setText(bbFfOtaMessage.isEmpty() ? QStringLiteral("点击“开始升级”或“查询APP/BOOT”启动") : bbFfOtaMessage);
             } else {
                 rfidTabs->setTabEnabled(2, false); // 禁用其它协议的 OTA 升级
                 if (rfidTabs->currentIndex() == 2) {
@@ -3506,7 +3629,7 @@ void MainWindow::onQjCustomWriteClicked()
     }
 
     QString valStr = qjRegValueEdit->text().trimmed();
-    QStringList valList = valStr.split(QRegExp("\\s+"), QString::SkipEmptyParts);
+    QStringList valList = valStr.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
     QVector<quint16> values;
     for (const QString &s : valList) {
         quint16 val = s.toUShort(&ok, 16);
@@ -4022,8 +4145,6 @@ void MainWindow::updateRs485TopStatus()
     }
 
     const QString protocolName = protocolMode == 2 ? QStringLiteral("BB") : (protocolMode == 3 ? QStringLiteral("FF") : QStringLiteral("哈啰"));
-    const bool rs485Scanning = rs485RfidService != nullptr && rs485RfidService->isScanning();
-
     if (topCanStatusValue != nullptr) {
         if (serialOpened) {
             topCanStatusValue->setText(QStringLiteral("RS485：已连接"));
@@ -4056,15 +4177,7 @@ void MainWindow::updateRs485TopStatus()
 void MainWindow::onSerialOpenCloseClicked()
 {
     if (serialOpened) {
-        if (rs485RfidService->isScanning()) {
-            rs485RfidService->stopScan();
-        }
-        rs485Manager->closePort();
-        serialOpened = false;
-        serialStatusLabel->setText(QStringLiteral("串口已关闭"));
-        serialStatusLabel->setStyleSheet("color: red; font-weight: bold;");
-        serialOpenCloseBtn->setText(QStringLiteral("打开串口"));
-        updateRs485TopStatus();
+        emit requestRs485ClosePort();
     } else {
         QString portName = serialPortCombo->currentText();
         int baudRate = serialBaudRateCombo->currentData().toInt();
@@ -4072,18 +4185,63 @@ void MainWindow::onSerialOpenCloseClicked()
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("未选择串口！"));
             return;
         }
-        if (rs485Manager->openPort(portName, baudRate)) {
-            serialOpened = true;
-            serialStatusLabel->setText(QStringLiteral("已连接 (%1, %2)").arg(portName).arg(baudRate));
-            serialStatusLabel->setStyleSheet("color: green; font-weight: bold;");
-            serialOpenCloseBtn->setText(QStringLiteral("关闭串口"));
-            updateRs485TopStatus();
-            
-            rs485RfidService->queryDeviceInfo();
-        } else {
-            QMessageBox::critical(this, QStringLiteral("错误"), QStringLiteral("串口打开失败，请检查端口是否被占用"));
-        }
+        rs485StartAfterOpen = false;
+        emit requestRs485OpenPort(portName, baudRate);
     }
+    updateControlsState();
+}
+
+void MainWindow::onRs485PortOpened(bool success, const QString &message)
+{
+    Q_UNUSED(message)
+    if (!success) {
+        rs485StartAfterOpen = false;
+        QMessageBox::critical(this, QStringLiteral("错误"), QStringLiteral("串口打开失败，请检查端口是否被占用"));
+        updateControlsState();
+        return;
+    }
+
+    const QString portName = serialPortCombo != nullptr ? serialPortCombo->currentText() : QString();
+    const int baudRate = serialBaudRateCombo != nullptr ? serialBaudRateCombo->currentData().toInt() : 0;
+    serialOpened = true;
+    if (serialStatusLabel != nullptr) {
+        serialStatusLabel->setText(QStringLiteral("已连接 (%1, %2)").arg(portName).arg(baudRate));
+        serialStatusLabel->setStyleSheet("color: green; font-weight: bold;");
+    }
+    if (serialOpenCloseBtn != nullptr) {
+        serialOpenCloseBtn->setText(QStringLiteral("关闭串口"));
+    }
+    updateRs485TopStatus();
+
+    if (rs485StartAfterOpen) {
+        rs485StartAfterOpen = false;
+        emit requestRs485StartScan(rs485PendingIntervalMs, rs485PendingReadMode);
+    } else {
+        emit requestRs485QueryDeviceInfo();
+    }
+    updateControlsState();
+}
+
+void MainWindow::onRs485PortClosed()
+{
+    serialOpened = false;
+    rs485Scanning = false;
+    rs485StartAfterOpen = false;
+    if (serialStatusLabel != nullptr) {
+        serialStatusLabel->setText(QStringLiteral("串口已关闭"));
+        serialStatusLabel->setStyleSheet("color: red; font-weight: bold;");
+    }
+    if (serialOpenCloseBtn != nullptr) {
+        serialOpenCloseBtn->setText(QStringLiteral("打开串口"));
+    }
+    updateRs485TopStatus();
+    updateControlsState();
+}
+
+void MainWindow::onRs485ScanStateChanged(bool scanning)
+{
+    rs485Scanning = scanning;
+    updateRs485TopStatus();
     updateControlsState();
 }
 
@@ -4105,12 +4263,12 @@ void MainWindow::onSerialOneClickStartClicked()
     if (serialOpened) {
         int protocolIdx = protocolModeCombo->currentIndex();
         if (protocolIdx == 2) {
-            rs485RfidService->startScan(bbHostPollPeriodSpin->value(), bbQueryModeCombo->currentData().toInt());
+            emit requestRs485StartScan(bbHostPollPeriodSpin->value(), bbQueryModeCombo->currentData().toInt());
         } else if (protocolIdx == 3) {
-            rs485RfidService->startScan(ffHostPollPeriodSpin->value(), ffQueryModeCombo->currentData().toInt());
+            emit requestRs485StartScan(ffHostPollPeriodSpin->value(), ffQueryModeCombo->currentData().toInt());
         } else if (protocolIdx == 4) {
             syncHlConfigToService();
-            rs485RfidService->startScan(hlHostPollPeriodSpin->value(), hlQueryModeCombo->currentData().toInt());
+            emit requestRs485StartScan(hlHostPollPeriodSpin->value(), hlQueryModeCombo->currentData().toInt());
         }
         updateControlsState();
     } else {
@@ -4120,25 +4278,20 @@ void MainWindow::onSerialOneClickStartClicked()
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("未选择串口！"));
             return;
         }
-        if (rs485Manager->openPort(portName, baudRate)) {
-            serialOpened = true;
-            serialStatusLabel->setText(QStringLiteral("已连接 (%1, %2)").arg(portName).arg(baudRate));
-            serialStatusLabel->setStyleSheet("color: green; font-weight: bold;");
-            serialOpenCloseBtn->setText(QStringLiteral("关闭串口"));
-            updateRs485TopStatus();
-            
-            int protocolIdx = protocolModeCombo->currentIndex();
-            if (protocolIdx == 2) {
-                rs485RfidService->startScan(bbHostPollPeriodSpin->value(), bbQueryModeCombo->currentData().toInt());
-            } else if (protocolIdx == 3) {
-                rs485RfidService->startScan(ffHostPollPeriodSpin->value(), ffQueryModeCombo->currentData().toInt());
-            } else if (protocolIdx == 4) {
-                syncHlConfigToService();
-                rs485RfidService->startScan(hlHostPollPeriodSpin->value(), hlQueryModeCombo->currentData().toInt());
-            }
+        rs485StartAfterOpen = true;
+        int protocolIdx = protocolModeCombo->currentIndex();
+        if (protocolIdx == 2) {
+            rs485PendingIntervalMs = bbHostPollPeriodSpin->value();
+            rs485PendingReadMode = bbQueryModeCombo->currentData().toInt();
+        } else if (protocolIdx == 3) {
+            rs485PendingIntervalMs = ffHostPollPeriodSpin->value();
+            rs485PendingReadMode = ffQueryModeCombo->currentData().toInt();
         } else {
-            QMessageBox::critical(this, QStringLiteral("错误"), QStringLiteral("一键启动失败，无法打开串口"));
+            syncHlConfigToService();
+            rs485PendingIntervalMs = hlHostPollPeriodSpin->value();
+            rs485PendingReadMode = hlQueryModeCombo->currentData().toInt();
         }
+        emit requestRs485OpenPort(portName, baudRate);
         updateControlsState();
     }
 }
@@ -4146,11 +4299,8 @@ void MainWindow::onSerialOneClickStartClicked()
 void MainWindow::handleRs485Disconnect()
 {
     if (serialOpened) {
-        if (rs485RfidService->isScanning()) {
-            rs485RfidService->stopScan();
-        }
-        rs485Manager->closePort();
         serialOpened = false;
+        rs485Scanning = false;
         serialStatusLabel->setText(QStringLiteral("串口异常断开"));
         serialStatusLabel->setStyleSheet("color: red; font-weight: bold;");
         serialOpenCloseBtn->setText(QStringLiteral("打开串口"));
@@ -4165,9 +4315,9 @@ void MainWindow::handleRs485Disconnect()
         if (isOtaRunning()) {
             int protocolMode = appConfig.load().protocolMode;
             if (protocolMode == 4) {
-                hlOtaService->abortUpgrade();
+                emit requestHlOtaAbortUpgrade();
             } else if (protocolMode == 2 || protocolMode == 3) {
-                bbFfOtaService->abortUpgrade();
+                emit requestBbFfOtaAbortUpgrade();
             }
         }
 
@@ -4178,8 +4328,6 @@ void MainWindow::handleRs485Disconnect()
 
 void MainWindow::syncHlConfigToService()
 {
-    if (rs485RfidService == nullptr) return;
-
     quint32 timeMs = 0xFFFFFFFF;
     if (hlScanTimeSpin != nullptr) {
         timeMs = static_cast<quint32>(hlScanTimeSpin->value());
@@ -4192,7 +4340,7 @@ void MainWindow::syncHlConfigToService()
     int clearAfter = (hlClearAfterReadCheck != nullptr && hlClearAfterReadCheck->isChecked()) ? 1 : 0;
     int decrypt = (hlDecryptEnableCheck != nullptr && hlDecryptEnableCheck->isChecked()) ? 1 : 0;
 
-    rs485RfidService->setHlConfig(timeMs, intervalMs, savedCount, clearAfter, decrypt);
+    emit requestRs485SetHlConfig(timeMs, intervalMs, savedCount, clearAfter, decrypt);
 }
 
 void MainWindow::updateRs485RfidPanel(const Rs485State &state)
@@ -4413,11 +4561,11 @@ QWidget *MainWindow::createBbRfidMonitorPanel(QWidget *parent)
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开，请先打开串口"));
             return;
         }
-        rs485RfidService->startScan(bbHostPollPeriodSpin->value(), bbQueryModeCombo->currentData().toInt());
+        emit requestRs485StartScan(bbHostPollPeriodSpin->value(), bbQueryModeCombo->currentData().toInt());
         updateControlsState();
     });
     connect(bbStopBtn, &QPushButton::clicked, this, [this]() {
-        rs485RfidService->stopScan();
+        emit requestRs485StopScan();
         updateControlsState();
     });
     connect(bbQueryOnceBtn, &QPushButton::clicked, this, [this]() {
@@ -4425,28 +4573,28 @@ QWidget *MainWindow::createBbRfidMonitorPanel(QWidget *parent)
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->triggerSingleQuery();
+        emit requestRs485TriggerSingleQuery();
     });
     connect(bbQueryInfoBtn, &QPushButton::clicked, this, [this]() {
         if (!serialOpened) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->queryDeviceInfo();
+        emit requestRs485QueryDeviceInfo();
     });
     connect(bbSetPowerBtn, &QPushButton::clicked, this, [this]() {
         if (!serialOpened) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->setPower(bbPowerSpin->value());
+        emit requestRs485SetPower(bbPowerSpin->value());
     });
     connect(bbQueryPowerBtn, &QPushButton::clicked, this, [this]() {
         if (!serialOpened) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->queryPower();
+        emit requestRs485QueryPower();
     });
 
     return panel;
@@ -4607,11 +4755,11 @@ QWidget *MainWindow::createFfRfidMonitorPanel(QWidget *parent)
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->startScan(ffHostPollPeriodSpin->value(), ffQueryModeCombo->currentData().toInt());
+        emit requestRs485StartScan(ffHostPollPeriodSpin->value(), ffQueryModeCombo->currentData().toInt());
         updateControlsState();
     });
     connect(ffStopBtn, &QPushButton::clicked, this, [this]() {
-        rs485RfidService->stopScan();
+        emit requestRs485StopScan();
         updateControlsState();
     });
     connect(ffQueryOnceBtn, &QPushButton::clicked, this, [this]() {
@@ -4619,56 +4767,56 @@ QWidget *MainWindow::createFfRfidMonitorPanel(QWidget *parent)
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->triggerSingleQuery();
+        emit requestRs485TriggerSingleQuery();
     });
     connect(ffRebootBtn, &QPushButton::clicked, this, [this]() {
         if (!serialOpened) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->ffReboot();
+        emit requestRs485FfReboot();
     });
     connect(ffQuerySwitchBtn, &QPushButton::clicked, this, [this]() {
         if (!serialOpened) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->ffQueryCardSwitch();
+        emit requestRs485FfQueryCardSwitch();
     });
     connect(ffQueryInfoBtn, &QPushButton::clicked, this, [this]() {
         if (!serialOpened) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->queryDeviceInfo();
+        emit requestRs485QueryDeviceInfo();
     });
     connect(ffSetPowerBtn, &QPushButton::clicked, this, [this]() {
         if (!serialOpened) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->setPower(ffPowerSpin->value());
+        emit requestRs485SetPower(ffPowerSpin->value());
     });
     connect(ffQueryPowerBtn, &QPushButton::clicked, this, [this]() {
         if (!serialOpened) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->queryPower();
+        emit requestRs485QueryPower();
     });
     connect(ffSetDemodBtn, &QPushButton::clicked, this, [this]() {
         if (!serialOpened) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->ffSetDemodulatorParams(ffMixerSpin->value(), ffIfAmpSpin->value(), ffThrdSpin->value());
+        emit requestRs485FfSetDemodulatorParams(ffMixerSpin->value(), ffIfAmpSpin->value(), ffThrdSpin->value());
     });
     connect(ffQueryDemodBtn, &QPushButton::clicked, this, [this]() {
         if (!serialOpened) {
             QMessageBox::warning(this, QStringLiteral("警告"), QStringLiteral("串口未打开"));
             return;
         }
-        rs485RfidService->ffQueryDemodulatorParams();
+        emit requestRs485FfQueryDemodulatorParams();
     });
 
     return panel;
@@ -4888,26 +5036,26 @@ QWidget *MainWindow::createHlRfidMonitorPanel(QWidget *parent)
     // Bind event connections
     connect(hlStartBtn, &QPushButton::clicked, this, [this]() {
         syncHlConfigToService();
-        rs485RfidService->startScan(hlHostPollPeriodSpin->value(), hlQueryModeCombo->currentData().toInt());
+        emit requestRs485StartScan(hlHostPollPeriodSpin->value(), hlQueryModeCombo->currentData().toInt());
         updateControlsState();
     });
     connect(hlStopBtn, &QPushButton::clicked, this, [this]() {
-        rs485RfidService->stopScan();
+        emit requestRs485StopScan();
         updateControlsState();
     });
     connect(hlQueryOnceBtn, &QPushButton::clicked, this, [this]() {
-        rs485RfidService->triggerSingleQuery();
+        emit requestRs485TriggerSingleQuery();
     });
     connect(hlQueryInfoBtn, &QPushButton::clicked, this, [this]() {
-        rs485RfidService->queryDeviceInfo();
+        emit requestRs485QueryDeviceInfo();
     });
     connect(hlRebootBtn, &QPushButton::clicked, this, [this]() {
         if (QMessageBox::question(this, QStringLiteral("重启从机"), QStringLiteral("确认重启哈啰RFID读卡器吗？")) == QMessageBox::Yes) {
-            rs485RfidService->hlRebootDevice();
+            emit requestRs485HlRebootDevice();
         }
     });
     connect(hlSetControlBtn, &QPushButton::clicked, this, [this]() {
-        int startStop = rs485RfidService->isScanning() ? 1 : 0;
+        int startStop = rs485Scanning ? 1 : 0;
         quint32 timeMs = static_cast<quint32>(hlScanTimeSpin->value());
         if (hlScanTimeSpin->value() == 2147483647) {
             timeMs = 0xFFFFFFFF; // translate INT_MAX to infinite value
@@ -4917,7 +5065,7 @@ QWidget *MainWindow::createHlRfidMonitorPanel(QWidget *parent)
         int clearAfter = hlClearAfterReadCheck->isChecked() ? 1 : 0;
         int decrypt = hlDecryptEnableCheck->isChecked() ? 1 : 0;
         
-        rs485RfidService->hlWriteScanControl(startStop, timeMs, intervalMs, savedCount, clearAfter, decrypt);
+        emit requestRs485HlWriteScanControl(startStop, timeMs, intervalMs, savedCount, clearAfter, decrypt);
     });
 
     return panel;
