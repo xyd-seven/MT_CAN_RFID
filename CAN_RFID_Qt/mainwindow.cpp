@@ -193,7 +193,6 @@ MainWindow::MainWindow(QWidget *parent) :
     serialDevicePanel = nullptr;
 
     connect(rs485Thread, &QThread::started, rs485Worker, &Rs485Worker::initialize);
-    connect(rs485Thread, &QThread::finished, rs485Worker, &QObject::deleteLater);
     connect(this, &MainWindow::requestRs485OpenPort, rs485Worker, &Rs485Worker::openPort);
     connect(this, &MainWindow::requestRs485ClosePort, rs485Worker, &Rs485Worker::closePort);
     connect(this, &MainWindow::requestRs485SetProtocolMode, rs485Worker, &Rs485Worker::setProtocolMode);
@@ -2767,6 +2766,7 @@ MainWindow::~MainWindow()
         rs485Thread->quit();
         rs485Thread->wait();
     }
+    delete rs485Worker;
     delete ui;
 }
 
