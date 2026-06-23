@@ -369,7 +369,7 @@ MainWindow::MainWindow(QWidget *parent) :
     ui->tableWidget->setSelectionBehavior(QAbstractItemView::SelectRows);
     ui->tableWidget->horizontalHeader()->setStretchLastSection(true);
     setupCanLogSaveButton();
-    canAutoSaveCheckBox = new QCheckBox(QStringLiteral("自动保存CAN"), ui->cleanListBtn->parentWidget());
+    canAutoSaveCheckBox = new QCheckBox(QStringLiteral("自动保存日志"), ui->cleanListBtn->parentWidget());
     connect(canAutoSaveCheckBox, &QCheckBox::toggled, this, [this](bool checked) {
         if (checked) {
             bool needPrompt = logDirectory.isEmpty() || !QDir(logDirectory).exists();
@@ -377,7 +377,7 @@ MainWindow::MainWindow(QWidget *parent) :
                 QMessageBox::StandardButton reply = QMessageBox::question(
                     this,
                     QStringLiteral("提示"),
-                    QStringLiteral("当前已设置CAN日志保存目录为：\n%1\n\n是否需要修改保存目录？").arg(logDirectory),
+                    QStringLiteral("当前已设置日志保存目录为：\n%1\n\n是否需要修改保存目录？").arg(logDirectory),
                     QMessageBox::Yes | QMessageBox::No,
                     QMessageBox::No
                 );
@@ -387,7 +387,7 @@ MainWindow::MainWindow(QWidget *parent) :
             }
 
             if (needPrompt) {
-                QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("选择CAN日志自动保存目录"), logDirectory);
+                QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("选择日志自动保存目录"), logDirectory);
                 if (dir.isEmpty()) {
                     canAutoSaveCheckBox->blockSignals(true);
                     canAutoSaveCheckBox->setChecked(false);
@@ -5629,6 +5629,11 @@ void MainWindow::updateRs485RfidPanel(const Rs485State &state)
 
 void MainWindow::addSerialFrameToList(bool isTx, const QByteArray &data, const QString &decodeText)
 {
+    const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 2;
+    const QString protocolId = protocolMode == 2 ? QStringLiteral("0xBB") :
+        (protocolMode == 3 ? QStringLiteral("0xFF") : QStringLiteral("0x0D"));
+    logService.logSerialFrame(isTx, data, protocolId, decodeText);
+
     if (!ui->checkBox_4->isChecked()) {
         return;
     }
@@ -5639,8 +5644,7 @@ void MainWindow::addSerialFrameToList(bool isTx, const QByteArray &data, const Q
     messageList << QDateTime::currentDateTime().time().toString("hh:mm:ss zzz");
     messageList << QStringLiteral("RS485");
     messageList << (isTx ? QStringLiteral("发送") : QStringLiteral("接收"));
-    const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 2;
-    messageList << (protocolMode == 2 ? QStringLiteral("0xBB") : (protocolMode == 3 ? QStringLiteral("0xFF") : QStringLiteral("0x0D")));
+    messageList << protocolId;
     messageList << QStringLiteral("数据帧");
     messageList << QStringLiteral("-");
     messageList << QString::number(data.size());

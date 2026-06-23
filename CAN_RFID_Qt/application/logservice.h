@@ -3,6 +3,7 @@
 
 #include <QDate>
 #include <QFile>
+#include <QByteArray>
 #include <QString>
 #include <QTextStream>
 #include "domain/canframe.h"
@@ -24,10 +25,15 @@ public:
     void setCanAutoSaveEnabled(bool enabled);
     void logRuntime(LogLevel level, const QString &message);
     void logCanFrame(const CanFrame &frame);
+    void logSerialFrame(bool isTx,
+                        const QByteArray &data,
+                        const QString &protocolId,
+                        const QString &decodeText);
 
 private:
     void ensureRuntimeLogOpen();
     void ensureCanLogOpen();
+    void ensureSerialLogOpen();
     QString levelText(LogLevel level) const;
     QString csvEscape(const QString &value) const;
 
@@ -35,10 +41,13 @@ private:
     bool canAutoSaveEnabled;
     QFile runtimeLogFile;
     QFile canLogFile;
+    QFile serialLogFile;
     QDate runtimeLogDate;
     QDate canLogDate;
+    QDate serialLogDate;
     int pendingRuntimeRows;
     int pendingCanRows;
+    int pendingSerialRows;
 };
 
 #endif // LOGSERVICE_H

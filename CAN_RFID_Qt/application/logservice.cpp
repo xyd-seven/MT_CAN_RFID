@@ -11,7 +11,8 @@ constexpr int FlushRowThreshold = 100;
 LogService::LogService() :
     canAutoSaveEnabled(false),
     pendingRuntimeRows(0),
-    pendingCanRows(0)
+    pendingCanRows(0),
+    pendingSerialRows(0)
 {
 }
 
@@ -24,6 +25,10 @@ LogService::~LogService()
     if (canLogFile.isOpen()) {
         canLogFile.flush();
         canLogFile.close();
+    }
+    if (serialLogFile.isOpen()) {
+        serialLogFile.flush();
+        serialLogFile.close();
     }
 }
 
@@ -38,10 +43,16 @@ void LogService::setLogDirectory(const QString &directoryPath)
             canLogFile.flush();
             canLogFile.close();
         }
+        if (serialLogFile.isOpen()) {
+            serialLogFile.flush();
+            serialLogFile.close();
+        }
         runtimeLogDate = QDate();
         canLogDate = QDate();
+        serialLogDate = QDate();
         pendingRuntimeRows = 0;
         pendingCanRows = 0;
+        pendingSerialRows = 0;
     }
     logDirectory = directoryPath;
     QDir().mkpath(logDirectory);
@@ -54,6 +65,11 @@ void LogService::setCanAutoSaveEnabled(bool enabled)
         canLogFile.flush();
         canLogFile.close();
         pendingCanRows = 0;
+    }
+    if (!canAutoSaveEnabled && serialLogFile.isOpen()) {
+        serialLogFile.flush();
+        serialLogFile.close();
+        pendingSerialRows = 0;
     }
 }
 
@@ -101,6 +117,38 @@ void LogService::logCanFrame(const CanFrame &frame)
     if (pendingCanRows >= FlushRowThreshold) {
         canLogFile.flush();
         pendingCanRows = 0;
+    }
+}
+
+void LogService::logSerialFrame(bool isTx,
+                                const QByteArray &data,
+                                const QString &protocolId,
+                                const QString &decodeText)
+{
+    if (!canAutoSaveEnabled) {
+        return;
+    }
+
+    ensureSerialLogOpen();
+    if (!serialLogFile.isOpen()) {
+        return;
+    }
+
+    QTextStream stream(&serialLogFile);
+    stream << csvEscape(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")) << ','
+           << csvEscape(QStringLiteral("RS485")) << ','
+           << csvEscape(isTx ? QStringLiteral("发送") : QStringLiteral("接收")) << ','
+           << csvEscape(protocolId) << ','
+           << csvEscape(QStringLiteral("数据帧")) << ','
+           << csvEscape(QStringLiteral("-")) << ','
+           << data.size() << ','
+           << csvEscape(QStringLiteral("-")) << ','
+           << csvEscape(QString::fromLatin1(data.toHex(' ').toUpper())) << ','
+           << csvEscape(decodeText) << '\n';
+    ++pendingSerialRows;
+    if (pendingSerialRows >= FlushRowThreshold) {
+        serialLogFile.flush();
+        pendingSerialRows = 0;
     }
 }
 
@@ -161,6 +209,36 @@ void LogService::ensureCanLogOpen()
     if (!existed) {
         QTextStream stream(&canLogFile);
         stream << "pc_time,channel,direction,id,frame_type,payload_type,dlc,protocol,data,zlg_timestamp_raw\n";
+    }
+}
+
+void LogService::ensureSerialLogOpen()
+{
+    if (logDirectory.isEmpty()) {
+        return;
+    }
+
+    const QDate today = QDate::currentDate();
+    if (serialLogFile.isOpen() && serialLogDate == today) {
+        return;
+    }
+    if (serialLogFile.isOpen()) {
+        serialLogFile.flush();
+        serialLogFile.close();
+    }
+    serialLogDate = today;
+    pendingSerialRows = 0;
+
+    const QString filePath = QDir(logDirectory).filePath(
+        QString("serial_%1.csv").arg(today.toString("yyyyMMdd")));
+    serialLogFile.setFileName(filePath);
+    const bool existed = QFile::exists(filePath);
+    if (!serialLogFile.open(QIODevice::Append | QIODevice::Text)) {
+        return;
+    }
+    if (!existed) {
+        QTextStream stream(&serialLogFile);
+        stream << "pc_time,channel,direction,id,frame_type,payload_type,dlc,protocol,data,protocol_decode\n";
     }
 }
 
