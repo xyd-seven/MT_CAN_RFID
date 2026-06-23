@@ -108,6 +108,7 @@ private:
     void prepareProductionSnInput();
     void processProductionScanText(const QString &text, bool showError);
     void sendProductionScanControl(bool enabled);
+    void abortRfidDiagnosticTransferSilently();
     void sendRfidFrame(UINT canId, const QByteArray &payload);
     void addCanFrameToList(const CanFrame &frame);
     void flushPendingLogRows();

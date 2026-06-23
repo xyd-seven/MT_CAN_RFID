@@ -8,6 +8,7 @@
 #include <QGridLayout>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QAbstractSpinBox>
 #include <QTabWidget>
 #include <QVBoxLayout>
 #include <QDir>
@@ -20,6 +21,9 @@
 #include <QRegularExpression>
 #include <QScrollBar>
 #include <QInputDialog>
+#include <QLineEdit>
+#include <QTextEdit>
+#include <QPlainTextEdit>
 
 namespace {
 const QStringList DeviceTypeNames = {
@@ -867,6 +871,7 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
     Q_UNUSED(watched)
 
+    QWidget *focusWidget = QApplication::focusWidget();
     if (event->type() != QEvent::KeyPress ||
         productionTestTab == nullptr ||
         rfidTabs == nullptr ||
@@ -874,7 +879,16 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
         productionTestService.isRunning() ||
         protocolModeCombo == nullptr ||
         protocolModeCombo->currentIndex() != 0 ||
-        QApplication::focusWidget() == productionSnEdit) {
+        focusWidget == productionSnEdit) {
+        return QMainWindow::eventFilter(watched, event);
+    }
+
+    QComboBox *focusComboBox = qobject_cast<QComboBox *>(focusWidget);
+    if (qobject_cast<QLineEdit *>(focusWidget) != nullptr ||
+        qobject_cast<QAbstractSpinBox *>(focusWidget) != nullptr ||
+        qobject_cast<QTextEdit *>(focusWidget) != nullptr ||
+        qobject_cast<QPlainTextEdit *>(focusWidget) != nullptr ||
+        (focusComboBox != nullptr && focusComboBox->isEditable())) {
         return QMainWindow::eventFilter(watched, event);
     }
 
@@ -934,8 +948,9 @@ void MainWindow::updateCanControlState(bool deviceOpened, bool canInitialized, b
     } else {
         if (productionTestService.isRunning()) {
             productionTestService.stop(QStringLiteral("CAN未启动"));
-            productionWritePending = false;
         }
+        abortRfidDiagnosticTransferSilently();
+        productionWritePending = false;
         testerPresentTimer->stop();
         rfidControlTimer->stop();
         rfidOnlineCheckTimer->stop();
@@ -3254,9 +3269,20 @@ void MainWindow::startProductionTestFromSn(const QString &sn)
 void MainWindow::stopProductionTest()
 {
     productionTestService.stop(QStringLiteral("用户停止"));
-    productionWritePending = false;
+    abortRfidDiagnosticTransferSilently();
     prepareProductionSnInput();
     updateControlsState();
+}
+
+void MainWindow::abortRfidDiagnosticTransferSilently()
+{
+    if (!rfidDiagnosticTransfer.isBusy()) {
+        return;
+    }
+
+    productionWritePending = true;
+    rfidDiagnosticTransfer.abort();
+    productionWritePending = false;
 }
 
 void MainWindow::clearProductionTestPanel()
@@ -3860,9 +3886,18 @@ void MainWindow::closeEvent(QCloseEvent *event)
 {
     const bool stressRunning = stressTestService.stats().running;
     const bool otaRunning = isOtaRunning();
+    const bool productionRunning = productionTestService.isRunning();
+    const bool diagnosticWriteRunning = rfidDiagnosticTransfer.isBusy();
 
-    if (stressRunning || otaRunning) {
-        QString taskName = otaRunning ? QStringLiteral("OTA固件升级") : QStringLiteral("压力测试");
+    if (stressRunning || otaRunning || productionRunning || diagnosticWriteRunning) {
+        QString taskName = QStringLiteral("诊断写入");
+        if (otaRunning) {
+            taskName = QStringLiteral("OTA固件升级");
+        } else if (stressRunning) {
+            taskName = QStringLiteral("压力测试");
+        } else if (productionRunning) {
+            taskName = QStringLiteral("产线检测");
+        }
         QMessageBox::StandardButton reply = QMessageBox::question(
             this,
             QStringLiteral("警告"),
@@ -3891,6 +3926,12 @@ void MainWindow::closeEvent(QCloseEvent *event)
     if (stressRunning) {
         rfidScanning = false;
         stressTestService.stop();
+    }
+    if (productionRunning) {
+        productionTestService.stop(QStringLiteral("程序关闭"));
+    }
+    if (diagnosticWriteRunning) {
+        abortRfidDiagnosticTransferSilently();
     }
 
     // 关闭 485
