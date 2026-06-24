@@ -1,4 +1,4 @@
-QT += core gui serialport
+QT += core gui serialport printsupport
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
@@ -8,6 +8,7 @@ CONFIG += c++11
 
 SOURCES += \
     main.cpp \
+    canlogwindow.cpp \
     mainwindow.cpp \
     canthread.cpp \
     rfidprotocol.cpp \
@@ -27,10 +28,14 @@ SOURCES += \
     application/rs485rfidservice.cpp \
     application/hlotaservice.cpp \
     application/bbffotaservice.cpp \
-    application/rs485worker.cpp
+    application/rs485worker.cpp \
+    application/testcaseservice.cpp \
+    application/testcasemodel.cpp \
+    application/testsession.cpp
 
 HEADERS += \
     mainwindow.h \
+    canlogwindow.h \
     canthread.h \
     rfidprotocol.h \
     domain/canframe.h \
@@ -51,6 +56,9 @@ HEADERS += \
     application/rs485rfidservice.h \
     application/hlotaservice.h \
     application/bbffotaservice.h \
+    application/testcaseservice.h \
+    application/testcasemodel.h \
+    application/testsession.h \
     application/rs485worker.h \
     third_party/zlgcan/zlgcan.h \
     third_party/zlgcan/config.h

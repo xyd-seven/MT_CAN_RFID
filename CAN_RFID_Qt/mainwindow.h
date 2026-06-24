@@ -21,6 +21,8 @@
 #include "application/rfiddiagnostictransfer.h"
 #include "application/rfidservice.h"
 #include "application/stresstestservice.h"
+#include "application/testcasemodel.h"
+#include "application/testcaseservice.h"
 #include "application/qingjucanmanager.h"
 #include "application/qingjurfidservice.h"
 #include "application/qingjuotaservice.h"
@@ -30,11 +32,15 @@
 #include <QComboBox>
 #include <QLineEdit>
 #include <QTextEdit>
+#include <QTableView>
 #include <QVector>
 
 namespace Ui {
 class MainWindow;
 }
+
+class QSplitter;
+class CanLogWindow;
 
 class MainWindow : public QMainWindow
 {
@@ -96,6 +102,7 @@ private:
     QWidget *createStressTestTab(QWidget *parent);
     QWidget *createOtaTab(QWidget *parent);
     QWidget *createProductionTestTab(QWidget *parent);
+    QWidget *createTestExecutionTab(QWidget *parent);
     void handleRfidFrame(const CanFrame &frame);
     void updateRfidPanel(const RfidState &state);
     void updateStressTestPanel(const StressTestStats &stats);
@@ -124,6 +131,30 @@ private:
     void setupCompactMainLayout();
     void updateCanControlState(bool deviceOpened, bool canInitialized, bool canStarted);
     void updateControlsState();
+    void updateTestExecutionControls();
+    void refreshTestCaseFilters();
+    void refreshTestCaseDetail();
+    void refreshTestCaseModel();
+    void startSelectedTestCase();
+    void saveSelectedTestCaseResult();
+    void exportTestCaseResults();
+    void exportTestCaseResultsExcel();
+    void exportTestReportMarkdown();
+    void exportTestReportPdf();
+    void judgeSelectedTestCase();
+    void safeRunAndJudgeSelectedTestCase();
+    void bindStressStatsToSelectedTestCase();
+    void createTestSession();
+    void openTestSessionDirectory();
+    void importTestCases();
+    void appendTestEvidenceFrame(const CanFrame &frame, const QString &decodedText);
+    void updateTestSessionStats();
+    QString protocolExpectationText(const TestCase &testCase) const;
+    QString judgeTestCaseEvidence(const TestCase &testCase, TestResultStatus *status) const;
+    QString testReportMarkdown() const;
+    QString testReportHtml() const;
+    QString moduleStatsText() const;
+    QString selectedCaseId() const;
     void updateRs485TopStatus();
     void updateManualSendPanelMode();
     bool isOtaRunning() const;
@@ -135,6 +166,11 @@ private:
     void exportCanLogSnapshot();
     void loadAppConfig();
     void saveAppConfig();
+    void restoreLayoutConfig(const AppConfigData &config);
+    void applyCanLogCompact(bool compact);
+    void applyLayoutPreset(int preset);
+    void openCanLogWindow();
+    void syncCanLogWindowRows(const QVector<QStringList> &rows);
 
     Ui::MainWindow *ui;
     CANThread *canthread;
@@ -153,6 +189,8 @@ private:
     RfidService rfidService;
     StressTestService stressTestService;
     ProductionTestService productionTestService;
+    TestCaseService testCaseService;
+    TestCaseModel *testCaseModel;
     AppConfig appConfig;
     LogService logService;
     int maxLogRows;
@@ -181,6 +219,13 @@ private:
     QSpinBox *stressTargetSamplesSpin;
     QCheckBox *canAutoSaveCheckBox;
     QPushButton *saveCanLogButton;
+    QPushButton *compactCanLogButton;
+    QPushButton *popCanLogButton;
+    QComboBox *layoutPresetCombo;
+    QSplitter *mainVerticalSplitter;
+    QSplitter *testCaseSplitter;
+    CanLogWindow *canLogWindow;
+    bool canLogCompact;
     QPushButton *oneClickStartButton;
     QLabel *canDeviceStatusValue;
     QLabel *topCanStatusValue;
@@ -228,6 +273,42 @@ private:
     QWidget *mtStressPanel;
     QWidget *qjStressPanel;
     QWidget *productionTestTab;
+    QWidget *testExecutionTab;
+    QLineEdit *testProjectEdit;
+    QLineEdit *testSoftwareVersionEdit;
+    QLineEdit *testFirmwareVersionEdit;
+    QLineEdit *testDeviceSnEdit;
+    QLineEdit *testTesterEdit;
+    QComboBox *testEnvironmentCombo;
+    QTextEdit *testSessionRemarkEdit;
+    QLabel *testSessionDirectoryValue;
+    QComboBox *testModuleFilterCombo;
+    QComboBox *testPriorityFilterCombo;
+    QComboBox *testResultFilterCombo;
+    QLineEdit *testSearchEdit;
+    QLabel *testStatsValue;
+    QTableView *testCaseTableView;
+    QLabel *testCaseTitleValue;
+    QTextEdit *testCaseDetailText;
+    QTextEdit *testExpectationText;
+    QComboBox *testResultCombo;
+    QTextEdit *testActualResultEdit;
+    QLineEdit *testDefectIdEdit;
+    QTextEdit *testCaseRemarkEdit;
+    QTextEdit *testEvidenceLogText;
+    QTextEdit *testModuleStatsText;
+    QPushButton *testNewSessionBtn;
+    QPushButton *testStartCaseBtn;
+    QPushButton *testJudgeCaseBtn;
+    QPushButton *testSafeRunJudgeBtn;
+    QPushButton *testBindStressBtn;
+    QPushButton *testSaveResultBtn;
+    QPushButton *testExportResultBtn;
+    QPushButton *testExportExcelBtn;
+    QPushButton *testExportMarkdownBtn;
+    QPushButton *testExportPdfBtn;
+    QPushButton *testOpenSessionDirBtn;
+    QCheckBox *autoCompactLogOnTestExecutionCheck;
     QLineEdit *productionSnEdit;
     QLabel *productionResultBanner;
     QLabel *productionStateValue;

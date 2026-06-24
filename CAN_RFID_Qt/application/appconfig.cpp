@@ -45,6 +45,14 @@ AppConfigData AppConfig::load() const
     config.hlSavedTagCount = settings.value("serial/hlSavedTagCount", config.hlSavedTagCount).toInt();
     config.hlClearAfterRead = settings.value("serial/hlClearAfterRead", config.hlClearAfterRead).toBool();
     config.hlDecryptEnable = settings.value("serial/hlDecryptEnable", config.hlDecryptEnable).toBool();
+    config.mainTopHeight = qBound(360, settings.value("layout/mainTopHeight", config.mainTopHeight).toInt(), 4000);
+    config.mainLogHeight = qBound(80, settings.value("layout/mainLogHeight", config.mainLogHeight).toInt(), 2000);
+    config.canLogCompact = settings.value("layout/canLogCompact", config.canLogCompact).toBool();
+    config.testCaseListWidth = qBound(260, settings.value("layout/testCaseListWidth", config.testCaseListWidth).toInt(), 4000);
+    config.testCaseDetailWidth = qBound(360, settings.value("layout/testCaseDetailWidth", config.testCaseDetailWidth).toInt(), 4000);
+    config.layoutPreset = qBound(0, settings.value("layout/preset", config.layoutPreset).toInt(), 3);
+    config.testSessionCollapsed = settings.value("layout/testSessionCollapsed", config.testSessionCollapsed).toBool();
+    config.autoCompactLogOnTestExecution = settings.value("layout/autoCompactLogOnTestExecution", config.autoCompactLogOnTestExecution).toBool();
 
     if (config.logDirectory.isEmpty()) {
         config.logDirectory = QDir(QCoreApplication::applicationDirPath()).filePath("logs");
@@ -85,6 +93,14 @@ void AppConfig::save(const AppConfigData &config) const
     settings.setValue("serial/hlSavedTagCount", config.hlSavedTagCount);
     settings.setValue("serial/hlClearAfterRead", config.hlClearAfterRead);
     settings.setValue("serial/hlDecryptEnable", config.hlDecryptEnable);
+    settings.setValue("layout/mainTopHeight", config.mainTopHeight);
+    settings.setValue("layout/mainLogHeight", config.mainLogHeight);
+    settings.setValue("layout/canLogCompact", config.canLogCompact);
+    settings.setValue("layout/testCaseListWidth", config.testCaseListWidth);
+    settings.setValue("layout/testCaseDetailWidth", config.testCaseDetailWidth);
+    settings.setValue("layout/preset", config.layoutPreset);
+    settings.setValue("layout/testSessionCollapsed", config.testSessionCollapsed);
+    settings.setValue("layout/autoCompactLogOnTestExecution", config.autoCompactLogOnTestExecution);
     settings.sync();
 }
 

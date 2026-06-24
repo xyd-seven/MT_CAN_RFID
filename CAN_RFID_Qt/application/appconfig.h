@@ -35,6 +35,14 @@ struct AppConfigData
     int hlSavedTagCount = 1;
     bool hlClearAfterRead = false;
     bool hlDecryptEnable = true;
+    int mainTopHeight = 560;
+    int mainLogHeight = 260;
+    bool canLogCompact = false;
+    int testCaseListWidth = 520;
+    int testCaseDetailWidth = 720;
+    int layoutPreset = 1; // 0: compact, 1: standard, 2: large, 3: custom
+    bool testSessionCollapsed = false;
+    bool autoCompactLogOnTestExecution = false;
 };
 
 class AppConfig

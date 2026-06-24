@@ -3,5 +3,6 @@
         <file>images/MT_RFID.svg</file>
         <file>images/MT_RFID.ico</file>
         <file>images/MT_RFID.png</file>
+        <file>resources/testcases/meituan_rfid_can_testcases.json</file>
     </qresource>
 </RCC>
