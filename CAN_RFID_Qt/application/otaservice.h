@@ -8,6 +8,7 @@
 #include <QString>
 #include <QThread>
 #include <QWaitCondition>
+#include <QQueue>
 #include <atomic>
 #include "domain/canframe.h"
 #include "domain/isotptransport.h"
@@ -46,9 +47,11 @@ private:
     bool waitForFlowControl(int timeoutMs, IsoTpFlowControl &fc);
     bool waitForResponse(quint8 expectedSid, int timeoutMs, QByteArray &payload);
     bool waitForFrame(quint32 expectedId, quint8 firstByteMask, quint8 expectedFirstByte, int timeoutMs, CanFrame &matchedFrame);
+    bool waitForFlowControlWithWait(int timeoutMs, IsoTpFlowControl &fc);
     void updateStatus(int stateVal, const QString &msg, int progress = -1);
     bool sendSingleFrame(quint8 sid, const QByteArray &params = QByteArray());
     bool sendMultiFrame(const QByteArray &payload, int timeoutMs);
+    void clearPendingFramesLocked();
 
     QString firmwarePath;
     IsoTpConfig config;
@@ -58,8 +61,7 @@ private:
     quint8 protocolVersion;
     QMutex mutex;
     QWaitCondition waitCondition;
-    CanFrame responseFrame;
-    bool hasResponse;
+    QQueue<CanFrame> m_pendingFrames;
     std::atomic_bool abortRequested;
     bool queryOnlyMode;
     QString lastError;

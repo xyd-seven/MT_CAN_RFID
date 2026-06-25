@@ -36,6 +36,8 @@ const int DeviceTypeIndexes[] = {42, 3, 42, 3, 42, 3, 41, 4, 41, 4, 200, 201};
 constexpr int MaxManualPayloadBytes = 64;
 constexpr int LogFlushIntervalMs = 100;
 constexpr int LogPruneBatchRows = 200;
+constexpr int MeituanOnlineTimeoutMs = 3000;
+constexpr int QingjuOnlineTimeoutMs = 1500;
 
 QString normalizeHexText(QString text)
 {
@@ -452,7 +454,7 @@ MainWindow::MainWindow(QWidget *parent) :
             updateQingjuOnlineStatus(true);
             return;
         }
-        if (lastRfidFrameTime.isValid() && lastRfidFrameTime.msecsTo(QDateTime::currentDateTime()) < 1500) {
+        if (lastRfidFrameTime.isValid() && lastRfidFrameTime.msecsTo(QDateTime::currentDateTime()) < MeituanOnlineTimeoutMs) {
             rfidOnlineStatusValue->setText(QStringLiteral("在线"));
             rfidOnlineStatusValue->setStyleSheet("color: green; font-weight: bold;");
             updateMeituanTopStatus();
@@ -1860,12 +1862,14 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
         return true;
     };
 
-    connect(rfidStartScanBtn, &QPushButton::clicked, this, [this]() {
+    connect(rfidStartScanBtn, &QPushButton::clicked, this, [this, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
         rfidScanning = true;
         updateMeituanTopStatus();
         sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
     });
-    connect(rfidStopScanBtn, &QPushButton::clicked, this, [this]() {
+    connect(rfidStopScanBtn, &QPushButton::clicked, this, [this, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
         rfidScanning = false;
         updateMeituanTopStatus();
         sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
@@ -1878,11 +1882,13 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
         }
         saveAppConfig();
     });
-    connect(rfidSetPeriodBtn, &QPushButton::clicked, this, [this]() {
+    connect(rfidSetPeriodBtn, &QPushButton::clicked, this, [this, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
         sendRfidFrame(RfidProtocol::RequestFrameId,
                       RfidProtocol::buildSetScanPeriodFrame(static_cast<quint8>(rfidScanPeriodSpin->value() / 10)));
     });
-    connect(rfidRestartBtn, &QPushButton::clicked, this, [this]() {
+    connect(rfidRestartBtn, &QPushButton::clicked, this, [this, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
     });
 
@@ -2934,7 +2940,7 @@ void MainWindow::updateMeituanTopStatus()
     }
 
     const QDateTime now = QDateTime::currentDateTime();
-    const bool online = lastRfidFrameTime.isValid() && lastRfidFrameTime.msecsTo(now) < 1500;
+    const bool online = lastRfidFrameTime.isValid() && lastRfidFrameTime.msecsTo(now) < MeituanOnlineTimeoutMs;
     const QString onlineText = online ? QStringLiteral("在线") : QStringLiteral("离线");
     const QString scanText = rfidScanning ? QStringLiteral("开") : QStringLiteral("停");
 
@@ -2978,8 +2984,8 @@ void MainWindow::updateQingjuOnlineStatus(bool clearOfflineData)
     }
 
     const QDateTime now = QDateTime::currentDateTime();
-    const bool npkOnline = lastQingjuNpkFrameTime.isValid() && lastQingjuNpkFrameTime.msecsTo(now) < 1500;
-    const bool rfrOnline = lastQingjuRfrFrameTime.isValid() && lastQingjuRfrFrameTime.msecsTo(now) < 1500;
+    const bool npkOnline = lastQingjuNpkFrameTime.isValid() && lastQingjuNpkFrameTime.msecsTo(now) < QingjuOnlineTimeoutMs;
+    const bool rfrOnline = lastQingjuRfrFrameTime.isValid() && lastQingjuRfrFrameTime.msecsTo(now) < QingjuOnlineTimeoutMs;
     const QString npkText = npkOnline ? QStringLiteral("在线") : QStringLiteral("离线");
     const QString rfrText = rfrOnline ? QStringLiteral("在线") : QStringLiteral("离线");
 
@@ -3586,12 +3592,12 @@ void MainWindow::exportCanLogSnapshot()
     flushPendingLogRows();
 
     const QString defaultFilePath = QDir(logDirectory).filePath(
-        QString("can_snapshot_%1.csv").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss")));
+        QString("can_snapshot_%1.txt").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss")));
     const QString filePath = QFileDialog::getSaveFileName(
         this,
         QStringLiteral("保存CAN日志"),
         defaultFilePath,
-        QStringLiteral("CSV文件 (*.csv)"));
+        QStringLiteral("文本文件 (*.txt);;CSV文件 (*.csv)"));
     if (filePath.isEmpty()) {
         return;
     }
@@ -3608,21 +3614,32 @@ void MainWindow::exportCanLogSnapshot()
         return QString("\"%1\"").arg(value);
     };
 
+    auto textField = [](QString value) {
+        value.replace('\r', ' ');
+        value.replace('\n', ' ');
+        value.replace('\t', ' ');
+        return value;
+    };
+
+    const bool isCsv = filePath.endsWith(QLatin1String(".csv"), Qt::CaseInsensitive);
+
     QTextStream stream(&file);
     QStringList headers;
     for (int column = 0; column < ui->tableWidget->columnCount(); ++column) {
         QTableWidgetItem *headerItem = ui->tableWidget->horizontalHeaderItem(column);
-        headers << csvEscape(headerItem == nullptr ? QString() : headerItem->text());
+        QString val = (headerItem == nullptr ? QString() : headerItem->text());
+        headers << (isCsv ? csvEscape(val) : textField(val));
     }
-    stream << headers.join(',') << '\n';
+    stream << headers.join(isCsv ? ',' : '\t') << '\n';
 
     for (int row = 0; row < ui->tableWidget->rowCount(); ++row) {
         QStringList rowValues;
         for (int column = 0; column < ui->tableWidget->columnCount(); ++column) {
             QTableWidgetItem *item = ui->tableWidget->item(row, column);
-            rowValues << csvEscape(item == nullptr ? QString() : item->text());
+            QString val = (item == nullptr ? QString() : item->text());
+            rowValues << (isCsv ? csvEscape(val) : textField(val));
         }
-        stream << rowValues.join(',') << '\n';
+        stream << rowValues.join(isCsv ? ',' : '\t') << '\n';
     }
 
     logService.logRuntime(LogLevel::Info, QString("CAN log snapshot exported: %1").arg(filePath));
@@ -3945,6 +3962,22 @@ void MainWindow::closeEvent(QCloseEvent *event)
     canthread->wait();
     canthread->closeDevice();
     QMainWindow::closeEvent(event);
+}
+
+void MainWindow::moveEvent(QMoveEvent *event)
+{
+    QMainWindow::moveEvent(event);
+    if (canStarted && (protocolModeCombo != nullptr && protocolModeCombo->currentIndex() == 0) && lastRfidFrameTime.isValid()) {
+        lastRfidFrameTime = QDateTime::currentDateTime();
+    }
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    if (canStarted && (protocolModeCombo != nullptr && protocolModeCombo->currentIndex() == 0) && lastRfidFrameTime.isValid()) {
+        lastRfidFrameTime = QDateTime::currentDateTime();
+    }
 }
 
 MainWindow::~MainWindow()

@@ -6,6 +6,8 @@
 #include "canthread.h"
 #include <QThread>
 #include <QCloseEvent>
+#include <QMoveEvent>
+#include <QResizeEvent>
 #include <QLabel>
 #include <QWidget>
 #include <QSpinBox>
@@ -90,6 +92,11 @@ private slots:
 
     void closeEvent(QCloseEvent *event);
     bool eventFilter(QObject *watched, QEvent *event);
+
+protected:
+    void moveEvent(QMoveEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+
 private:
     void setupRfidPanel();
     QWidget *createRfidMonitorTab(QWidget *parent);
