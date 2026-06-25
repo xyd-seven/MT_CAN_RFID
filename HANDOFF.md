@@ -18,6 +18,7 @@
 - [x] 全面修复了自查报告中的所有 14 项安全和稳定性漏洞，重新生成 Makefile 并完成 Release 构建测试。
 - [x] 已补齐美团 0x2E 写非易失存储区的 ISO-TP 多帧发送能力，支持生产写入大于 4 字节的 SN 等数据。
 - [x] 已优化实时日志表刷新与 RS485 BB 标签上报解析展示，降低高频轮询时“看起来卡顿/不刷新”的误判。
+- [x] 已新增美团 RFID CAN 软件测试执行功能，并完成自动/半自动/手工用例模式、自动判定、批量执行、复测清单、进度看板和报告摘要增强。
 - [ ] 等待进入实机进行美团/青桔 CAN 及 RS485 读卡器的整机联机验证。
 
 ## 4. 关键设计决策
@@ -29,12 +30,16 @@
 ## 5. 修改记录
 
 本轮修改文件：
-- [rs485manager.h](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/application/rs485manager.h)
-- [rs485manager.cpp](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/application/rs485manager.cpp)
-- [bbffotaservice.cpp](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/application/bbffotaservice.cpp)
-- [hlotaservice.h](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/application/hlotaservice.h)
-- [hlotaservice.cpp](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/application/hlotaservice.cpp)
-- [mainwindow.cpp](file:///C:/Users/Administrator/.gemini/antigravity/worktrees/MT_CAN/review-handoff-encoding-format/CAN_RFID_Qt/mainwindow.cpp)
+- `CAN_RFID_Qt/CAN.pro`
+- `CAN_RFID_Qt/mainwindow.h`
+- `CAN_RFID_Qt/mainwindow.cpp`
+- `CAN_RFID_Qt/application/testsession.h`
+- `CAN_RFID_Qt/application/testcaseservice.cpp`
+- `CAN_RFID_Qt/application/testcasemodel.cpp`
+- `CAN_RFID_Qt/application/testcasejudge.h`
+- `CAN_RFID_Qt/application/testcasejudge.cpp`
+- `CAN_RFID_Qt/application/testsummarybuilder.h`
+- `CAN_RFID_Qt/application/testsummarybuilder.cpp`
 
 ## 6. 已知问题
 
@@ -43,6 +48,7 @@
 
 ### P1
 - 暂未接入实际青桔/美团 CAN 终端及 RS485 RFID 读卡器硬件，所有的卡号轮询、参数配置、压测指标及各协议 OTA 升级流程均需实机物理连线验证。
+- 美团测试执行功能已完成编译验证，但自动发送 0x01/0x02/0x29 后的真实响应时序、证据采集窗口和自动判定准确性仍需接真实终端确认。
 
 ### P2
 - 仓库 `.gitignore` 忽略了绿色打包文件目录 `CAN_RFID_Release`，发布交付时需手动提取。
@@ -55,10 +61,11 @@
 
 ## 8. 测试状态
 
-- Release 编译构建：PASS (2026-06-22 最新构建生成的 `CAN_RFID_Qt\release\CAN_RFID.exe` 验证通过)
+- Release 编译构建：PASS (2026-06-25 最新构建生成的 `CAN_RFID_Qt\release\CAN_RFID.exe` 验证通过；文件时间 2026-06-24 23:21:18)
 - 串口掉线自动恢复与压测防死锁校验：PASS
 - 噪声防卡死与 QSerialPort 跨线程安全设计编译校验：PASS
 - 美团 0x2E ISO-TP 多帧写入：BUILD PASS，实机响应/流控验证 UNKNOWN
+- 美团测试执行功能自动/半自动用例流程：BUILD PASS，实机 CAN 收发与判定准确性 UNKNOWN
 - 实机 CAN 及 RS485 调试状态：UNKNOWN
 
 ## 9. 对下一位 Agent 的要求
@@ -150,3 +157,36 @@
 - 产线检测流程已完成软件侧编译验证，但仍需连接真实美团 RFID 模块验证 0x2E 写 SN、0x207 广播控制、100 次读卡采样的完整闭环。
 - 小分辨率与高 DPI 适配已降低遮挡风险，但建议在目标工控屏分辨率与 Windows 125%/150% 缩放下做实机 UI 回归。
 - `CAN_RFID_Release` 分发目录受 `.gitignore` 管理，不会随代码提交，需要发布时手动从 `CAN_RFID_Qt\release\` 提取或同步。
+
+## 17. 最新交接补充（2026-06-25 - 美团测试执行功能优化）
+
+本轮根据 `docs/美团RFID_CAN通信_测试执行功能优化实施方案.md` 一次性实现测试执行 Tab 的便捷性增强，目标是减少测试人员手工记录、手动判断和重复复测工作量。
+
+- **用例模型扩展**：`TestCase` 新增 `executionMode`、`commandTemplate`、`judgeTemplate`、`manualPrompt`、`timeoutMs`、`retryCount`；`TestCaseResult` 新增 `failureCategory`、`judgeReason`、`keyFrames`、复测历史字段。旧 JSON 用例可继续加载，缺省字段由 `TestCaseService` 按用例内容推断。
+- **执行模式划分**：当前支持 `auto`、`semi`、`manual` 三类。0x01 扫描周期、0x02 重启等明确安全命令可自动执行；0x29 周期配置默认半自动/安全模板；0x2E 非易失写入属于持久化操作，不进入无确认批量自动发送，只提供半自动提示、证据记录和判定辅助。
+- **新增判定服务**：新增 `TestCaseJudge`，集中处理 0x01、0x02、0x29、0x2E、0x2C0~0x2C6 广播等证据规则，输出执行状态、判定原因、失败归类和关键帧。`MainWindow` 不再直接维护大段硬编码判定逻辑。
+- **新增摘要服务**：新增 `TestSummaryBuilder`，生成进度看板、失败/阻塞复测清单、报告结论和失败归类汇总。
+- **测试执行 UI 增强**：测试执行 Tab 增加“执行模板”“执行筛选项”“复测失败/阻塞”“自动执行本用例”等入口；底部新增“进度看板”“复测清单”页；用例表新增“模式”列，便于快速识别 auto/semi/manual。
+- **批量执行策略**：批量执行会先按当前筛选结果生成用例快照。`auto` 用例按安全命令执行并等待证据窗口后自动判定；`semi/manual` 用例不会冒险发送命令，会保存为阻塞并写入人工提示。默认勾选“失败/阻塞时暂停批量”。
+- **报告与导出增强**：CSV、Excel HTML、`session.json`、Markdown/PDF 报告均补充判定原因、失败归类、关键帧、复测次数等字段；报告新增自动测试结论。
+- **构建状态**：已执行 `qmake CAN.pro -spec win32-g++ CONFIG+=release` 和 `mingw32-make -j4`，Release 构建 PASS。最终输出为 `CAN_RFID_Qt\release\CAN_RFID.exe`。
+
+本轮涉及文件：
+
+- `CAN_RFID_Qt/CAN.pro`
+- `CAN_RFID_Qt/mainwindow.h`
+- `CAN_RFID_Qt/mainwindow.cpp`
+- `CAN_RFID_Qt/application/testsession.h`
+- `CAN_RFID_Qt/application/testcaseservice.cpp`
+- `CAN_RFID_Qt/application/testcasemodel.cpp`
+- `CAN_RFID_Qt/application/testcasejudge.h`
+- `CAN_RFID_Qt/application/testcasejudge.cpp`
+- `CAN_RFID_Qt/application/testsummarybuilder.h`
+- `CAN_RFID_Qt/application/testsummarybuilder.cpp`
+
+剩余风险与建议：
+
+- 当前仅完成编译与静态自测，未连接真实美团 RFID CAN 终端；0x01、0x02、0x29 的真实响应时序和 `timeoutMs=1000` 是否足够需实机确认。
+- 自动判定依赖证据日志文本，若后续协议解析列格式调整，需要同步回归 `TestCaseJudge` 关键字匹配。
+- 0x2E 写 NVM 已刻意保守处理，不允许批量无确认自动写入；如后续确需产线自动写入，应继续复用产线检测 Tab 的 SN 校验和二次安全策略，而不是直接放开测试执行批量命令。
+- 当前工作区仍存在若干历史生成的未跟踪文档和 Excel 临时文件，其中 `docs/~$美团RFID_CAN通信_软件测试用例.xlsx` 是 Excel 锁文件，提交前应确认是否需要删除或忽略。

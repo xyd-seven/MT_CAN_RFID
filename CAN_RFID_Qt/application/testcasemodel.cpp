@@ -8,9 +8,10 @@ constexpr int ColumnId = 0;
 constexpr int ColumnModule = 1;
 constexpr int ColumnPriority = 2;
 constexpr int ColumnType = 3;
-constexpr int ColumnStatus = 4;
-constexpr int ColumnUpdated = 5;
-constexpr int ColumnCount = 6;
+constexpr int ColumnMode = 4;
+constexpr int ColumnStatus = 5;
+constexpr int ColumnUpdated = 6;
+constexpr int ColumnCount = 7;
 }
 
 TestCaseModel::TestCaseModel(QObject *parent)
@@ -47,6 +48,8 @@ QVariant TestCaseModel::data(const QModelIndex &index, int role) const
             return testCase.priority;
         case ColumnType:
             return testCase.type;
+        case ColumnMode:
+            return testCase.executionMode.isEmpty() ? QStringLiteral("manual") : testCase.executionMode;
         case ColumnStatus:
             return testResultStatusText(result.status);
         case ColumnUpdated:
@@ -61,7 +64,8 @@ QVariant TestCaseModel::data(const QModelIndex &index, int role) const
     }
 
     if (role == Qt::TextAlignmentRole) {
-        if (index.column() == ColumnPriority || index.column() == ColumnStatus || index.column() == ColumnUpdated) {
+        if (index.column() == ColumnPriority || index.column() == ColumnMode ||
+            index.column() == ColumnStatus || index.column() == ColumnUpdated) {
             return Qt::AlignCenter;
         }
         return Qt::AlignVCenter;
@@ -85,6 +89,8 @@ QVariant TestCaseModel::headerData(int section, Qt::Orientation orientation, int
         return QStringLiteral("优先级");
     case ColumnType:
         return QStringLiteral("类型");
+    case ColumnMode:
+        return QStringLiteral("模式");
     case ColumnStatus:
         return QStringLiteral("结果");
     case ColumnUpdated:

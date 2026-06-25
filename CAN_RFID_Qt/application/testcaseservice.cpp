@@ -13,6 +13,88 @@ QString jsonString(const QJsonObject &object, const char *key)
 {
     return object.value(QString::fromLatin1(key)).toString().trimmed();
 }
+
+int jsonInt(const QJsonObject &object, const char *key, int defaultValue)
+{
+    const QJsonValue value = object.value(QString::fromLatin1(key));
+    return value.isDouble() ? value.toInt(defaultValue) : defaultValue;
+}
+
+void inferAutomationFields(TestCase *testCase)
+{
+    if (testCase == nullptr) {
+        return;
+    }
+
+    const QString text = QStringLiteral("%1 %2 %3 %4 %5 %6")
+        .arg(testCase->id,
+             testCase->module,
+             testCase->basis,
+             testCase->testData,
+             testCase->steps,
+             testCase->expectedResult);
+    const bool negativeCase = text.contains(QStringLiteral("异常")) ||
+                              text.contains(QStringLiteral("否定")) ||
+                              text.contains(QStringLiteral("非法")) ||
+                              text.contains(QStringLiteral("错误"));
+
+    if (testCase->executionMode.isEmpty()) {
+        testCase->executionMode = QStringLiteral("manual");
+    }
+
+    if (text.contains(QStringLiteral("SID=0x01")) || text.contains(QStringLiteral("扫描周期"))) {
+        if (testCase->commandTemplate.isEmpty() && !negativeCase) {
+            testCase->commandTemplate = QStringLiteral("mt.sid_0x01_set_scan_period");
+        }
+        if (testCase->judgeTemplate.isEmpty()) {
+            testCase->judgeTemplate = QStringLiteral("mt.positive_response");
+        }
+        if (testCase->executionMode == QStringLiteral("manual") && !negativeCase) {
+            testCase->executionMode = QStringLiteral("auto");
+        }
+    } else if (text.contains(QStringLiteral("SID=0x02")) || text.contains(QStringLiteral("重启"))) {
+        if (testCase->commandTemplate.isEmpty() && !negativeCase) {
+            testCase->commandTemplate = QStringLiteral("mt.sid_0x02_reboot");
+        }
+        if (testCase->judgeTemplate.isEmpty()) {
+            testCase->judgeTemplate = QStringLiteral("mt.positive_response");
+        }
+        if (testCase->executionMode == QStringLiteral("manual") && !negativeCase) {
+            testCase->executionMode = QStringLiteral("auto");
+        }
+    } else if (text.contains(QStringLiteral("0x29"))) {
+        if (testCase->commandTemplate.isEmpty() && !negativeCase) {
+            testCase->commandTemplate = QStringLiteral("mt.sid_0x29_period_config");
+        }
+        if (testCase->judgeTemplate.isEmpty()) {
+            testCase->judgeTemplate = QStringLiteral("mt.positive_response");
+        }
+        if (testCase->executionMode == QStringLiteral("manual") && !negativeCase) {
+            testCase->executionMode = QStringLiteral("semi");
+        }
+    } else if (text.contains(QStringLiteral("0x2E")) || text.contains(QStringLiteral("SN"))) {
+        if (testCase->judgeTemplate.isEmpty()) {
+            testCase->judgeTemplate = QStringLiteral("mt.write_nvm_response");
+        }
+        if (testCase->executionMode == QStringLiteral("manual")) {
+            testCase->executionMode = QStringLiteral("semi");
+        }
+        if (testCase->manualPrompt.isEmpty()) {
+            testCase->manualPrompt = QStringLiteral("0x2E 属于非易失写入，批量执行前需人工确认写入对象和数据。");
+        }
+    } else if (text.contains(QStringLiteral("0x2C0")) || text.contains(QStringLiteral("0x2C6")) ||
+               text.contains(QStringLiteral("广播"))) {
+        if (testCase->judgeTemplate.isEmpty()) {
+            testCase->judgeTemplate = QStringLiteral("mt.broadcast_present");
+        }
+        if (testCase->executionMode == QStringLiteral("manual")) {
+            testCase->executionMode = QStringLiteral("semi");
+        }
+    }
+    if (negativeCase && testCase->executionMode == QStringLiteral("auto")) {
+        testCase->executionMode = QStringLiteral("semi");
+    }
+}
 }
 
 bool TestCaseService::loadCasesFromJsonFile(const QString &filePath, QString *error)
@@ -55,6 +137,13 @@ bool TestCaseService::loadCasesFromJsonData(const QByteArray &jsonData, QString 
         testCase.testData = jsonString(object, "testData");
         testCase.steps = jsonString(object, "steps");
         testCase.expectedResult = jsonString(object, "expectedResult");
+        testCase.executionMode = jsonString(object, "executionMode");
+        testCase.commandTemplate = jsonString(object, "commandTemplate");
+        testCase.judgeTemplate = jsonString(object, "judgeTemplate");
+        testCase.manualPrompt = jsonString(object, "manualPrompt");
+        testCase.timeoutMs = jsonInt(object, "timeoutMs", 1000);
+        testCase.retryCount = jsonInt(object, "retryCount", 0);
+        inferAutomationFields(&testCase);
         if (!testCase.id.isEmpty()) {
             loadedCases.append(testCase);
         }
@@ -122,6 +211,13 @@ bool TestCaseService::createSession(const TestSession &session, QString *error)
         it->startedAt = QDateTime();
         it->finishedAt = QDateTime();
         it->evidenceLogPath.clear();
+        it->failureCategory.clear();
+        it->judgeReason.clear();
+        it->keyFrames.clear();
+        it->previousStatus.clear();
+        it->previousFailureReason.clear();
+        it->retestCount = 0;
+        it->lastRetestAt = QDateTime();
     }
     return saveSessionJson(error);
 }
@@ -199,12 +295,25 @@ bool TestCaseService::saveResult(const TestCaseResult &result, QString *error)
     }
 
     TestCaseResult saved = result;
+    const TestCaseResult previous = m_results.value(saved.caseId);
     if (!saved.startedAt.isValid()) {
-        saved.startedAt = m_results.value(saved.caseId).startedAt;
+        saved.startedAt = previous.startedAt;
     }
     saved.finishedAt = QDateTime::currentDateTime();
     if (saved.evidenceLogPath.isEmpty()) {
-        saved.evidenceLogPath = m_results.value(saved.caseId).evidenceLogPath;
+        saved.evidenceLogPath = previous.evidenceLogPath;
+    }
+    if ((previous.status == TestResultStatus::Failed || previous.status == TestResultStatus::Blocked) &&
+        previous.status != saved.status) {
+        saved.previousStatus = testResultStatusText(previous.status);
+        saved.previousFailureReason = previous.judgeReason.isEmpty() ? previous.actualResult : previous.judgeReason;
+        saved.retestCount = previous.retestCount + 1;
+        saved.lastRetestAt = QDateTime::currentDateTime();
+    } else {
+        saved.previousStatus = previous.previousStatus;
+        saved.previousFailureReason = previous.previousFailureReason;
+        saved.retestCount = previous.retestCount;
+        saved.lastRetestAt = previous.lastRetestAt;
     }
     m_results.insert(saved.caseId, saved);
     return saveSessionJson(error);
@@ -256,7 +365,7 @@ bool TestCaseService::exportResultsCsv(const QString &filePath, QString *error) 
     QTextStream stream(&file);
     stream.setCodec("UTF-8");
     stream << QString::fromUtf8("\xEF\xBB\xBF");
-    stream << "用例ID,模块,优先级,测试类型,执行结果,实际结果,缺陷编号,备注,证据日志路径,开始时间,结束时间\n";
+    stream << "用例ID,模块,优先级,测试类型,执行模式,执行结果,实际结果,判定原因,失败归类,关键帧,缺陷编号,备注,证据日志路径,开始时间,结束时间,复测次数\n";
 
     for (const TestCase &testCase : m_cases) {
         const TestCaseResult result = m_results.value(testCase.id);
@@ -264,13 +373,18 @@ bool TestCaseService::exportResultsCsv(const QString &filePath, QString *error) 
                << csvEscape(testCase.module) << ','
                << csvEscape(testCase.priority) << ','
                << csvEscape(testCase.type) << ','
+               << csvEscape(testCase.executionMode) << ','
                << csvEscape(testResultStatusText(result.status)) << ','
                << csvEscape(result.actualResult) << ','
+               << csvEscape(result.judgeReason) << ','
+               << csvEscape(result.failureCategory) << ','
+               << csvEscape(result.keyFrames.join(QStringLiteral("\n"))) << ','
                << csvEscape(result.defectId) << ','
                << csvEscape(result.remark) << ','
                << csvEscape(result.evidenceLogPath) << ','
                << csvEscape(result.startedAt.isValid() ? result.startedAt.toString("yyyy-MM-dd hh:mm:ss") : QString()) << ','
-               << csvEscape(result.finishedAt.isValid() ? result.finishedAt.toString("yyyy-MM-dd hh:mm:ss") : QString()) << '\n';
+               << csvEscape(result.finishedAt.isValid() ? result.finishedAt.toString("yyyy-MM-dd hh:mm:ss") : QString()) << ','
+               << result.retestCount << '\n';
     }
     return true;
 }
@@ -308,8 +422,8 @@ bool TestCaseService::exportResultsExcelHtml(const QString &filePath, QString *e
     }
     stream << "<table><tr>"
               "<th>用例ID</th><th>模块</th><th>优先级</th><th>测试类型</th>"
-              "<th>执行结果</th><th>实际结果</th><th>缺陷编号</th><th>备注</th>"
-              "<th>证据日志路径</th><th>开始时间</th><th>结束时间</th>"
+              "<th>执行模式</th><th>执行结果</th><th>实际结果</th><th>判定原因</th><th>失败归类</th><th>关键帧</th>"
+              "<th>缺陷编号</th><th>备注</th><th>证据日志路径</th><th>开始时间</th><th>结束时间</th><th>复测次数</th>"
               "</tr>";
 
     for (const TestCase &testCase : m_cases) {
@@ -327,13 +441,18 @@ bool TestCaseService::exportResultsExcelHtml(const QString &filePath, QString *e
                << "<td>" << testCase.module.toHtmlEscaped() << "</td>"
                << "<td>" << testCase.priority.toHtmlEscaped() << "</td>"
                << "<td>" << testCase.type.toHtmlEscaped() << "</td>"
+               << "<td>" << testCase.executionMode.toHtmlEscaped() << "</td>"
                << "<td>" << testResultStatusText(result.status).toHtmlEscaped() << "</td>"
                << "<td>" << result.actualResult.toHtmlEscaped().replace("\n", "<br>") << "</td>"
+               << "<td>" << result.judgeReason.toHtmlEscaped().replace("\n", "<br>") << "</td>"
+               << "<td>" << result.failureCategory.toHtmlEscaped() << "</td>"
+               << "<td>" << result.keyFrames.join(QStringLiteral("\n")).toHtmlEscaped().replace("\n", "<br>") << "</td>"
                << "<td>" << result.defectId.toHtmlEscaped() << "</td>"
                << "<td>" << result.remark.toHtmlEscaped().replace("\n", "<br>") << "</td>"
                << "<td>" << result.evidenceLogPath.toHtmlEscaped() << "</td>"
                << "<td>" << (result.startedAt.isValid() ? result.startedAt.toString("yyyy-MM-dd hh:mm:ss") : QString()).toHtmlEscaped() << "</td>"
                << "<td>" << (result.finishedAt.isValid() ? result.finishedAt.toString("yyyy-MM-dd hh:mm:ss") : QString()).toHtmlEscaped() << "</td>"
+               << "<td>" << result.retestCount << "</td>"
                << "</tr>";
     }
     stream << "</table></body></html>";
@@ -382,6 +501,13 @@ bool TestCaseService::saveSessionJson(QString *error) const
         object.insert(QStringLiteral("startedAt"), result.startedAt.toString(Qt::ISODate));
         object.insert(QStringLiteral("finishedAt"), result.finishedAt.toString(Qt::ISODate));
         object.insert(QStringLiteral("evidenceLogPath"), result.evidenceLogPath);
+        object.insert(QStringLiteral("failureCategory"), result.failureCategory);
+        object.insert(QStringLiteral("judgeReason"), result.judgeReason);
+        object.insert(QStringLiteral("keyFrames"), QJsonArray::fromStringList(result.keyFrames));
+        object.insert(QStringLiteral("previousStatus"), result.previousStatus);
+        object.insert(QStringLiteral("previousFailureReason"), result.previousFailureReason);
+        object.insert(QStringLiteral("retestCount"), result.retestCount);
+        object.insert(QStringLiteral("lastRetestAt"), result.lastRetestAt.toString(Qt::ISODate));
         resultArray.append(object);
     }
     root.insert(QStringLiteral("results"), resultArray);

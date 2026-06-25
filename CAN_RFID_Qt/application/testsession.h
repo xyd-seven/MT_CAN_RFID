@@ -3,6 +3,7 @@
 
 #include <QDateTime>
 #include <QString>
+#include <QStringList>
 
 enum class TestResultStatus
 {
@@ -24,6 +25,12 @@ struct TestCase
     QString testData;
     QString steps;
     QString expectedResult;
+    QString executionMode;
+    QString commandTemplate;
+    QString judgeTemplate;
+    QString manualPrompt;
+    int timeoutMs = 1000;
+    int retryCount = 0;
 };
 
 struct TestCaseResult
@@ -36,6 +43,13 @@ struct TestCaseResult
     QDateTime startedAt;
     QDateTime finishedAt;
     QString evidenceLogPath;
+    QString failureCategory;
+    QString judgeReason;
+    QStringList keyFrames;
+    QString previousStatus;
+    QString previousFailureReason;
+    int retestCount = 0;
+    QDateTime lastRetestAt;
 };
 
 struct TestSession

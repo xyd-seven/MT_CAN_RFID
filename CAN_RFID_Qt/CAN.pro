@@ -31,6 +31,8 @@ SOURCES += \
     application/rs485worker.cpp \
     application/testcaseservice.cpp \
     application/testcasemodel.cpp \
+    application/testcasejudge.cpp \
+    application/testsummarybuilder.cpp \
     application/testsession.cpp
 
 HEADERS += \
@@ -58,6 +60,8 @@ HEADERS += \
     application/bbffotaservice.h \
     application/testcaseservice.h \
     application/testcasemodel.h \
+    application/testcasejudge.h \
+    application/testsummarybuilder.h \
     application/testsession.h \
     application/rs485worker.h \
     third_party/zlgcan/zlgcan.h \

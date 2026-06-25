@@ -21,6 +21,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDesktopServices>
+#include <QEventLoop>
 #include <QKeyEvent>
 #include <QScreen>
 #include <QScrollArea>
@@ -177,10 +178,15 @@ MainWindow::MainWindow(QWidget *parent) :
     testCaseRemarkEdit(nullptr),
     testEvidenceLogText(nullptr),
     testModuleStatsText(nullptr),
+    testProgressBoardText(nullptr),
+    testRetestListText(nullptr),
     testNewSessionBtn(nullptr),
     testStartCaseBtn(nullptr),
     testJudgeCaseBtn(nullptr),
     testSafeRunJudgeBtn(nullptr),
+    testRunAutoBtn(nullptr),
+    testRunFilteredBtn(nullptr),
+    testRetestFailedBtn(nullptr),
     testBindStressBtn(nullptr),
     testSaveResultBtn(nullptr),
     testExportResultBtn(nullptr),
@@ -188,6 +194,8 @@ MainWindow::MainWindow(QWidget *parent) :
     testExportMarkdownBtn(nullptr),
     testExportPdfBtn(nullptr),
     testOpenSessionDirBtn(nullptr),
+    testTemplatePresetCombo(nullptr),
+    testFailPauseCheck(nullptr),
     autoCompactLogOnTestExecutionCheck(nullptr),
     productionSnEdit(nullptr),
     productionResultBanner(nullptr),
@@ -2489,6 +2497,16 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     testExportExcelBtn = new QPushButton(QStringLiteral("导出Excel副本"), filterGroup);
     testExportMarkdownBtn = new QPushButton(QStringLiteral("导出Markdown报告"), filterGroup);
     testExportPdfBtn = new QPushButton(QStringLiteral("导出PDF报告"), filterGroup);
+    testRunFilteredBtn = new QPushButton(QStringLiteral("执行筛选项"), filterGroup);
+    testRetestFailedBtn = new QPushButton(QStringLiteral("复测失败/阻塞"), filterGroup);
+    testTemplatePresetCombo = new QComboBox(filterGroup);
+    testTemplatePresetCombo->addItems(QStringList()
+        << QStringLiteral("默认模板")
+        << QStringLiteral("P0冒烟")
+        << QStringLiteral("失败复测")
+        << QStringLiteral("广播观察"));
+    testFailPauseCheck = new QCheckBox(QStringLiteral("失败/阻塞时暂停批量"), filterGroup);
+    testFailPauseCheck->setChecked(true);
     testStatsValue = new QLabel(QStringLiteral("总数 0，已执行 0，通过 0，失败 0，阻塞 0，通过率 0.00%"), filterGroup);
     testStatsValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
     testModuleFilterCombo->addItem(QStringLiteral("全部"));
@@ -2507,6 +2525,10 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     filterLayout->addWidget(testExportExcelBtn);
     filterLayout->addWidget(testExportMarkdownBtn);
     filterLayout->addWidget(testExportPdfBtn);
+    filterLayout->addWidget(testRunFilteredBtn);
+    filterLayout->addWidget(testRetestFailedBtn);
+    filterLayout->addWidget(testTemplatePresetCombo);
+    filterLayout->addWidget(testFailPauseCheck);
     while (QLayoutItem *item = filterLayout->takeAt(0)) {
         if (QWidget *widgetItem = item->widget()) {
             QLabel *label = qobject_cast<QLabel *>(widgetItem);
@@ -2528,9 +2550,19 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     filterTopLayout->addWidget(testStatsValue);
     filterLayout->addLayout(filterTopLayout);
 
+    QHBoxLayout *filterPresetLayout = new QHBoxLayout();
+    filterPresetLayout->setSpacing(6);
+    filterPresetLayout->addWidget(new QLabel(QStringLiteral("执行模板"), filterGroup));
+    filterPresetLayout->addWidget(testTemplatePresetCombo);
+    filterPresetLayout->addWidget(testFailPauseCheck);
+    filterPresetLayout->addStretch();
+    filterLayout->addLayout(filterPresetLayout);
+
     QHBoxLayout *filterActionLayout = new QHBoxLayout();
     filterActionLayout->setSpacing(6);
     filterActionLayout->addStretch();
+    filterActionLayout->addWidget(testRunFilteredBtn);
+    filterActionLayout->addWidget(testRetestFailedBtn);
     filterActionLayout->addWidget(importBtn);
     filterActionLayout->addWidget(testExportResultBtn);
     filterActionLayout->addWidget(testExportExcelBtn);
@@ -2584,6 +2616,7 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     testCaseRemarkEdit = new QTextEdit(detailPanel);
     testCaseRemarkEdit->setMinimumHeight(90);
     testStartCaseBtn = new QPushButton(QStringLiteral("开始执行"), detailPanel);
+    testRunAutoBtn = new QPushButton(QStringLiteral("自动执行本用例"), detailPanel);
     testJudgeCaseBtn = new QPushButton(QStringLiteral("自动判定"), detailPanel);
     testSafeRunJudgeBtn = new QPushButton(QStringLiteral("安全执行/判定"), detailPanel);
     testBindStressBtn = new QPushButton(QStringLiteral("绑定压力统计"), detailPanel);
@@ -2597,9 +2630,10 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     resultLayout->addWidget(new QLabel(QStringLiteral("备注"), detailPanel), 2, 0);
     resultLayout->addWidget(testCaseRemarkEdit, 2, 1, 1, 3);
     resultLayout->addWidget(testStartCaseBtn, 3, 0);
-    resultLayout->addWidget(testJudgeCaseBtn, 3, 1);
-    resultLayout->addWidget(testSafeRunJudgeBtn, 3, 2);
+    resultLayout->addWidget(testRunAutoBtn, 3, 1);
+    resultLayout->addWidget(testJudgeCaseBtn, 3, 2);
     resultLayout->addWidget(testSaveResultBtn, 3, 3);
+    resultLayout->addWidget(testSafeRunJudgeBtn, 4, 1);
     resultLayout->addWidget(testBindStressBtn, 4, 2);
     testResultCombo->clear();
     testResultCombo->addItems(QStringList()
@@ -2609,6 +2643,7 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
         << QStringLiteral("阻塞")
         << QStringLiteral("不适用"));
     testStartCaseBtn->setText(QStringLiteral("开始执行"));
+    testRunAutoBtn->setText(QStringLiteral("自动执行本用例"));
     testJudgeCaseBtn->setText(QStringLiteral("自动判定"));
     testSafeRunJudgeBtn->setText(QStringLiteral("安全执行/判定"));
     testBindStressBtn->setText(QStringLiteral("绑定压力统计"));
@@ -2680,6 +2715,22 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     testModuleStatsText->setMinimumHeight(110);
     moduleStatsLayout->addWidget(testModuleStatsText);
     bottomTabs->addTab(moduleStatsGroup, QStringLiteral("模块/缺陷统计"));
+
+    QGroupBox *progressGroup = new QGroupBox(QStringLiteral("进度看板"), widget);
+    QVBoxLayout *progressLayout = new QVBoxLayout(progressGroup);
+    testProgressBoardText = new QTextEdit(progressGroup);
+    testProgressBoardText->setReadOnly(true);
+    testProgressBoardText->setMinimumHeight(110);
+    progressLayout->addWidget(testProgressBoardText);
+    bottomTabs->addTab(progressGroup, QStringLiteral("进度看板"));
+
+    QGroupBox *retestGroup = new QGroupBox(QStringLiteral("失败复测清单"), widget);
+    QVBoxLayout *retestLayout = new QVBoxLayout(retestGroup);
+    testRetestListText = new QTextEdit(retestGroup);
+    testRetestListText->setReadOnly(true);
+    testRetestListText->setMinimumHeight(110);
+    retestLayout->addWidget(testRetestListText);
+    bottomTabs->addTab(retestGroup, QStringLiteral("复测清单"));
     bottomTabs->setMinimumHeight(150);
     mainLayout->addWidget(bottomTabs);
 
@@ -2703,10 +2754,14 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     connect(testExportMarkdownBtn, &QPushButton::clicked, this, &MainWindow::exportTestReportMarkdown);
     connect(testExportPdfBtn, &QPushButton::clicked, this, &MainWindow::exportTestReportPdf);
     connect(testStartCaseBtn, &QPushButton::clicked, this, &MainWindow::startSelectedTestCase);
+    connect(testRunAutoBtn, &QPushButton::clicked, this, &MainWindow::runSelectedTestCaseAuto);
     connect(testJudgeCaseBtn, &QPushButton::clicked, this, &MainWindow::judgeSelectedTestCase);
     connect(testSafeRunJudgeBtn, &QPushButton::clicked, this, &MainWindow::safeRunAndJudgeSelectedTestCase);
     connect(testBindStressBtn, &QPushButton::clicked, this, &MainWindow::bindStressStatsToSelectedTestCase);
     connect(testSaveResultBtn, &QPushButton::clicked, this, &MainWindow::saveSelectedTestCaseResult);
+    connect(testRunFilteredBtn, &QPushButton::clicked, this, &MainWindow::runFilteredTestCases);
+    connect(testRetestFailedBtn, &QPushButton::clicked, this, &MainWindow::retestFailedCases);
+    connect(testTemplatePresetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::applyTestTemplatePreset);
     connect(testModuleFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::refreshTestCaseModel);
     connect(testPriorityFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::refreshTestCaseModel);
     connect(testResultFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::refreshTestCaseModel);
@@ -2799,13 +2854,19 @@ void MainWindow::refreshTestCaseDetail()
     const TestCaseResult result = testCaseService.resultForCase(testCase.id);
     testCaseTitleValue->setText(QStringLiteral("%1  %2  %3").arg(testCase.id, testCase.module, testCase.priority));
     testCaseDetailText->setPlainText(QStringLiteral(
-        "测试类型：%1\n依据：%2\n\n前置条件：\n%3\n\n测试数据：\n%4\n\n操作步骤：\n%5\n\n预期结果：\n%6")
+        "测试类型：%1\n执行模式：%2\n命令模板：%3\n判定模板：%4\n超时/重试：%5 ms / %6 次\n依据：%7\n\n前置条件：\n%8\n\n测试数据：\n%9\n\n操作步骤：\n%10\n\n预期结果：\n%11\n\n人工提示：\n%12")
         .arg(testCase.type,
-             testCase.basis,
+             testCase.executionMode,
+             testCase.commandTemplate.isEmpty() ? QStringLiteral("-") : testCase.commandTemplate,
+             testCase.judgeTemplate.isEmpty() ? QStringLiteral("-") : testCase.judgeTemplate)
+        .arg(testCase.timeoutMs)
+        .arg(testCase.retryCount)
+        .arg(testCase.basis,
              testCase.precondition,
              testCase.testData,
              testCase.steps,
-             testCase.expectedResult));
+             testCase.expectedResult,
+             testCase.manualPrompt.isEmpty() ? QStringLiteral("-") : testCase.manualPrompt));
     if (testExpectationText != nullptr) {
         testExpectationText->setPlainText(protocolExpectationText(testCase));
     }
@@ -2854,6 +2915,15 @@ void MainWindow::updateTestExecutionControls()
     }
     if (testSafeRunJudgeBtn != nullptr) {
         testSafeRunJudgeBtn->setEnabled(hasCase && testCaseService.hasSession());
+    }
+    if (testRunAutoBtn != nullptr) {
+        testRunAutoBtn->setEnabled(canStartCase);
+    }
+    if (testRunFilteredBtn != nullptr) {
+        testRunFilteredBtn->setEnabled(testCaseService.hasSession() && canStarted && !busy && testCaseModel != nullptr && testCaseModel->rowCount() > 0);
+    }
+    if (testRetestFailedBtn != nullptr) {
+        testRetestFailedBtn->setEnabled(testCaseService.hasSession() && canStarted && !busy);
     }
     if (testBindStressBtn != nullptr) {
         testBindStressBtn->setEnabled(hasCase && testCaseService.hasSession());
@@ -2913,6 +2983,7 @@ void MainWindow::updateTestSessionStats()
     if (testModuleStatsText != nullptr) {
         testModuleStatsText->setPlainText(moduleStatsText());
     }
+    refreshProgressBoard();
 }
 
 void MainWindow::createTestSession()
@@ -3149,6 +3220,17 @@ QString MainWindow::moduleStatsText() const
     return lines.join(QStringLiteral("\n"));
 }
 
+void MainWindow::refreshProgressBoard()
+{
+    const QMap<QString, TestCaseResult> results = testCaseService.results();
+    if (testProgressBoardText != nullptr) {
+        testProgressBoardText->setPlainText(testSummaryBuilder.progressText(testCaseService.cases(), results));
+    }
+    if (testRetestListText != nullptr) {
+        testRetestListText->setPlainText(testSummaryBuilder.retestListText(testCaseService.cases(), results));
+    }
+}
+
 QString MainWindow::testReportMarkdown() const
 {
     QString report;
@@ -3174,21 +3256,12 @@ QString MainWindow::testReportMarkdown() const
 
     stream << "## 统计概览\n\n";
     stream << moduleStatsText() << "\n\n";
+    stream << "## 测试结论\n\n";
+    stream << testSummaryBuilder.reportConclusion(testCaseService.cases(), testCaseService.results()) << "\n\n";
 
     stream << "## 失败/阻塞用例\n\n";
-    stream << "| 用例ID | 模块 | 结果 | 缺陷编号 | 实际结果 |\n";
-    stream << "| --- | --- | --- | --- | --- |\n";
     const QMap<QString, TestCaseResult> results = testCaseService.results();
-    for (const TestCase &testCase : testCaseService.cases()) {
-        const TestCaseResult result = results.value(testCase.id);
-        if (result.status != TestResultStatus::Failed && result.status != TestResultStatus::Blocked) {
-            continue;
-        }
-        QString actual = result.actualResult;
-        actual.replace("\n", "<br>");
-        stream << "| " << testCase.id << " | " << testCase.module << " | "
-               << testResultStatusText(result.status) << " | " << result.defectId << " | " << actual << " |\n";
-    }
+    stream << testSummaryBuilder.failureSummaryMarkdown(testCaseService.cases(), results);
 
     stream << "\n## 全量结果\n\n";
     stream << "| 用例ID | 模块 | 优先级 | 类型 | 结果 | 缺陷编号 | 证据日志 |\n";
@@ -3230,6 +3303,7 @@ QString MainWindow::testReportHtml() const
                << "</p>";
     }
     stream << "<h2>统计概览</h2><pre>" << moduleStatsText().toHtmlEscaped() << "</pre>";
+    stream << "<h2>测试结论</h2><p>" << testSummaryBuilder.reportConclusion(testCaseService.cases(), testCaseService.results()).toHtmlEscaped() << "</p>";
     stream << "<h2>全量结果</h2><table><tr><th>用例ID</th><th>模块</th><th>优先级</th><th>类型</th><th>结果</th><th>缺陷编号</th><th>实际结果</th><th>证据日志</th></tr>";
     const QMap<QString, TestCaseResult> results = testCaseService.results();
     for (const TestCase &testCase : testCaseService.cases()) {
@@ -3296,137 +3370,294 @@ void MainWindow::exportTestReportPdf()
 
 QString MainWindow::protocolExpectationText(const TestCase &testCase) const
 {
-    const QString text = QStringLiteral("%1 %2 %3 %4 %5 %6")
-        .arg(testCase.id, testCase.module, testCase.testData, testCase.steps, testCase.expectedResult, testCase.basis);
-
-    QStringList lines;
-    if (text.contains(QStringLiteral("SID=0x01")) || text.contains(QStringLiteral("扫描周期"))) {
-        lines << QStringLiteral("扫描周期配置：请求应为 02 01 XX 55 55 55 55 55，XX 单位为 10ms。")
-              << QStringLiteral("肯定响应：02 41 XX 55 55 55 55 55。否定响应：03 7F 01 NRC 55 55 55 55。")
-              << QStringLiteral("协议文档示例 01 01 28 / 01 41 28 疑似错误；按 ISO-TP 单帧长度应为 02。");
-    }
-    if (text.contains(QStringLiteral("SID=0x02")) || text.contains(QStringLiteral("重启"))) {
-        lines << QStringLiteral("重启服务：请求应为 01 02 55 55 55 55 55 55，肯定响应通常为 01 42 55 55 55 55 55 55。");
-    }
-    if (text.contains(QStringLiteral("0x29"))) {
-        lines << QStringLiteral("0x29 广播周期配置：请求应为 05 29 ID_H ID_L PERIOD_H PERIOD_L 55 55。")
-              << QStringLiteral("0x2C0~0x2C6 为重点广播 ID；0xFFFF 表示停止发送。正响应 SID 应为 0x69。");
-    }
-    if (text.contains(QStringLiteral("0x2E")) || text.contains(QStringLiteral("SN"))) {
-        lines << QStringLiteral("0x2E 写 NVM：单帧短数据响应 SID=0x6E；写 16 字节 SN 应走 ISO-TP 首帧/流控/连续帧。")
-              << QStringLiteral("SN 合法性：16 位，前六位 R2A3A0，ASCII 写入 DID 0xE7E1。");
-    }
-    if (text.contains(QStringLiteral("0x2C0")) || text.contains(QStringLiteral("0x2C6")) || text.contains(QStringLiteral("广播"))) {
-        lines << QStringLiteral("广播帧检查：关注 0x2C0~0x2C6 是否出现、周期是否符合配置、未识别 TAG 时数据是否按协议清零。");
-    }
-    if (text.contains(QStringLiteral("否定")) || text.contains(QStringLiteral("NRC")) || text.contains(QStringLiteral("异常"))) {
-        lines << QStringLiteral("负向/异常用例：预期收到 7F SID NRC 格式否定响应，且设备不能死机、总线异常或无提示卡死。");
-    }
-    if (lines.isEmpty()) {
-        lines << QStringLiteral("该用例暂无专用规则。请根据步骤、预期结果和证据日志人工确认。");
-    }
-    return lines.join(QStringLiteral("\n"));
+    return testCaseJudge.expectationText(testCase);
 }
 
 QString MainWindow::judgeTestCaseEvidence(const TestCase &testCase, TestResultStatus *status) const
 {
+    const TestJudgeResult result = testCaseJudge.judge(testCase, readEvidenceText(testCase.id));
     if (status != nullptr) {
-        *status = TestResultStatus::Blocked;
+        *status = result.status;
     }
+    return result.reason;
+}
 
-    const QString evidencePath = testCaseService.evidencePathForCase(testCase.id);
+QString MainWindow::readEvidenceText(const QString &caseId) const
+{
+    const QString evidencePath = testCaseService.evidencePathForCase(caseId);
     QFile file(evidencePath);
-    if (evidencePath.isEmpty() || !file.exists()) {
-        return QStringLiteral("未找到当前用例证据日志，请先开始执行用例并采集 CAN 收发帧。");
+    if (evidencePath.isEmpty() || !file.exists() || !file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return QString();
     }
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return QStringLiteral("无法读取证据日志：%1").arg(evidencePath);
+    return QString::fromUtf8(file.readAll());
+}
+
+bool MainWindow::precheckTestExecution(const TestCase &testCase, QString *reason) const
+{
+    if (!testCaseService.hasSession()) {
+        if (reason) *reason = QStringLiteral("请先新建测试会话。");
+        return false;
     }
-    const QString evidence = QString::fromUtf8(file.readAll()).toUpper();
-    QString compact = evidence;
-    compact.remove(QRegularExpression(QStringLiteral("[^0-9A-FX]")));
-
-    const QString caseText = QStringLiteral("%1 %2 %3 %4 %5")
-        .arg(testCase.id, testCase.module, testCase.testData, testCase.steps, testCase.expectedResult);
-    const bool negativeCase = caseText.contains(QStringLiteral("异常")) ||
-                              caseText.contains(QStringLiteral("否定")) ||
-                              caseText.contains(QStringLiteral("非法")) ||
-                              caseText.contains(QStringLiteral("错误"));
-
-    auto mark = [status](TestResultStatus value, const QString &message) {
-        if (status != nullptr) {
-            *status = value;
-        }
-        return message;
-    };
-
-    if (negativeCase && evidence.contains(QStringLiteral("7F"))) {
-        return mark(TestResultStatus::Passed, QStringLiteral("证据日志包含 7F 否定响应，符合负向/异常用例的基本预期，请人工确认 NRC 是否符合协议。"));
+    if (!canStarted) {
+        if (reason) *reason = QStringLiteral("请先启动 CAN。");
+        return false;
     }
-
-    if (caseText.contains(QStringLiteral("扫描周期")) || caseText.contains(QStringLiteral("SID=0x01"))) {
-        if (compact.contains(QStringLiteral("010128")) || compact.contains(QStringLiteral("014128"))) {
-            return mark(TestResultStatus::Failed, QStringLiteral("发现协议文档示例式长度字段 01 01/01 41，按 ISO-TP 单帧应使用长度 02，请确认设备或发送端实现。"));
-        }
-        if (compact.contains(QStringLiteral("0201")) && compact.contains(QStringLiteral("0241"))) {
-            return mark(TestResultStatus::Passed, QStringLiteral("发现扫描周期请求 02 01 XX 及肯定响应 02 41 XX，自动判定通过。"));
-        }
-        if (compact.contains(QStringLiteral("7F01"))) {
-            return mark(negativeCase ? TestResultStatus::Passed : TestResultStatus::Failed,
-                        QStringLiteral("发现扫描周期服务否定响应 7F 01，需结合用例预期确认 NRC。"));
-        }
-        return QStringLiteral("未发现完整扫描周期请求/响应证据，需人工确认。");
+    if (stressTestService.stats().running || isOtaRunning() || productionTestService.isRunning()) {
+        if (reason) *reason = QStringLiteral("压力测试、OTA 或产线检测运行中，不能执行测试用例。");
+        return false;
     }
+    if (testCase.id.isEmpty()) {
+        if (reason) *reason = QStringLiteral("未选择有效用例。");
+        return false;
+    }
+    return true;
+}
 
-    if (caseText.contains(QStringLiteral("重启")) || caseText.contains(QStringLiteral("SID=0x02"))) {
-        if (compact.contains(QStringLiteral("0102")) && compact.contains(QStringLiteral("0142"))) {
-            return mark(TestResultStatus::Passed, QStringLiteral("发现重启请求 01 02 及肯定响应 01 42，自动判定通过。"));
-        }
-        if (compact.contains(QStringLiteral("7F02"))) {
-            return mark(negativeCase ? TestResultStatus::Passed : TestResultStatus::Failed,
-                        QStringLiteral("发现重启服务否定响应 7F 02，需结合用例预期确认 NRC。"));
-        }
-        return QStringLiteral("未发现完整重启请求/响应证据，需人工确认。");
+bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
+{
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x01_set_scan_period")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetScanPeriodFrame(0x28));
+        if (message) *message = QStringLiteral("已发送扫描周期配置 400ms：02 01 28 55 55 55 55 55");
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x02_reboot")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
+        if (message) *message = QStringLiteral("已发送重启指令：01 02 55 55 55 55 55 55");
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(RfidProtocol::StatusFrameId, 1000));
+        if (message) *message = QStringLiteral("已发送 0x29 周期配置：目标 0x2C0，周期 1000ms。");
+        return true;
     }
 
-    if (caseText.contains(QStringLiteral("0x29"))) {
-        if (compact.contains(QStringLiteral("0529")) && evidence.contains(QStringLiteral("69"))) {
-            return mark(TestResultStatus::Passed, QStringLiteral("发现 0x29 周期配置请求及 0x69 正响应，自动判定通过。"));
-        }
-        if (compact.contains(QStringLiteral("7F29"))) {
-            return mark(negativeCase ? TestResultStatus::Passed : TestResultStatus::Failed,
-                        QStringLiteral("发现 0x29 否定响应 7F 29，需结合用例预期确认 NRC。"));
-        }
-        return QStringLiteral("未发现完整 0x29 请求/响应证据，需人工确认。");
+    if (message) {
+        *message = testCase.manualPrompt.isEmpty()
+            ? QStringLiteral("该用例未配置可安全自动发送的命令，请手动执行步骤后使用自动判定。")
+            : testCase.manualPrompt;
+    }
+    return false;
+}
+
+void MainWindow::runSelectedTestCaseAuto()
+{
+    if (testCaseTableView == nullptr || !testCaseTableView->currentIndex().isValid()) {
+        return;
     }
 
-    if (caseText.contains(QStringLiteral("0x2E")) || caseText.contains(QStringLiteral("SN"))) {
-        if (evidence.contains(QStringLiteral("6E"))) {
-            return mark(TestResultStatus::Passed, QStringLiteral("发现 0x2E 正响应 SID=0x6E，自动判定通过；如为 SN 写入，请继续确认写后读取/广播一致。"));
-        }
-        if (compact.contains(QStringLiteral("7F2E"))) {
-            return mark(negativeCase ? TestResultStatus::Passed : TestResultStatus::Failed,
-                        QStringLiteral("发现 0x2E 否定响应 7F 2E，需结合用例预期确认 NRC。"));
-        }
-        if (evidence.contains(QStringLiteral("30")) && evidence.contains(QStringLiteral("2E"))) {
-            return mark(TestResultStatus::Blocked, QStringLiteral("发现 0x2E/ISO-TP 流控相关证据，但未发现 0x6E 正响应，需人工确认完整分包流程。"));
-        }
-        return QStringLiteral("未发现完整 0x2E 响应证据，需人工确认。");
+    const TestCase testCase = testCaseModel->caseAt(testCaseTableView->currentIndex().row());
+    QString reason;
+    if (!precheckTestExecution(testCase, &reason)) {
+        QMessageBox::warning(this, QStringLiteral("自动执行"), reason);
+        return;
     }
 
-    if (caseText.contains(QStringLiteral("0x2C0")) || caseText.contains(QStringLiteral("0x2C6")) ||
-        caseText.contains(QStringLiteral("广播"))) {
-        if (evidence.contains(QStringLiteral("0X2C0")) || evidence.contains(QStringLiteral("0X2C1")) ||
-            evidence.contains(QStringLiteral("0X2C2")) || evidence.contains(QStringLiteral("0X2C6"))) {
-            return mark(TestResultStatus::Passed, QStringLiteral("证据日志包含 0x2C0~0x2C6 广播帧，自动判定基础通信/广播出现项通过；周期和字段内容仍建议人工复核。"));
-        }
-        return QStringLiteral("未发现 0x2C0~0x2C6 广播帧证据，需人工确认。");
+    QString error;
+    if (!testCaseService.startCase(testCase.id, &error)) {
+        QMessageBox::warning(this, QStringLiteral("自动执行"), error);
+        return;
     }
 
-    if (evidence.contains(QStringLiteral("0X107")) || evidence.contains(QStringLiteral("肯定")) || evidence.contains(QStringLiteral("响应"))) {
-        return mark(TestResultStatus::Blocked, QStringLiteral("发现响应类证据，但该用例暂无专用自动判定规则，请人工确认后保存结果。"));
+    QString commandMessage;
+    const bool commandSent = sendAutoTestCommand(testCase, &commandMessage);
+    if (testEvidenceLogText != nullptr) {
+        testEvidenceLogText->append(QStringLiteral("[自动执行] %1").arg(commandMessage));
     }
-    return QStringLiteral("证据不足或暂无专用判定规则，请人工确认。");
+    if (!commandSent && testCase.executionMode == QStringLiteral("manual")) {
+        QMessageBox::information(this, QStringLiteral("自动执行"), commandMessage);
+    }
+
+    QEventLoop waitLoop;
+    QTimer::singleShot(qMax(300, testCase.timeoutMs), &waitLoop, &QEventLoop::quit);
+    waitLoop.exec();
+
+    const TestJudgeResult judgeResult = testCaseJudge.judge(testCase, readEvidenceText(testCase.id));
+    TestCaseResult result = testCaseService.resultForCase(testCase.id);
+    result.caseId = testCase.id;
+    result.status = judgeResult.status;
+    result.judgeReason = judgeResult.reason;
+    result.failureCategory = judgeResult.failureCategory;
+    result.keyFrames = judgeResult.keyFrames;
+    QString actual = QStringLiteral("[自动执行] %1\n[自动判定] %2").arg(commandMessage, judgeResult.reason);
+    if (!judgeResult.keyFrames.isEmpty()) {
+        actual.append(QStringLiteral("\n[关键帧]\n%1").arg(judgeResult.keyFrames.join(QStringLiteral("\n"))));
+    }
+    result.actualResult = actual.trimmed();
+    if (!testCaseService.saveResult(result, &error)) {
+        QMessageBox::warning(this, QStringLiteral("自动执行"), error);
+        return;
+    }
+    testCaseService.finishActiveCase();
+    refreshTestCaseModel();
+}
+
+void MainWindow::runFilteredTestCases()
+{
+    if (testCaseModel == nullptr || testCaseModel->rowCount() == 0) {
+        return;
+    }
+    QVector<TestCase> casesToRun;
+    for (int row = 0; row < testCaseModel->rowCount(); ++row) {
+        casesToRun.append(testCaseModel->caseAt(row));
+    }
+    QString reason;
+    if (!precheckTestExecution(casesToRun.first(), &reason)) {
+        QMessageBox::warning(this, QStringLiteral("批量执行"), reason);
+        return;
+    }
+
+    const int count = casesToRun.size();
+    if (QMessageBox::question(this,
+            QStringLiteral("批量执行确认"),
+            QStringLiteral("将按当前筛选条件执行 %1 条用例。\n自动用例会直接发送安全命令；半自动/手工用例只记录阻塞提示，不会执行持久化写入。")
+                .arg(count),
+            QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+
+    int passed = 0;
+    int failedOrBlocked = 0;
+    for (const TestCase &testCase : casesToRun) {
+        int rowToSelect = -1;
+        for (int row = 0; row < testCaseModel->rowCount(); ++row) {
+            if (testCaseModel->caseAt(row).id == testCase.id) {
+                rowToSelect = row;
+                break;
+            }
+        }
+        if (rowToSelect < 0) {
+            testCaseService.finishActiveCase();
+            refreshTestCaseModel();
+            for (int row = 0; row < testCaseModel->rowCount(); ++row) {
+                if (testCaseModel->caseAt(row).id == testCase.id) {
+                    rowToSelect = row;
+                    break;
+                }
+            }
+        }
+        if (rowToSelect < 0) {
+            continue;
+        }
+        testCaseTableView->selectRow(rowToSelect);
+        if (testCase.executionMode != QStringLiteral("auto")) {
+            TestCaseResult result = testCaseService.resultForCase(testCase.id);
+            result.caseId = testCase.id;
+            result.status = TestResultStatus::Blocked;
+            result.failureCategory = QStringLiteral("manual_required");
+            result.judgeReason = testCase.manualPrompt.isEmpty()
+                ? QStringLiteral("半自动/手工用例未执行，请按步骤操作后再自动判定。")
+                : testCase.manualPrompt;
+            result.actualResult = result.judgeReason;
+            QString error;
+            testCaseService.saveResult(result, &error);
+            ++failedOrBlocked;
+            if (testFailPauseCheck != nullptr && testFailPauseCheck->isChecked()) {
+                break;
+            }
+            continue;
+        }
+
+        runSelectedTestCaseAuto();
+        const TestCaseResult result = testCaseService.resultForCase(testCase.id);
+        if (result.status == TestResultStatus::Passed) {
+            ++passed;
+        } else if (result.status == TestResultStatus::Failed || result.status == TestResultStatus::Blocked) {
+            ++failedOrBlocked;
+            if (testFailPauseCheck != nullptr && testFailPauseCheck->isChecked()) {
+                break;
+            }
+        }
+        QApplication::processEvents();
+    }
+    refreshTestCaseModel();
+    QMessageBox::information(this, QStringLiteral("批量执行"), QStringLiteral("批量执行结束：通过 %1，失败/阻塞 %2。").arg(passed).arg(failedOrBlocked));
+}
+
+void MainWindow::retestFailedCases()
+{
+    if (testCaseModel == nullptr) {
+        return;
+    }
+    const QMap<QString, TestCaseResult> results = testCaseService.results();
+    QVector<TestCase> failedCases;
+    for (const TestCase &testCase : testCaseService.cases()) {
+        const TestCaseResult result = results.value(testCase.id);
+        if (result.status == TestResultStatus::Failed || result.status == TestResultStatus::Blocked) {
+            failedCases.append(testCase);
+        }
+    }
+    if (failedCases.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("复测"), QStringLiteral("暂无失败/阻塞用例。"));
+        return;
+    }
+    if (QMessageBox::question(this,
+            QStringLiteral("复测确认"),
+            QStringLiteral("将复测 %1 条失败/阻塞用例。自动用例会发送安全命令，其他用例保留人工提示。").arg(failedCases.size()),
+            QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+
+    if (testResultFilterCombo != nullptr) {
+        testResultFilterCombo->setCurrentText(QStringLiteral("全部"));
+    }
+    int handled = 0;
+    for (const TestCase &testCase : failedCases) {
+        refreshTestCaseModel();
+        int rowToSelect = -1;
+        for (int row = 0; row < testCaseModel->rowCount(); ++row) {
+            if (testCaseModel->caseAt(row).id == testCase.id) {
+                rowToSelect = row;
+                break;
+            }
+        }
+        if (rowToSelect < 0) {
+            continue;
+        }
+        testCaseTableView->selectRow(rowToSelect);
+        if (testCase.executionMode == QStringLiteral("auto")) {
+            runSelectedTestCaseAuto();
+        } else {
+            TestCaseResult result = testCaseService.resultForCase(testCase.id);
+            result.caseId = testCase.id;
+            result.previousStatus = testResultStatusText(result.status);
+            result.previousFailureReason = result.judgeReason.isEmpty() ? result.actualResult : result.judgeReason;
+            result.retestCount += 1;
+            result.lastRetestAt = QDateTime::currentDateTime();
+            result.status = TestResultStatus::Blocked;
+            result.failureCategory = QStringLiteral("manual_required");
+            result.judgeReason = testCase.manualPrompt.isEmpty()
+                ? QStringLiteral("该用例需要人工复测后保存结果。")
+                : testCase.manualPrompt;
+            result.actualResult = result.judgeReason;
+            QString error;
+            testCaseService.saveResult(result, &error);
+        }
+        ++handled;
+        QApplication::processEvents();
+    }
+    refreshTestCaseModel();
+    QMessageBox::information(this, QStringLiteral("复测"), QStringLiteral("复测处理完成：%1 条。").arg(handled));
+}
+
+void MainWindow::applyTestTemplatePreset(int index)
+{
+    if (testPriorityFilterCombo == nullptr || testResultFilterCombo == nullptr || testSearchEdit == nullptr) {
+        return;
+    }
+    if (index == 1) {
+        testPriorityFilterCombo->setCurrentText(QStringLiteral("P0"));
+        testResultFilterCombo->setCurrentText(QStringLiteral("全部"));
+        testSearchEdit->clear();
+    } else if (index == 2) {
+        testPriorityFilterCombo->setCurrentText(QStringLiteral("全部"));
+        testResultFilterCombo->setCurrentText(QStringLiteral("失败"));
+        testSearchEdit->clear();
+    } else if (index == 3) {
+        testPriorityFilterCombo->setCurrentText(QStringLiteral("全部"));
+        testResultFilterCombo->setCurrentText(QStringLiteral("全部"));
+        testSearchEdit->setText(QStringLiteral("广播"));
+    }
+    refreshTestCaseModel();
 }
 
 void MainWindow::judgeSelectedTestCase()
@@ -3435,8 +3666,9 @@ void MainWindow::judgeSelectedTestCase()
         return;
     }
     const TestCase testCase = testCaseModel->caseAt(testCaseTableView->currentIndex().row());
-    TestResultStatus status = TestResultStatus::Blocked;
-    const QString message = judgeTestCaseEvidence(testCase, &status);
+    const TestJudgeResult judgeResult = testCaseJudge.judge(testCase, readEvidenceText(testCase.id));
+    const QString message = judgeResult.reason;
+    const TestResultStatus status = judgeResult.status;
 
     if (testResultCombo != nullptr) {
         const int index = testResultCombo->findText(testResultStatusText(status));
@@ -3448,8 +3680,23 @@ void MainWindow::judgeSelectedTestCase()
             current.append(QStringLiteral("\n"));
         }
         current.append(QStringLiteral("[自动判定] %1").arg(message));
+        if (!judgeResult.keyFrames.isEmpty()) {
+            current.append(QStringLiteral("\n[关键帧]\n%1").arg(judgeResult.keyFrames.join(QStringLiteral("\n"))));
+        }
         testActualResultEdit->setPlainText(current);
     }
+    TestCaseResult result = testCaseService.resultForCase(testCase.id);
+    result.caseId = testCase.id;
+    result.status = status;
+    result.judgeReason = judgeResult.reason;
+    result.failureCategory = judgeResult.failureCategory;
+    result.keyFrames = judgeResult.keyFrames;
+    if (testActualResultEdit != nullptr) {
+        result.actualResult = testActualResultEdit->toPlainText().trimmed();
+    }
+    QString error;
+    testCaseService.saveResult(result, &error);
+    refreshTestCaseModel();
 }
 
 void MainWindow::safeRunAndJudgeSelectedTestCase()

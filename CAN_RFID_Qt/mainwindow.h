@@ -22,7 +22,9 @@
 #include "application/rfidservice.h"
 #include "application/stresstestservice.h"
 #include "application/testcasemodel.h"
+#include "application/testcasejudge.h"
 #include "application/testcaseservice.h"
+#include "application/testsummarybuilder.h"
 #include "application/qingjucanmanager.h"
 #include "application/qingjurfidservice.h"
 #include "application/qingjuotaservice.h"
@@ -144,6 +146,10 @@ private:
     void judgeSelectedTestCase();
     void safeRunAndJudgeSelectedTestCase();
     void bindStressStatsToSelectedTestCase();
+    void runSelectedTestCaseAuto();
+    void runFilteredTestCases();
+    void retestFailedCases();
+    void applyTestTemplatePreset(int index);
     void createTestSession();
     void openTestSessionDirectory();
     void importTestCases();
@@ -151,6 +157,10 @@ private:
     void updateTestSessionStats();
     QString protocolExpectationText(const TestCase &testCase) const;
     QString judgeTestCaseEvidence(const TestCase &testCase, TestResultStatus *status) const;
+    bool precheckTestExecution(const TestCase &testCase, QString *reason) const;
+    bool sendAutoTestCommand(const TestCase &testCase, QString *message);
+    QString readEvidenceText(const QString &caseId) const;
+    void refreshProgressBoard();
     QString testReportMarkdown() const;
     QString testReportHtml() const;
     QString moduleStatsText() const;
@@ -190,6 +200,8 @@ private:
     StressTestService stressTestService;
     ProductionTestService productionTestService;
     TestCaseService testCaseService;
+    TestCaseJudge testCaseJudge;
+    TestSummaryBuilder testSummaryBuilder;
     TestCaseModel *testCaseModel;
     AppConfig appConfig;
     LogService logService;
@@ -297,10 +309,15 @@ private:
     QTextEdit *testCaseRemarkEdit;
     QTextEdit *testEvidenceLogText;
     QTextEdit *testModuleStatsText;
+    QTextEdit *testProgressBoardText;
+    QTextEdit *testRetestListText;
     QPushButton *testNewSessionBtn;
     QPushButton *testStartCaseBtn;
     QPushButton *testJudgeCaseBtn;
     QPushButton *testSafeRunJudgeBtn;
+    QPushButton *testRunAutoBtn;
+    QPushButton *testRunFilteredBtn;
+    QPushButton *testRetestFailedBtn;
     QPushButton *testBindStressBtn;
     QPushButton *testSaveResultBtn;
     QPushButton *testExportResultBtn;
@@ -308,6 +325,8 @@ private:
     QPushButton *testExportMarkdownBtn;
     QPushButton *testExportPdfBtn;
     QPushButton *testOpenSessionDirBtn;
+    QComboBox *testTemplatePresetCombo;
+    QCheckBox *testFailPauseCheck;
     QCheckBox *autoCompactLogOnTestExecutionCheck;
     QLineEdit *productionSnEdit;
     QLabel *productionResultBanner;
