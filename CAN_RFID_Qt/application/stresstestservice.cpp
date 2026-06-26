@@ -350,7 +350,16 @@ void StressTestService::updateTagPart(quint32 frameId, const QByteArray &payload
     }
 
     const QString newTag = currentTagText();
-    if (isValidTagText(newTag)) {
+    
+    // Check if tag parts are logically complete to prevent intermediate/fragment tags.
+    bool partsComplete = false;
+    if (newTag.length() == 16 && !tagPart1.isEmpty() && !tagPart2.isEmpty() && tagPart3.isEmpty()) {
+        partsComplete = true;
+    } else if (newTag.length() == 24 && !tagPart1.isEmpty() && !tagPart2.isEmpty() && !tagPart3.isEmpty()) {
+        partsComplete = true;
+    }
+
+    if (partsComplete && isValidTagText(newTag)) {
         currentStats.currentTag = newTag;
         if (!uniqueTags.contains(newTag)) {
             uniqueTags.insert(newTag);
@@ -383,7 +392,16 @@ void StressTestService::updateRates()
 bool StressTestService::currentTagIsValid() const
 {
     const QString tag = currentTagText();
-    return isValidTagText(tag);
+    
+    // Check if tag parts are logically complete to prevent intermediate/fragment tags.
+    bool partsComplete = false;
+    if (tag.length() == 16 && !tagPart1.isEmpty() && !tagPart2.isEmpty() && tagPart3.isEmpty()) {
+        partsComplete = true;
+    } else if (tag.length() == 24 && !tagPart1.isEmpty() && !tagPart2.isEmpty() && !tagPart3.isEmpty()) {
+        partsComplete = true;
+    }
+    
+    return partsComplete && isValidTagText(tag);
 }
 
 bool StressTestService::isValidTagText(const QString &tag) const
