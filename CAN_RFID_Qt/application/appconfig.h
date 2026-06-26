@@ -43,6 +43,9 @@ struct AppConfigData
     int layoutPreset = 1; // 0: compact, 1: standard, 2: large, 3: custom
     bool testSessionCollapsed = true;
     bool autoCompactLogOnTestExecution = true;
+    QString productionHwVer = "";
+    bool productionHwVerLocked = false;
+    QString productionMatChange = "";
 };
 
 class AppConfig

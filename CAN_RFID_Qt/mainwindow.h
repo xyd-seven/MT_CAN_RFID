@@ -236,6 +236,10 @@ private:
     QWidget *qjStressPanel;
     QWidget *productionTestTab;
     QLineEdit *productionSnEdit;
+    QLineEdit *productionHwVerEdit;
+    QLineEdit *productionMatChangeEdit;
+    QPushButton *productionHwVerLockBtn;
+    bool productionHwVerLocked;
     QLabel *productionResultBanner;
     QLabel *productionStateValue;
     QLabel *productionSnValue;

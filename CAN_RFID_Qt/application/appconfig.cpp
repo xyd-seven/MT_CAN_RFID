@@ -53,6 +53,9 @@ AppConfigData AppConfig::load() const
     config.layoutPreset = qBound(0, settings.value("layout/preset", config.layoutPreset).toInt(), 3);
     config.testSessionCollapsed = settings.value("layout/testSessionCollapsed", config.testSessionCollapsed).toBool();
     config.autoCompactLogOnTestExecution = settings.value("layout/autoCompactLogOnTestExecution", config.autoCompactLogOnTestExecution).toBool();
+    config.productionHwVer = settings.value("production/hwVer", config.productionHwVer).toString();
+    config.productionHwVerLocked = settings.value("production/hwVerLocked", config.productionHwVerLocked).toBool();
+    config.productionMatChange = settings.value("production/matChange", config.productionMatChange).toString();
 
     if (config.logDirectory.isEmpty()) {
         config.logDirectory = QDir(QCoreApplication::applicationDirPath()).filePath("logs");
@@ -101,6 +104,9 @@ void AppConfig::save(const AppConfigData &config) const
     settings.setValue("layout/preset", config.layoutPreset);
     settings.setValue("layout/testSessionCollapsed", config.testSessionCollapsed);
     settings.setValue("layout/autoCompactLogOnTestExecution", config.autoCompactLogOnTestExecution);
+    settings.setValue("production/hwVer", config.productionHwVer);
+    settings.setValue("production/hwVerLocked", config.productionHwVerLocked);
+    settings.setValue("production/matChange", config.productionMatChange);
     settings.sync();
 }
 

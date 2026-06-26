@@ -134,6 +134,10 @@ MainWindow::MainWindow(QWidget *parent) :
     qjStressPanel(nullptr),
     productionTestTab(nullptr),
     productionSnEdit(nullptr),
+    productionHwVerEdit(nullptr),
+    productionMatChangeEdit(nullptr),
+    productionHwVerLockBtn(nullptr),
+    productionHwVerLocked(false),
     productionResultBanner(nullptr),
     productionStateValue(nullptr),
     productionSnValue(nullptr),
@@ -2126,6 +2130,63 @@ QWidget *MainWindow::createProductionTestTab(QWidget *parent)
     productionSnEdit->setPlaceholderText(QStringLiteral("扫码输入16位SN，例如 R2A3A02625000001"));
     productionSnEdit->setMaxLength(32);
     productionSnEdit->setClearButtonEnabled(true);
+
+    productionHwVerEdit = new QLineEdit(inputGroup);
+    productionHwVerEdit->setPlaceholderText(QStringLiteral("例如 1.0.1 或 0x0101"));
+    productionHwVerEdit->setMaxLength(16);
+    productionHwVerEdit->setClearButtonEnabled(true);
+
+    productionMatChangeEdit = new QLineEdit(inputGroup);
+    productionMatChangeEdit->setPlaceholderText(QStringLiteral("例如 0x0001"));
+    productionMatChangeEdit->setMaxLength(16);
+    productionMatChangeEdit->setClearButtonEnabled(true);
+
+    productionHwVerLockBtn = new QPushButton(QStringLiteral("确定"), inputGroup);
+
+    connect(productionHwVerLockBtn, &QPushButton::clicked, this, [this]() {
+        if (productionHwVerLocked) {
+            productionHwVerLocked = false;
+            productionHwVerEdit->setReadOnly(false);
+            productionMatChangeEdit->setReadOnly(false);
+            productionHwVerLockBtn->setText(QStringLiteral("确定"));
+            productionSnEdit->setEnabled(false);
+            productionStartBtn->setEnabled(false);
+
+            AppConfigData config = appConfig.load();
+            config.productionHwVer = productionHwVerEdit->text().trimmed();
+            config.productionMatChange = productionMatChangeEdit->text().trimmed();
+            config.productionHwVerLocked = false;
+            appConfig.save(config);
+        } else {
+            QString error;
+            const QString hwVer = productionHwVerEdit->text().trimmed();
+            if (!ProductionTestService::validateHwVersion(hwVer, nullptr, &error)) {
+                QMessageBox::warning(this, QStringLiteral("格式错误"), error);
+                return;
+            }
+            const QString matChange = productionMatChangeEdit->text().trimmed();
+            if (!ProductionTestService::validateMaterialChange(matChange, nullptr, &error)) {
+                QMessageBox::warning(this, QStringLiteral("格式错误"), error);
+                return;
+            }
+
+            productionHwVerLocked = true;
+            productionHwVerEdit->setReadOnly(true);
+            productionMatChangeEdit->setReadOnly(true);
+            productionHwVerLockBtn->setText(QStringLiteral("修改"));
+            productionSnEdit->setEnabled(true);
+            productionStartBtn->setEnabled(true);
+
+            AppConfigData config = appConfig.load();
+            config.productionHwVer = hwVer;
+            config.productionMatChange = matChange;
+            config.productionHwVerLocked = true;
+            appConfig.save(config);
+
+            prepareProductionSnInput();
+        }
+    });
+
     productionPassThresholdSpin = new QSpinBox(inputGroup);
     productionPassThresholdSpin->setRange(0, 100);
     productionPassThresholdSpin->setValue(95);
@@ -2134,14 +2195,27 @@ QWidget *MainWindow::createProductionTestTab(QWidget *parent)
     productionStopBtn = new QPushButton(QStringLiteral("停止"), inputGroup);
     productionClearBtn = new QPushButton(QStringLiteral("清空/下一台"), inputGroup);
 
+    QWidget *btnWidget = new QWidget(inputGroup);
+    QHBoxLayout *btnLayout = new QHBoxLayout(btnWidget);
+    btnLayout->setContentsMargins(0, 0, 0, 0);
+    btnLayout->setSpacing(8);
+    btnLayout->addWidget(productionStartBtn);
+    btnLayout->addWidget(productionStopBtn);
+    btnLayout->addWidget(productionClearBtn);
+    btnLayout->addStretch(1);
+
     inputLayout->addWidget(new QLabel(QStringLiteral("终端SN"), inputGroup), 0, 0);
     inputLayout->addWidget(productionSnEdit, 0, 1, 1, 4);
-    inputLayout->addWidget(new QLabel(QStringLiteral("通过阈值"), inputGroup), 1, 0);
-    inputLayout->addWidget(productionPassThresholdSpin, 1, 1);
-    inputLayout->addWidget(productionStartBtn, 1, 2);
-    inputLayout->addWidget(productionStopBtn, 1, 3);
-    inputLayout->addWidget(productionClearBtn, 1, 4);
+    inputLayout->addWidget(new QLabel(QStringLiteral("硬件版本"), inputGroup), 1, 0);
+    inputLayout->addWidget(productionHwVerEdit, 1, 1);
+    inputLayout->addWidget(new QLabel(QStringLiteral("物料变更"), inputGroup), 1, 2);
+    inputLayout->addWidget(productionMatChangeEdit, 1, 3);
+    inputLayout->addWidget(productionHwVerLockBtn, 1, 4);
+    inputLayout->addWidget(new QLabel(QStringLiteral("通过阈值"), inputGroup), 2, 0);
+    inputLayout->addWidget(productionPassThresholdSpin, 2, 1);
+    inputLayout->addWidget(btnWidget, 2, 2, 1, 3);
     inputLayout->setColumnStretch(1, 1);
+    inputLayout->setColumnStretch(3, 1);
 
     QGroupBox *resultGroup = new QGroupBox(QStringLiteral("检测结果"), widget);
     QGridLayout *resultLayout = new QGridLayout(resultGroup);
@@ -3146,7 +3220,7 @@ void MainWindow::updateProductionTestPanel(const ProductionTestState &state)
     setLabelValue(productionStateValue, state.phaseText);
     setLabelValue(productionSnValue, state.sn);
     setLabelValue(productionWriteValue,
-                  productionTestService.isWritingSn() ? QStringLiteral("写入中") :
+                  productionTestService.isWriting() ? QStringLiteral("写入中") :
                   (state.sn.isEmpty() ? QStringLiteral("未写入") :
                    (state.resultText == QStringLiteral("FAIL") && state.completedSamples == 0 ? QStringLiteral("写入失败") : QStringLiteral("写入完成"))));
     setLabelValue(productionProgressValue, QStringLiteral("%1 / %2").arg(state.completedSamples).arg(state.totalSamples));
@@ -3181,8 +3255,17 @@ void MainWindow::updateProductionTestPanel(const ProductionTestState &state)
         productionResultBanner->setStyleSheet(style);
     }
 
+    if (productionHwVerEdit != nullptr) {
+        productionHwVerEdit->setEnabled(!running);
+    }
+    if (productionMatChangeEdit != nullptr) {
+        productionMatChangeEdit->setEnabled(!running);
+    }
+    if (productionHwVerLockBtn != nullptr) {
+        productionHwVerLockBtn->setEnabled(!running);
+    }
     if (productionSnEdit != nullptr) {
-        productionSnEdit->setEnabled(!running);
+        productionSnEdit->setEnabled(!running && productionHwVerLocked);
     }
     const bool canStartProduction = canStarted &&
         !stressTestService.stats().running &&
@@ -3193,7 +3276,7 @@ void MainWindow::updateProductionTestPanel(const ProductionTestState &state)
         productionPassThresholdSpin->setEnabled(!running && canStartProduction);
     }
     if (productionStartBtn != nullptr) {
-        productionStartBtn->setEnabled(!running && canStartProduction);
+        productionStartBtn->setEnabled(!running && canStartProduction && productionHwVerLocked);
     }
     if (productionStopBtn != nullptr) {
         productionStopBtn->setEnabled(running);
@@ -3254,8 +3337,10 @@ void MainWindow::startProductionTestFromSn(const QString &sn)
     ProductionTestConfig config;
     config.totalSamples = 100;
     config.passRateThreshold = productionPassThresholdSpin == nullptr ? 95.0 : productionPassThresholdSpin->value();
-    if (!productionTestService.start(sn, config, &error)) {
-        QMessageBox::warning(this, QStringLiteral("SN格式错误"), error);
+    const QString hwVer = productionHwVerEdit == nullptr ? QString() : productionHwVerEdit->text().trimmed();
+    const QString matChange = productionMatChangeEdit == nullptr ? QString() : productionMatChangeEdit->text().trimmed();
+    if (!productionTestService.start(sn, hwVer, matChange, config, &error)) {
+        QMessageBox::warning(this, QStringLiteral("格式错误"), error);
         if (productionSnEdit != nullptr) {
             productionSnEdit->setStyleSheet(QStringLiteral("border:1px solid #DC2626;"));
         }
@@ -3312,7 +3397,7 @@ void MainWindow::prepareProductionSnInput()
         return;
     }
     productionSnEdit->clear();
-    productionSnEdit->setEnabled(true);
+    productionSnEdit->setEnabled(productionHwVerLocked);
     productionSnEdit->setFocus();
     productionSnEdit->selectAll();
 }
@@ -3321,6 +3406,10 @@ void MainWindow::processProductionScanText(const QString &text, bool showError)
 {
     if (productionTestService.isRunning()) {
         appendProductionTestLog(QStringLiteral("检测中收到扫码输入，已忽略"));
+        return;
+    }
+    if (!productionHwVerLocked) {
+        appendProductionTestLog(QStringLiteral("硬件版本或物料变更未确定锁定，扫码输入已忽略"));
         return;
     }
     const QString sn = text.trimmed().toUpper();
@@ -3791,6 +3880,25 @@ void MainWindow::loadAppConfig()
     }
     syncHlConfigToService();
 
+    productionHwVerLocked = config.productionHwVerLocked;
+    if (productionHwVerEdit != nullptr) {
+        productionHwVerEdit->setText(config.productionHwVer);
+        productionHwVerEdit->setReadOnly(productionHwVerLocked);
+    }
+    if (productionMatChangeEdit != nullptr) {
+        productionMatChangeEdit->setText(config.productionMatChange);
+        productionMatChangeEdit->setReadOnly(productionHwVerLocked);
+    }
+    if (productionHwVerLockBtn != nullptr) {
+        productionHwVerLockBtn->setText(productionHwVerLocked ? QStringLiteral("修改") : QStringLiteral("确定"));
+    }
+    if (productionSnEdit != nullptr) {
+        productionSnEdit->setEnabled(productionHwVerLocked);
+    }
+    if (productionStartBtn != nullptr) {
+        productionStartBtn->setEnabled(productionHwVerLocked);
+    }
+
     logService.logRuntime(LogLevel::Info, QStringLiteral("Application started"));
 }
 
@@ -3894,6 +4002,33 @@ void MainWindow::saveAppConfig()
         }
     }
 
+    if (mainVerticalSplitter != nullptr && !canLogCompact) {
+        const QList<int> sizes = mainVerticalSplitter->sizes();
+        if (sizes.size() >= 2 && sizes.at(0) > 0 && sizes.at(1) > 0) {
+            config.mainTopHeight = sizes.at(0);
+            config.mainLogHeight = sizes.at(1);
+        }
+    }
+    config.canLogCompact = canLogCompact;
+    if (testCaseSplitter != nullptr) {
+        const QList<int> sizes = testCaseSplitter->sizes();
+        if (sizes.size() >= 2 && sizes.at(0) > 0 && sizes.at(1) > 0) {
+            config.testCaseListWidth = sizes.at(0);
+            config.testCaseDetailWidth = sizes.at(1);
+        }
+    }
+    config.layoutPreset = 1;
+    if (autoCompactLogOnTestExecutionCheck != nullptr) {
+        config.autoCompactLogOnTestExecution = autoCompactLogOnTestExecutionCheck->isChecked();
+    }
+
+    if (productionHwVerEdit != nullptr) {
+        config.productionHwVer = productionHwVerEdit->text().trimmed();
+    }
+    if (productionMatChangeEdit != nullptr) {
+        config.productionMatChange = productionMatChangeEdit->text().trimmed();
+    }
+    config.productionHwVerLocked = productionHwVerLocked;
     config.logDirectory = logDirectory;
     appConfig.save(config);
     logService.logRuntime(LogLevel::Info, QStringLiteral("Application settings saved"));

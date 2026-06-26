@@ -20,6 +20,8 @@ struct ProductionTestState
     bool running = false;
     QString phaseText;
     QString sn;
+    QString hwVer;
+    QString matChange;
     int totalSamples = 100;
     int completedSamples = 0;
     int successCount = 0;
@@ -39,7 +41,7 @@ class ProductionTestService : public QObject
 public:
     explicit ProductionTestService(QObject *parent = nullptr);
 
-    bool start(const QString &sn, const ProductionTestConfig &config, QString *error);
+    bool start(const QString &sn, const QString &hwVer, const QString &matChange, const ProductionTestConfig &config, QString *error);
     void stop(const QString &reason);
     void reset();
     void handleWriteFinished(bool success, const QString &message);
@@ -48,10 +50,13 @@ public:
 
     bool isRunning() const;
     bool isWritingSn() const;
+    bool isWriting() const;
     bool isTestingCard() const;
     ProductionTestState state() const;
 
     static bool validateSn(const QString &sn, QString *error);
+    static bool validateHwVersion(const QString &hwVer, quint16 *versionValue = nullptr, QString *error = nullptr);
+    static bool validateMaterialChange(const QString &matChange, quint16 *value = nullptr, QString *error = nullptr);
     static QByteArray snToBytes(const QString &sn);
 
 signals:
@@ -70,6 +75,8 @@ private:
     {
         Idle,
         WritingSn,
+        WritingHwVersion,
+        WritingMaterialChange,
         TestingCard,
         Passed,
         Failed,
@@ -98,6 +105,7 @@ private:
     bool m_waitingTagCompletion;
     QTimer *m_tagWaitTimer;
     QTimer *m_sampleTimeoutTimer;
+    qint64 m_cardTestStartTime;
 };
 
 #endif // PRODUCTIONTESTSERVICE_H

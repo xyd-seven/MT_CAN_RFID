@@ -14,6 +14,7 @@ ProductionTestService::ProductionTestService(QObject *parent)
     , m_waitingTagCompletion(false)
     , m_tagWaitTimer(new QTimer(this))
     , m_sampleTimeoutTimer(new QTimer(this))
+    , m_cardTestStartTime(0)
 {
     m_tagWaitTimer->setSingleShot(true);
     m_sampleTimeoutTimer->setSingleShot(true);
@@ -23,7 +24,7 @@ ProductionTestService::ProductionTestService(QObject *parent)
     m_state.resultText = QStringLiteral("-");
 }
 
-bool ProductionTestService::start(const QString &sn, const ProductionTestConfig &config, QString *error)
+bool ProductionTestService::start(const QString &sn, const QString &hwVer, const QString &matChange, const ProductionTestConfig &config, QString *error)
 {
     if (isRunning()) {
         if (error != nullptr) {
@@ -34,6 +35,16 @@ bool ProductionTestService::start(const QString &sn, const ProductionTestConfig 
 
     const QString normalizedSn = sn.trimmed().toUpper();
     if (!validateSn(normalizedSn, error)) {
+        return false;
+    }
+
+    const QString trimmedHwVer = hwVer.trimmed();
+    if (!validateHwVersion(trimmedHwVer, nullptr, error)) {
+        return false;
+    }
+
+    const QString trimmedMatChange = matChange.trimmed();
+    if (!validateMaterialChange(trimmedMatChange, nullptr, error)) {
         return false;
     }
 
@@ -51,6 +62,8 @@ bool ProductionTestService::start(const QString &sn, const ProductionTestConfig 
     m_state.running = true;
     m_state.phaseText = QStringLiteral("写入SN");
     m_state.sn = normalizedSn;
+    m_state.hwVer = trimmedHwVer;
+    m_state.matChange = trimmedMatChange;
     m_state.totalSamples = m_config.totalSamples;
     m_state.passRateThreshold = m_config.passRateThreshold;
     m_state.resultText = QStringLiteral("RUNNING");
@@ -60,7 +73,7 @@ bool ProductionTestService::start(const QString &sn, const ProductionTestConfig 
     m_waitingTagCompletion = false;
     setPhase(Phase::WritingSn, QStringLiteral("写入SN"));
 
-    emit logMessage(QStringLiteral("产线检测开始 SN=%1").arg(normalizedSn));
+    emit logMessage(QStringLiteral("产线检测开始 SN=%1 硬件版本=%2 物料变更=%3").arg(normalizedSn).arg(trimmedHwVer).arg(trimmedMatChange));
     emit scanControlRequested(false);
     emit logMessage(QStringLiteral("写入SN前停止RFID扫描并清空旧状态"));
     emit writeSnRequested(SnDid, snToBytes(normalizedSn));
@@ -101,22 +114,54 @@ void ProductionTestService::reset()
 
 void ProductionTestService::handleWriteFinished(bool success, const QString &message)
 {
-    if (m_phase != Phase::WritingSn) {
-        return;
-    }
+    if (m_phase == Phase::WritingSn) {
+        if (!success) {
+            finishTest(false, QStringLiteral("SN写入失败：%1").arg(message));
+            return;
+        }
+        emit logMessage(QStringLiteral("SN写入成功：%1").arg(message));
 
-    if (!success) {
-        finishTest(false, QStringLiteral("SN写入失败：%1").arg(message));
-        return;
-    }
+        setPhase(Phase::WritingHwVersion, QStringLiteral("写入硬件版本"));
+        quint16 hwValue = 0;
+        validateHwVersion(m_state.hwVer, &hwValue);
+        QByteArray data;
+        data.append(static_cast<char>((hwValue >> 8) & 0xFF));
+        data.append(static_cast<char>(hwValue & 0xFF));
+        emit logMessage(QStringLiteral("开始写入硬件版本，值=%1").arg(m_state.hwVer));
+        emit writeSnRequested(0xE7E0, data);
+    } else if (m_phase == Phase::WritingHwVersion) {
+        if (!success) {
+            finishTest(false, QStringLiteral("硬件版本写入失败：%1").arg(message));
+            return;
+        }
+        emit logMessage(QStringLiteral("硬件版本写入成功：%1").arg(message));
 
-    emit logMessage(QStringLiteral("SN写入成功：%1").arg(message));
-    startTesting();
+        setPhase(Phase::WritingMaterialChange, QStringLiteral("写入物料变更记录"));
+        quint16 matValue = 0;
+        validateMaterialChange(m_state.matChange, &matValue);
+        QByteArray data;
+        data.append(static_cast<char>((matValue >> 8) & 0xFF));
+        data.append(static_cast<char>(matValue & 0xFF));
+        emit logMessage(QStringLiteral("开始写入物料变更记录，值=%1").arg(m_state.matChange));
+        emit writeSnRequested(0xE7E2, data);
+    } else if (m_phase == Phase::WritingMaterialChange) {
+        if (!success) {
+            finishTest(false, QStringLiteral("物料变更记录写入失败：%1").arg(message));
+            return;
+        }
+        emit logMessage(QStringLiteral("物料变更记录写入成功：%1").arg(message));
+        startTesting();
+    }
 }
 
 void ProductionTestService::handleRfidStatus(const RfidState &state)
 {
     if (m_phase != Phase::TestingCard) {
+        return;
+    }
+
+    // 过滤写码开启检测后的首帧/过渡状态（射频寻卡需要物理时间稳定，延迟 150ms 采样）
+    if (QDateTime::currentMSecsSinceEpoch() - m_cardTestStartTime < 150) {
         return;
     }
 
@@ -168,12 +213,17 @@ void ProductionTestService::handleRfidTagUpdate(const QString &tag)
 
 bool ProductionTestService::isRunning() const
 {
-    return m_phase == Phase::WritingSn || m_phase == Phase::TestingCard;
+    return m_phase == Phase::WritingSn || m_phase == Phase::WritingHwVersion || m_phase == Phase::WritingMaterialChange || m_phase == Phase::TestingCard;
 }
 
 bool ProductionTestService::isWritingSn() const
 {
     return m_phase == Phase::WritingSn;
+}
+
+bool ProductionTestService::isWriting() const
+{
+    return m_phase == Phase::WritingSn || m_phase == Phase::WritingHwVersion || m_phase == Phase::WritingMaterialChange;
 }
 
 bool ProductionTestService::isTestingCard() const
@@ -207,6 +257,77 @@ bool ProductionTestService::validateSn(const QString &sn, QString *error)
         return false;
     }
     return true;
+}
+
+bool ProductionTestService::validateHwVersion(const QString &hwVer, quint16 *versionValue, QString *error)
+{
+    const QString trimmed = hwVer.trimmed();
+    if (trimmed.isEmpty()) {
+        if (error != nullptr) *error = QStringLiteral("硬件版本不能为空");
+        return false;
+    }
+
+    static const QRegularExpression versionPattern(QStringLiteral("^(\\d+)\\.0\\.(\\d+)$"));
+    const QRegularExpressionMatch versionMatch = versionPattern.match(trimmed);
+    if (versionMatch.hasMatch()) {
+        bool majorOk = false;
+        bool revisionOk = false;
+        const int major = versionMatch.captured(1).toInt(&majorOk);
+        const int revision = versionMatch.captured(2).toInt(&revisionOk);
+        if (!majorOk || !revisionOk || major < 0 || major > 0xFF || revision < 0 || revision > 0xFF) {
+            if (error != nullptr) {
+                *error = QStringLiteral("硬件版本范围无效，主/子版本范围为 0~255，例如 1.0.1。");
+            }
+            return false;
+        }
+        if (versionValue != nullptr) {
+            *versionValue = static_cast<quint16>((major << 8) | revision);
+        }
+        return true;
+    }
+
+    QString hexText = trimmed;
+    if (hexText.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
+        hexText = hexText.mid(2);
+    }
+    bool ok = false;
+    const uint val = hexText.toUInt(&ok, 16);
+    if (ok && val <= 0xFFFF) {
+        if (versionValue != nullptr) {
+            *versionValue = static_cast<quint16>(val);
+        }
+        return true;
+    }
+
+    if (error != nullptr) {
+        *error = QStringLiteral("硬件版本请输入 A.0.B 格式，例如 1.0.1；也可输入 0x0101。");
+    }
+    return false;
+}
+
+bool ProductionTestService::validateMaterialChange(const QString &matChange, quint16 *value, QString *error)
+{
+    const QString trimmed = matChange.trimmed();
+    if (trimmed.isEmpty()) {
+        if (error != nullptr) *error = QStringLiteral("物料更改记录不能为空");
+        return false;
+    }
+    QString hexText = trimmed;
+    if (hexText.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
+        hexText = hexText.mid(2);
+    }
+    bool ok = false;
+    const uint val = hexText.toUInt(&ok, 16);
+    if (ok && val <= 0xFFFF) {
+        if (value != nullptr) {
+            *value = static_cast<quint16>(val);
+        }
+        return true;
+    }
+    if (error != nullptr) {
+        *error = QStringLiteral("物料更改记录格式错误，请输入 0x0000 ~ 0xFFFF 范围内的十六进制值，例如 0x0001。");
+    }
+    return false;
 }
 
 QByteArray ProductionTestService::snToBytes(const QString &sn)
@@ -259,6 +380,7 @@ void ProductionTestService::startTesting()
     m_lastValidTag.clear();
     m_waitingTagCompletion = false;
     setPhase(Phase::TestingCard, QStringLiteral("读卡测试中"));
+    m_cardTestStartTime = QDateTime::currentMSecsSinceEpoch();
     emit scanControlRequested(true);
     emit logMessage(QStringLiteral("SN写入完成，发送0x207开始检测，开始读卡测试 %1 次，阈值 %2%")
                         .arg(m_config.totalSamples)
