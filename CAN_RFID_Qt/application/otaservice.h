@@ -17,7 +17,9 @@ struct OtaErrorConfig
     bool enabled = false;
     bool crcError = false;
     bool seqError = false;
+    bool vendorMismatch = false;
     bool hwMismatch = false;
+    bool a2FirstFrameDataError = false;
     bool silentTimeout = false;
     bool ignoreFcInterval = false;
     bool isoTpSnError = false;

@@ -6,6 +6,8 @@
 #include "canthread.h"
 #include <QThread>
 #include <QCloseEvent>
+#include <QMoveEvent>
+#include <QResizeEvent>
 #include <QLabel>
 #include <QWidget>
 #include <QSpinBox>
@@ -13,6 +15,7 @@
 #include <QPushButton>
 #include <QGroupBox>
 #include <QTimer>
+#include <QAction>
 #include "rfidprotocol.h"
 #include "application/appconfig.h"
 #include "application/logservice.h"
@@ -98,6 +101,11 @@ private slots:
 
     void closeEvent(QCloseEvent *event);
     bool eventFilter(QObject *watched, QEvent *event);
+
+protected:
+    void moveEvent(QMoveEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+
 private:
     void setupRfidPanel();
     QWidget *createRfidMonitorTab(QWidget *parent);
@@ -147,18 +155,31 @@ private:
     void safeRunAndJudgeSelectedTestCase();
     void bindStressStatsToSelectedTestCase();
     void runSelectedTestCaseAuto();
+    void runSelectedTestCaseSemiAssist();
     void runFilteredTestCases();
     void retestFailedCases();
     void applyTestTemplatePreset(int index);
     void createTestSession();
+    void openExistingTestSession();
     void openTestSessionDirectory();
     void importTestCases();
     void appendTestEvidenceFrame(const CanFrame &frame, const QString &decodedText);
+    void resetCurrentCaseEvidenceView(const QString &message);
     void updateTestSessionStats();
+    void updateTestExecutionSummary();
+    void updateEvidenceSummary();
+    void copySelectedTestCaseKeyFrames();
+    void updateTestExecutionTabAvailability();
+    void markTestResultDirty();
+    bool confirmSaveOrDiscardTestResultChanges();
     QString protocolExpectationText(const TestCase &testCase) const;
     QString judgeTestCaseEvidence(const TestCase &testCase, TestResultStatus *status) const;
+    bool saveCurrentTestCaseResult(QString *error);
+    bool precheckTestJudgeContext(const TestCase &testCase, QString *reason) const;
     bool precheckTestExecution(const TestCase &testCase, QString *reason) const;
+    bool confirmOverwriteEvidenceForCase(const QString &caseId, const QString &actionText);
     bool sendAutoTestCommand(const TestCase &testCase, QString *message);
+    bool sendSemiAssistCommand(const TestCase &testCase, QString *message);
     QString readEvidenceText(const QString &caseId) const;
     void refreshProgressBoard();
     QString testReportMarkdown() const;
@@ -178,7 +199,6 @@ private:
     void saveAppConfig();
     void restoreLayoutConfig(const AppConfigData &config);
     void applyCanLogCompact(bool compact);
-    void applyLayoutPreset(int preset);
     void openCanLogWindow();
     void syncCanLogWindowRows(const QVector<QStringList> &rows);
 
@@ -233,7 +253,6 @@ private:
     QPushButton *saveCanLogButton;
     QPushButton *compactCanLogButton;
     QPushButton *popCanLogButton;
-    QComboBox *layoutPresetCombo;
     QSplitter *mainVerticalSplitter;
     QSplitter *testCaseSplitter;
     CanLogWindow *canLogWindow;
@@ -266,6 +285,9 @@ private:
     bool rfidScanning;
     bool deviceOpened;
     bool canInitialized;
+    bool testSavedRfidControlTimerActive;
+    bool testSavedRfidScanning;
+    bool testHasSavedRfidControlState;
 
     QGroupBox *statusGroup;
     QTabWidget *rfidTabs;
@@ -303,15 +325,19 @@ private:
     QLabel *testCaseTitleValue;
     QTextEdit *testCaseDetailText;
     QTextEdit *testExpectationText;
+    QTabWidget *testDetailTabs;
+    QTextEdit *testExecutionSummaryText;
     QComboBox *testResultCombo;
     QTextEdit *testActualResultEdit;
     QLineEdit *testDefectIdEdit;
     QTextEdit *testCaseRemarkEdit;
+    QLabel *testEvidenceSummaryValue;
     QTextEdit *testEvidenceLogText;
     QTextEdit *testModuleStatsText;
     QTextEdit *testProgressBoardText;
     QTextEdit *testRetestListText;
     QPushButton *testNewSessionBtn;
+    QPushButton *testOpenSessionBtn;
     QPushButton *testStartCaseBtn;
     QPushButton *testJudgeCaseBtn;
     QPushButton *testSafeRunJudgeBtn;
@@ -320,14 +346,18 @@ private:
     QPushButton *testRetestFailedBtn;
     QPushButton *testBindStressBtn;
     QPushButton *testSaveResultBtn;
-    QPushButton *testExportResultBtn;
-    QPushButton *testExportExcelBtn;
-    QPushButton *testExportMarkdownBtn;
-    QPushButton *testExportPdfBtn;
+    QAction *testExportResultAction;
+    QAction *testExportExcelAction;
+    QAction *testExportMarkdownAction;
+    QAction *testExportPdfAction;
+    QPushButton *testCopyKeyFramesBtn;
     QPushButton *testOpenSessionDirBtn;
     QComboBox *testTemplatePresetCombo;
     QCheckBox *testFailPauseCheck;
     QCheckBox *autoCompactLogOnTestExecutionCheck;
+    bool testResultDirty;
+    bool loadingTestCaseDetail;
+    bool testBatchOverwriteConfirmed;
     QLineEdit *productionSnEdit;
     QLabel *productionResultBanner;
     QLabel *productionStateValue;
@@ -390,7 +420,9 @@ private:
     QCheckBox *otaInjectMasterCheck;
     QCheckBox *otaInjectCrcErrorCheck;
     QCheckBox *otaInjectSeqErrorCheck;
+    QCheckBox *otaInjectVendorMismatchCheck;
     QCheckBox *otaInjectHwMismatchCheck;
+    QCheckBox *otaInjectA2FirstFrameErrorCheck;
     QCheckBox *otaInjectSilentTimeoutCheck;
     QCheckBox *otaInjectIgnoreFcCheck;
     QCheckBox *otaInjectIsoTpSnCheck;

@@ -237,7 +237,7 @@ bool CANThread::sendData(UINT id, UINT frame_type_index, UINT protocol_index, UI
 
 bool CANThread::sendClassicData(UINT id, UINT channel, const QByteArray &payload)
 {
-    if (id > 0x7FF || payload.size() != 8) {
+    if (id > 0x7FF || payload.isEmpty() || payload.size() > 8) {
         return false;
     }
     return sendData(id, 0, 0, 0, channel, payload.constData(), static_cast<UINT>(payload.size()));

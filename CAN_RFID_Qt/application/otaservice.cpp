@@ -438,7 +438,17 @@ void OtaWorker::run()
         QByteArray a1Payload;
         a1Payload.append(static_cast<char>(0xA1));
         a1Payload.append(static_cast<char>(protocolVersion));
-        a1Payload.append(static_cast<char>(vendorCode));
+        quint8 sendVendorCode = vendorCode;
+        if (injectConfig.enabled && injectConfig.vendorMismatch) {
+            sendVendorCode = vendorCode == 0xFF ? 0x00 : static_cast<quint8>(vendorCode ^ 0xFF);
+            updateStatus(static_cast<int>(OtaService::State::StartUpgrade),
+                         QStringLiteral("[注入] A1 厂商代码不匹配：0x%1 -> 0x%2")
+                             .arg(vendorCode, 2, 16, QChar('0'))
+                             .arg(sendVendorCode, 2, 16, QChar('0'))
+                             .toUpper(),
+                         10);
+        }
+        a1Payload.append(static_cast<char>(sendVendorCode));
         if (injectConfig.enabled && injectConfig.hwMismatch) {
             // 鏁呮剰鍙戦€侀敊璇殑纭欢鐗堟湰锛屾ā鎷熺‖浠剁増鏈笉鍖归厤
             a1Payload.append(static_cast<char>(0xFF));
@@ -501,6 +511,7 @@ void OtaWorker::run()
 send_data_phase:
     updateStatus(static_cast<int>(OtaService::State::SendData), QStringLiteral("开始下发固件包..."), 15);
     int totalChunks = (fileData.size() + chunkSize - 1) / chunkSize;
+    bool firstA2DataErrorInjected = false;
 
     for (int i = 0; i < totalChunks; ++i) {
         if (abortRequested.load()) {
@@ -518,6 +529,23 @@ send_data_phase:
         int len = qMin(chunkSize, fileData.size() - offset);
         QByteArray chunkData = fileData.mid(offset, len);
         quint16 chunkId = i + 1;
+
+        if (injectConfig.enabled &&
+            injectConfig.a2FirstFrameDataError &&
+            !firstA2DataErrorInjected &&
+            i == 0) {
+            if (!chunkData.isEmpty()) {
+                chunkData[0] = static_cast<char>(static_cast<quint8>(chunkData[0]) ^ 0xFF);
+                firstA2DataErrorInjected = true;
+                updateStatus(static_cast<int>(OtaService::State::SendData),
+                             QStringLiteral("[注入] A2 首帧数据错误：已篡改第 1 个 A2 包的数据内容，包号保持 0x0001。"),
+                             15);
+            } else {
+                updateStatus(static_cast<int>(OtaService::State::SendData),
+                             QStringLiteral("[注入] A2 首帧数据错误未执行：首包数据为空。"),
+                             15);
+            }
+        }
 
         if (injectConfig.enabled && injectConfig.seqError && chunkId == 3) {
             // 鏁呮剰绡℃敼绗?3 鍖呯殑鍖呭彿涓?99锛屽埗閫犲寘鍙蜂笉杩炵画

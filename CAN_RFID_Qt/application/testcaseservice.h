@@ -18,6 +18,7 @@ public:
     QStringList modules() const;
 
     bool createSession(const TestSession &session, QString *error = nullptr);
+    bool loadSession(const QString &sessionJsonPath, QString *error = nullptr);
     bool hasSession() const;
     const TestSession &session() const;
 
@@ -40,6 +41,7 @@ public:
     bool exportResultsCsv(const QString &filePath, QString *error = nullptr) const;
     bool exportResultsExcelHtml(const QString &filePath, QString *error = nullptr) const;
     QString evidencePathForCase(const QString &caseId) const;
+    bool evidenceExistsForCase(const QString &caseId) const;
     bool saveSessionJson(QString *error = nullptr) const;
 
 private:

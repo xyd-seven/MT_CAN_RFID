@@ -2,6 +2,7 @@
 #include "ui_mainwindow.h"
 #include "canlogwindow.h"
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QMessageBox>
@@ -38,6 +39,11 @@
 #include <QStandardPaths>
 #include <QTextDocument>
 #include <QUrl>
+#include <QAction>
+#include <QMenu>
+#include <QToolButton>
+#include <QClipboard>
+#include <QSignalBlocker>
 
 namespace {
 const QStringList DeviceTypeNames = {
@@ -50,6 +56,8 @@ const int DeviceTypeIndexes[] = {42, 3, 42, 3, 42, 3, 41, 4, 41, 4, 200, 201};
 constexpr int MaxManualPayloadBytes = 64;
 constexpr int LogFlushIntervalMs = 100;
 constexpr int LogPruneBatchRows = 200;
+constexpr int MeituanOnlineTimeoutMs = 3000;
+constexpr int QingjuOnlineTimeoutMs = 1500;
 
 QString normalizeHexText(QString text)
 {
@@ -97,6 +105,40 @@ bool parseHexByteArray(const QString &text, QByteArray *data)
     }
     return true;
 }
+
+QString cleanDisplayText(const QString &text, const QString &fallback)
+{
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty()) {
+        return fallback;
+    }
+    int questionCount = 0;
+    for (const QChar &ch : trimmed) {
+        if (ch == QLatin1Char('?')) {
+            ++questionCount;
+        }
+    }
+    if (questionCount > 0 && questionCount * 3 >= trimmed.size()) {
+        return fallback;
+    }
+    return trimmed;
+}
+
+QString testFailureCategoryText(const QString &category)
+{
+    const QString value = category.trimmed();
+    if (value.isEmpty()) return QStringLiteral("-");
+    if (value == QStringLiteral("manual_required")) return QStringLiteral("需要人工确认");
+    if (value == QStringLiteral("manual_confirmation_required")) return QStringLiteral("待人工确认");
+    if (value == QStringLiteral("response_missing")) return QStringLiteral("未收到响应");
+    if (value == QStringLiteral("request_missing")) return QStringLiteral("未发现请求帧");
+    if (value == QStringLiteral("expected_mismatch")) return QStringLiteral("与预期不一致");
+    if (value == QStringLiteral("evidence_missing")) return QStringLiteral("证据不足");
+    if (value == QStringLiteral("command_not_sent")) return QStringLiteral("命令未发送");
+    if (value == QStringLiteral("timestamp_invalid")) return QStringLiteral("时间戳无效");
+    if (value == QStringLiteral("unexpected_nrc")) return QStringLiteral("否定响应码不符合预期");
+    return value;
+}
 }
 
 MainWindow::MainWindow(QWidget *parent) :
@@ -112,7 +154,6 @@ MainWindow::MainWindow(QWidget *parent) :
     saveCanLogButton(nullptr),
     compactCanLogButton(nullptr),
     popCanLogButton(nullptr),
-    layoutPresetCombo(nullptr),
     mainVerticalSplitter(nullptr),
     testCaseSplitter(nullptr),
     canLogWindow(nullptr),
@@ -138,6 +179,9 @@ MainWindow::MainWindow(QWidget *parent) :
     rfidScanning(false),
     deviceOpened(false),
     canInitialized(false),
+    testSavedRfidControlTimerActive(false),
+    testSavedRfidScanning(false),
+    testHasSavedRfidControlState(false),
     statusGroup(nullptr),
     rfidTabs(nullptr),
     rfidStartScanBtn(nullptr),
@@ -172,15 +216,19 @@ MainWindow::MainWindow(QWidget *parent) :
     testCaseTitleValue(nullptr),
     testCaseDetailText(nullptr),
     testExpectationText(nullptr),
+    testDetailTabs(nullptr),
+    testExecutionSummaryText(nullptr),
     testResultCombo(nullptr),
     testActualResultEdit(nullptr),
     testDefectIdEdit(nullptr),
     testCaseRemarkEdit(nullptr),
+    testEvidenceSummaryValue(nullptr),
     testEvidenceLogText(nullptr),
     testModuleStatsText(nullptr),
     testProgressBoardText(nullptr),
     testRetestListText(nullptr),
     testNewSessionBtn(nullptr),
+    testOpenSessionBtn(nullptr),
     testStartCaseBtn(nullptr),
     testJudgeCaseBtn(nullptr),
     testSafeRunJudgeBtn(nullptr),
@@ -189,14 +237,18 @@ MainWindow::MainWindow(QWidget *parent) :
     testRetestFailedBtn(nullptr),
     testBindStressBtn(nullptr),
     testSaveResultBtn(nullptr),
-    testExportResultBtn(nullptr),
-    testExportExcelBtn(nullptr),
-    testExportMarkdownBtn(nullptr),
-    testExportPdfBtn(nullptr),
+    testExportResultAction(nullptr),
+    testExportExcelAction(nullptr),
+    testExportMarkdownAction(nullptr),
+    testExportPdfAction(nullptr),
+    testCopyKeyFramesBtn(nullptr),
     testOpenSessionDirBtn(nullptr),
     testTemplatePresetCombo(nullptr),
     testFailPauseCheck(nullptr),
     autoCompactLogOnTestExecutionCheck(nullptr),
+    testResultDirty(false),
+    loadingTestCaseDetail(false),
+    testBatchOverwriteConfirmed(false),
     productionSnEdit(nullptr),
     productionResultBanner(nullptr),
     productionStateValue(nullptr),
@@ -250,7 +302,9 @@ MainWindow::MainWindow(QWidget *parent) :
     otaInjectMasterCheck(nullptr),
     otaInjectCrcErrorCheck(nullptr),
     otaInjectSeqErrorCheck(nullptr),
+    otaInjectVendorMismatchCheck(nullptr),
     otaInjectHwMismatchCheck(nullptr),
+    otaInjectA2FirstFrameErrorCheck(nullptr),
     otaInjectSilentTimeoutCheck(nullptr),
     otaInjectIgnoreFcCheck(nullptr),
     otaInjectIsoTpSnCheck(nullptr),
@@ -530,7 +584,7 @@ MainWindow::MainWindow(QWidget *parent) :
             updateQingjuOnlineStatus(true);
             return;
         }
-        if (lastRfidFrameTime.isValid() && lastRfidFrameTime.msecsTo(QDateTime::currentDateTime()) < 1500) {
+        if (lastRfidFrameTime.isValid() && lastRfidFrameTime.msecsTo(QDateTime::currentDateTime()) < MeituanOnlineTimeoutMs) {
             rfidOnlineStatusValue->setText(QStringLiteral("在线"));
             rfidOnlineStatusValue->setStyleSheet("color: green; font-weight: bold;");
             updateMeituanTopStatus();
@@ -700,7 +754,9 @@ void MainWindow::setupRfidPanel()
             applyCanLogCompact(true);
         }
         updateTestExecutionControls();
+        updateTestExecutionTabAvailability();
     });
+    updateTestExecutionTabAvailability();
 }
 
 void MainWindow::setupStatusPanel()
@@ -771,6 +827,7 @@ void MainWindow::setupCompactMainLayout()
     protocolModeCombo->addItem(QStringLiteral("哈啰协议"), 4);
     protocolModeCombo->setMinimumWidth(160);
     connect(protocolModeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::onProtocolModeChanged);
+    updateTestExecutionTabAvailability();
 
     headerLayout->addWidget(new QLabel(QStringLiteral("协议模式"), configHeaderWidget), 0, 0);
     headerLayout->addWidget(protocolModeCombo, 0, 1);
@@ -922,40 +979,28 @@ void MainWindow::setupCompactMainLayout()
     logButtonsLayout->setContentsMargins(0, 0, 0, 0);
     logButtonsLayout->setHorizontalSpacing(6);
     logButtonsLayout->setVerticalSpacing(6);
-    layoutPresetCombo = new QComboBox(ui->groupBox_3);
-    layoutPresetCombo->addItems(QStringList()
-        << QStringLiteral("紧凑布局")
-        << QStringLiteral("标准布局")
-        << QStringLiteral("大屏布局")
-        << QStringLiteral("自定义布局"));
-    layoutPresetCombo->setMinimumWidth(120);
-    logButtonsLayout->addWidget(layoutPresetCombo, 0, 0, 1, 2);
-    connect(layoutPresetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int index) {
-        applyLayoutPreset(index);
-        saveAppConfig();
-    });
     compactCanLogButton = new QPushButton(QStringLiteral("收起日志"), ui->groupBox_3);
-    logButtonsLayout->addWidget(compactCanLogButton, 1, 0, 1, 2);
+    logButtonsLayout->addWidget(compactCanLogButton, 0, 0, 1, 2);
     connect(compactCanLogButton, &QPushButton::clicked, this, [this]() {
         applyCanLogCompact(!canLogCompact);
         saveAppConfig();
     });
     if (canAutoSaveCheckBox != nullptr) {
-        logButtonsLayout->addWidget(canAutoSaveCheckBox, 2, 0, 1, 2);
+        logButtonsLayout->addWidget(canAutoSaveCheckBox, 1, 0, 1, 2);
     }
-    logButtonsLayout->addWidget(ui->checkBox_4, 3, 0);
+    logButtonsLayout->addWidget(ui->checkBox_4, 2, 0);
     show0x207LogCheck = new QCheckBox(QStringLiteral("显示0x207"), ui->groupBox_3);
     show0x207LogCheck->setText(QStringLiteral("显示0x207"));
-    logButtonsLayout->addWidget(show0x207LogCheck, 3, 1);
+    logButtonsLayout->addWidget(show0x207LogCheck, 2, 1);
     connect(show0x207LogCheck, &QCheckBox::stateChanged, this, [this](int) {
         saveAppConfig();
     });
-    logButtonsLayout->addWidget(ui->cleanListBtn, 4, 0);
+    logButtonsLayout->addWidget(ui->cleanListBtn, 3, 0);
     if (saveCanLogButton != nullptr) {
-        logButtonsLayout->addWidget(saveCanLogButton, 4, 1);
+        logButtonsLayout->addWidget(saveCanLogButton, 3, 1);
     }
     popCanLogButton = new QPushButton(QStringLiteral("弹出日志窗口"), ui->groupBox_3);
-    logButtonsLayout->addWidget(popCanLogButton, 5, 0, 1, 2);
+    logButtonsLayout->addWidget(popCanLogButton, 4, 0, 1, 2);
     connect(popCanLogButton, &QPushButton::clicked, this, &MainWindow::openCanLogWindow);
     logLayout->addLayout(logButtonsLayout);
 
@@ -1008,11 +1053,6 @@ void MainWindow::setupCompactMainLayout()
     mainVerticalSplitter->setStretchFactor(0, 3);
     mainVerticalSplitter->setStretchFactor(1, 1);
     connect(mainVerticalSplitter, &QSplitter::splitterMoved, this, [this]() {
-        if (layoutPresetCombo != nullptr && layoutPresetCombo->currentIndex() != 3) {
-            layoutPresetCombo->blockSignals(true);
-            layoutPresetCombo->setCurrentIndex(3);
-            layoutPresetCombo->blockSignals(false);
-        }
         if (!canLogCompact) {
             saveAppConfig();
         }
@@ -2017,12 +2057,14 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
         return true;
     };
 
-    connect(rfidStartScanBtn, &QPushButton::clicked, this, [this]() {
+    connect(rfidStartScanBtn, &QPushButton::clicked, this, [this, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
         rfidScanning = true;
         updateMeituanTopStatus();
         sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
     });
-    connect(rfidStopScanBtn, &QPushButton::clicked, this, [this]() {
+    connect(rfidStopScanBtn, &QPushButton::clicked, this, [this, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
         rfidScanning = false;
         updateMeituanTopStatus();
         sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
@@ -2035,11 +2077,13 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
         }
         saveAppConfig();
     });
-    connect(rfidSetPeriodBtn, &QPushButton::clicked, this, [this]() {
+    connect(rfidSetPeriodBtn, &QPushButton::clicked, this, [this, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
         sendRfidFrame(RfidProtocol::RequestFrameId,
                       RfidProtocol::buildSetScanPeriodFrame(static_cast<quint8>(rfidScanPeriodSpin->value() / 10)));
     });
-    connect(rfidRestartBtn, &QPushButton::clicked, this, [this]() {
+    connect(rfidRestartBtn, &QPushButton::clicked, this, [this, ensureCanStarted]() {
+        if (!ensureCanStarted()) return;
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
     });
 
@@ -2439,16 +2483,22 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     sessionLayout->addWidget(new QLabel(QStringLiteral("测试环境"), sessionGroup), 1, 4);
     sessionLayout->addWidget(testEnvironmentCombo, 1, 5);
     sessionLayout->addWidget(new QLabel(QStringLiteral("备注"), sessionGroup), 2, 0);
-    sessionLayout->addWidget(testSessionRemarkEdit, 2, 1, 1, 5);
+    sessionLayout->addWidget(testSessionRemarkEdit, 2, 1, 1, 3);
     sessionLayout->addWidget(new QLabel(QStringLiteral("会话目录"), sessionGroup), 3, 0);
     sessionLayout->addWidget(testSessionDirectoryValue, 3, 1, 1, 3);
 
     testNewSessionBtn = new QPushButton(QStringLiteral("新建会话"), sessionGroup);
+    testOpenSessionBtn = new QPushButton(QStringLiteral("打开会话"), sessionGroup);
     testOpenSessionDirBtn = new QPushButton(QStringLiteral("打开目录"), sessionGroup);
     QPushButton *testSessionToggleBtn = new QPushButton(sessionGroup);
-    sessionLayout->addWidget(testNewSessionBtn, 3, 4);
-    sessionLayout->addWidget(testOpenSessionDirBtn, 3, 5);
-    sessionLayout->addWidget(testSessionToggleBtn, 2, 5);
+    QHBoxLayout *sessionButtonLayout = new QHBoxLayout();
+    sessionButtonLayout->setContentsMargins(0, 0, 0, 0);
+    sessionButtonLayout->setSpacing(6);
+    sessionButtonLayout->addWidget(testSessionToggleBtn);
+    sessionButtonLayout->addWidget(testNewSessionBtn);
+    sessionButtonLayout->addWidget(testOpenSessionBtn);
+    sessionButtonLayout->addWidget(testOpenSessionDirBtn);
+    sessionLayout->addLayout(sessionButtonLayout, 2, 4, 1, 2);
     QList<QWidget *> sessionDetailWidgets;
     const QList<QPair<int, int> > detailLabelPositions = QList<QPair<int, int> >()
         << qMakePair(0, 2) << qMakePair(0, 4) << qMakePair(1, 4)
@@ -2464,13 +2514,17 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
                          << testEnvironmentCombo
                          << testSessionRemarkEdit
                          << testSessionDirectoryValue;
-    auto setSessionCollapsed = [testSessionToggleBtn, sessionDetailWidgets](bool collapsed) {
+    auto setSessionCollapsed = [sessionGroup, testSessionToggleBtn, sessionDetailWidgets](bool collapsed) {
         for (QWidget *detailWidget : sessionDetailWidgets) {
             if (detailWidget != nullptr) {
                 detailWidget->setVisible(!collapsed);
             }
         }
         testSessionToggleBtn->setText(collapsed ? QStringLiteral("展开会话信息") : QStringLiteral("收起会话信息"));
+        sessionGroup->layout()->invalidate();
+        sessionGroup->setSizePolicy(QSizePolicy::Preferred, collapsed ? QSizePolicy::Fixed : QSizePolicy::Preferred);
+        sessionGroup->setMaximumHeight(collapsed ? sessionGroup->sizeHint().height() : QWIDGETSIZE_MAX);
+        sessionGroup->updateGeometry();
     };
     bool sessionCollapsed = appConfig.load().testSessionCollapsed;
     setSessionCollapsed(sessionCollapsed);
@@ -2493,10 +2547,16 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     testSearchEdit = new QLineEdit(filterGroup);
     testSearchEdit->setPlaceholderText(QStringLiteral("搜索用例ID/关键字"));
     QPushButton *importBtn = new QPushButton(QStringLiteral("导入用例"), filterGroup);
-    testExportResultBtn = new QPushButton(QStringLiteral("导出结果"), filterGroup);
-    testExportExcelBtn = new QPushButton(QStringLiteral("导出Excel副本"), filterGroup);
-    testExportMarkdownBtn = new QPushButton(QStringLiteral("导出Markdown报告"), filterGroup);
-    testExportPdfBtn = new QPushButton(QStringLiteral("导出PDF报告"), filterGroup);
+    QMenu *testExportMenu = new QMenu(QStringLiteral("导出"), filterGroup);
+    testExportResultAction = testExportMenu->addAction(QStringLiteral("导出结果 CSV"));
+    testExportExcelAction = testExportMenu->addAction(QStringLiteral("导出 Excel 副本"));
+    testExportMarkdownAction = testExportMenu->addAction(QStringLiteral("导出 Markdown 报告"));
+    testExportPdfAction = testExportMenu->addAction(QStringLiteral("导出 PDF 报告"));
+    QToolButton *testExportMenuBtn = new QToolButton(filterGroup);
+    testExportMenuBtn->setText(QStringLiteral("导出"));
+    testExportMenuBtn->setPopupMode(QToolButton::InstantPopup);
+    testExportMenuBtn->setMenu(testExportMenu);
+    testExportMenuBtn->setToolButtonStyle(Qt::ToolButtonTextOnly);
     testRunFilteredBtn = new QPushButton(QStringLiteral("执行筛选项"), filterGroup);
     testRetestFailedBtn = new QPushButton(QStringLiteral("复测失败/阻塞"), filterGroup);
     testTemplatePresetCombo = new QComboBox(filterGroup);
@@ -2512,32 +2572,7 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     testModuleFilterCombo->addItem(QStringLiteral("全部"));
     testPriorityFilterCombo->addItems(QStringList() << QStringLiteral("全部") << QStringLiteral("P0") << QStringLiteral("P1") << QStringLiteral("P2"));
     testResultFilterCombo->addItems(QStringList() << QStringLiteral("全部") << QStringLiteral("未执行") << QStringLiteral("通过") << QStringLiteral("失败") << QStringLiteral("阻塞") << QStringLiteral("不适用"));
-    filterLayout->addWidget(new QLabel(QStringLiteral("模块"), filterGroup));
-    filterLayout->addWidget(testModuleFilterCombo);
-    filterLayout->addWidget(new QLabel(QStringLiteral("优先级"), filterGroup));
-    filterLayout->addWidget(testPriorityFilterCombo);
-    filterLayout->addWidget(new QLabel(QStringLiteral("结果"), filterGroup));
-    filterLayout->addWidget(testResultFilterCombo);
-    filterLayout->addWidget(testSearchEdit, 1);
-    filterLayout->addWidget(testStatsValue);
-    filterLayout->addWidget(importBtn);
-    filterLayout->addWidget(testExportResultBtn);
-    filterLayout->addWidget(testExportExcelBtn);
-    filterLayout->addWidget(testExportMarkdownBtn);
-    filterLayout->addWidget(testExportPdfBtn);
-    filterLayout->addWidget(testRunFilteredBtn);
-    filterLayout->addWidget(testRetestFailedBtn);
-    filterLayout->addWidget(testTemplatePresetCombo);
-    filterLayout->addWidget(testFailPauseCheck);
-    while (QLayoutItem *item = filterLayout->takeAt(0)) {
-        if (QWidget *widgetItem = item->widget()) {
-            QLabel *label = qobject_cast<QLabel *>(widgetItem);
-            if (label != nullptr && label != testStatsValue) {
-                label->deleteLater();
-            }
-        }
-        delete item;
-    }
+
     QHBoxLayout *filterTopLayout = new QHBoxLayout();
     filterTopLayout->setSpacing(6);
     filterTopLayout->addWidget(new QLabel(QStringLiteral("模块"), filterGroup));
@@ -2556,34 +2591,21 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     filterPresetLayout->addWidget(testTemplatePresetCombo);
     filterPresetLayout->addWidget(testFailPauseCheck);
     filterPresetLayout->addStretch();
-    filterLayout->addLayout(filterPresetLayout);
-
-    QHBoxLayout *filterActionLayout = new QHBoxLayout();
-    filterActionLayout->setSpacing(6);
-    filterActionLayout->addStretch();
-    filterActionLayout->addWidget(testRunFilteredBtn);
-    filterActionLayout->addWidget(testRetestFailedBtn);
-    filterActionLayout->addWidget(importBtn);
-    filterActionLayout->addWidget(testExportResultBtn);
-    filterActionLayout->addWidget(testExportExcelBtn);
-    filterActionLayout->addWidget(testExportMarkdownBtn);
-    filterActionLayout->addWidget(testExportPdfBtn);
     autoCompactLogOnTestExecutionCheck = new QCheckBox(QStringLiteral("测试执行时自动收起CAN日志"), filterGroup);
-    filterActionLayout->addWidget(autoCompactLogOnTestExecutionCheck);
+    filterPresetLayout->addWidget(testRunFilteredBtn);
+    filterPresetLayout->addWidget(testRetestFailedBtn);
+    filterPresetLayout->addWidget(importBtn);
+    filterPresetLayout->addWidget(testExportMenuBtn);
+    filterPresetLayout->addWidget(autoCompactLogOnTestExecutionCheck);
     connect(autoCompactLogOnTestExecutionCheck, &QCheckBox::toggled, this, [this]() {
         saveAppConfig();
     });
-    filterLayout->addLayout(filterActionLayout);
+    filterLayout->addLayout(filterPresetLayout);
     mainLayout->addWidget(filterGroup);
 
     testCaseSplitter = new QSplitter(Qt::Horizontal, widget);
     testCaseSplitter->setChildrenCollapsible(false);
     connect(testCaseSplitter, &QSplitter::splitterMoved, this, [this]() {
-        if (layoutPresetCombo != nullptr && layoutPresetCombo->currentIndex() != 3) {
-            layoutPresetCombo->blockSignals(true);
-            layoutPresetCombo->setCurrentIndex(3);
-            layoutPresetCombo->blockSignals(false);
-        }
         saveAppConfig();
     });
     testCaseTableView = new QTableView(testCaseSplitter);
@@ -2611,10 +2633,12 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     testResultCombo = new QComboBox(detailPanel);
     testResultCombo->addItems(QStringList() << QStringLiteral("未执行") << QStringLiteral("通过") << QStringLiteral("失败") << QStringLiteral("阻塞") << QStringLiteral("不适用"));
     testActualResultEdit = new QTextEdit(detailPanel);
-    testActualResultEdit->setMinimumHeight(120);
+    testActualResultEdit->setMinimumHeight(72);
+    testActualResultEdit->setMaximumHeight(110);
     testDefectIdEdit = new QLineEdit(detailPanel);
     testCaseRemarkEdit = new QTextEdit(detailPanel);
-    testCaseRemarkEdit->setMinimumHeight(90);
+    testCaseRemarkEdit->setMinimumHeight(54);
+    testCaseRemarkEdit->setMaximumHeight(88);
     testStartCaseBtn = new QPushButton(QStringLiteral("开始执行"), detailPanel);
     testRunAutoBtn = new QPushButton(QStringLiteral("自动执行本用例"), detailPanel);
     testJudgeCaseBtn = new QPushButton(QStringLiteral("自动判定"), detailPanel);
@@ -2626,15 +2650,15 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     resultLayout->addWidget(new QLabel(QStringLiteral("缺陷编号"), detailPanel), 0, 2);
     resultLayout->addWidget(testDefectIdEdit, 0, 3);
     resultLayout->addWidget(new QLabel(QStringLiteral("实际结果"), detailPanel), 1, 0);
-    resultLayout->addWidget(testActualResultEdit, 1, 1, 1, 3);
+    resultLayout->addWidget(testActualResultEdit, 1, 1, 1, 5);
     resultLayout->addWidget(new QLabel(QStringLiteral("备注"), detailPanel), 2, 0);
-    resultLayout->addWidget(testCaseRemarkEdit, 2, 1, 1, 3);
+    resultLayout->addWidget(testCaseRemarkEdit, 2, 1, 1, 5);
     resultLayout->addWidget(testStartCaseBtn, 3, 0);
     resultLayout->addWidget(testRunAutoBtn, 3, 1);
     resultLayout->addWidget(testJudgeCaseBtn, 3, 2);
-    resultLayout->addWidget(testSaveResultBtn, 3, 3);
-    resultLayout->addWidget(testSafeRunJudgeBtn, 4, 1);
-    resultLayout->addWidget(testBindStressBtn, 4, 2);
+    resultLayout->addWidget(testSafeRunJudgeBtn, 3, 3);
+    resultLayout->addWidget(testBindStressBtn, 3, 4);
+    resultLayout->addWidget(testSaveResultBtn, 3, 5);
     testResultCombo->clear();
     testResultCombo->addItems(QStringList()
         << QStringLiteral("未执行")
@@ -2642,12 +2666,12 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
         << QStringLiteral("失败")
         << QStringLiteral("阻塞")
         << QStringLiteral("不适用"));
-    testStartCaseBtn->setText(QStringLiteral("开始执行"));
-    testRunAutoBtn->setText(QStringLiteral("自动执行本用例"));
+    testStartCaseBtn->setText(QStringLiteral("开始"));
+    testRunAutoBtn->setText(QStringLiteral("自动执行"));
     testJudgeCaseBtn->setText(QStringLiteral("自动判定"));
-    testSafeRunJudgeBtn->setText(QStringLiteral("安全执行/判定"));
-    testBindStressBtn->setText(QStringLiteral("绑定压力统计"));
-    testSaveResultBtn->setText(QStringLiteral("保存记录"));
+    testSafeRunJudgeBtn->setText(QStringLiteral("安全判定"));
+    testBindStressBtn->setText(QStringLiteral("绑定压测"));
+    testSaveResultBtn->setText(QStringLiteral("保存"));
     if (QLayoutItem *item = resultLayout->itemAtPosition(0, 0)) {
         if (QLabel *label = qobject_cast<QLabel *>(item->widget())) label->setText(QStringLiteral("执行结果"));
     }
@@ -2665,21 +2689,26 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     resultLayout->setRowStretch(1, 1);
     resultLayout->setRowStretch(2, 1);
     detailLayout->addWidget(testCaseTitleValue);
-    QTabWidget *detailTabs = new QTabWidget(detailPanel);
+    testDetailTabs = new QTabWidget(detailPanel);
 
-    QWidget *caseInfoPage = new QWidget(detailTabs);
+    testExecutionSummaryText = new QTextEdit(testDetailTabs);
+    testExecutionSummaryText->setReadOnly(true);
+    testExecutionSummaryText->setMinimumHeight(140);
+    testDetailTabs->addTab(testExecutionSummaryText, QStringLiteral("执行摘要"));
+
+    QWidget *caseInfoPage = new QWidget(testDetailTabs);
     QVBoxLayout *caseInfoLayout = new QVBoxLayout(caseInfoPage);
     caseInfoLayout->setContentsMargins(4, 4, 4, 4);
     caseInfoLayout->addWidget(testCaseDetailText);
-    detailTabs->addTab(caseInfoPage, QStringLiteral("用例说明"));
+    testDetailTabs->addTab(caseInfoPage, QStringLiteral("用例说明"));
 
-    QWidget *expectationPage = new QWidget(detailTabs);
+    QWidget *expectationPage = new QWidget(testDetailTabs);
     QVBoxLayout *expectationLayout = new QVBoxLayout(expectationPage);
     expectationLayout->setContentsMargins(4, 4, 4, 4);
     expectationLayout->addWidget(testExpectationText);
-    detailTabs->addTab(expectationPage, QStringLiteral("协议期望"));
+    testDetailTabs->addTab(expectationPage, QStringLiteral("协议期望"));
 
-    QScrollArea *resultScrollArea = new QScrollArea(detailTabs);
+    QScrollArea *resultScrollArea = new QScrollArea(testDetailTabs);
     resultScrollArea->setWidgetResizable(true);
     resultScrollArea->setFrameShape(QFrame::NoFrame);
     QWidget *resultPage = new QWidget(resultScrollArea);
@@ -2688,9 +2717,9 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     resultPageLayout->addLayout(resultLayout);
     resultPageLayout->addStretch();
     resultScrollArea->setWidget(resultPage);
-    detailTabs->addTab(resultScrollArea, QStringLiteral("结果记录"));
+    testDetailTabs->addTab(resultScrollArea, QStringLiteral("结果记录"));
 
-    detailLayout->addWidget(detailTabs, 1);
+    detailLayout->addWidget(testDetailTabs, 1);
     testCaseSplitter->addWidget(testCaseTableView);
     testCaseSplitter->addWidget(detailPanel);
     testCaseSplitter->setStretchFactor(0, 3);
@@ -2702,6 +2731,15 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
 
     QGroupBox *evidenceGroup = new QGroupBox(QStringLiteral("当前用例证据日志"), widget);
     QVBoxLayout *evidenceLayout = new QVBoxLayout(evidenceGroup);
+    QHBoxLayout *evidenceHeaderLayout = new QHBoxLayout();
+    evidenceHeaderLayout->setContentsMargins(0, 0, 0, 0);
+    evidenceHeaderLayout->setSpacing(6);
+    testEvidenceSummaryValue = new QLabel(QStringLiteral("当前用例：- | 结果：- | 关键帧：0"), evidenceGroup);
+    testEvidenceSummaryValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    testCopyKeyFramesBtn = new QPushButton(QStringLiteral("复制关键帧"), evidenceGroup);
+    evidenceHeaderLayout->addWidget(testEvidenceSummaryValue, 1);
+    evidenceHeaderLayout->addWidget(testCopyKeyFramesBtn);
+    evidenceLayout->addLayout(evidenceHeaderLayout);
     testEvidenceLogText = new QTextEdit(evidenceGroup);
     testEvidenceLogText->setReadOnly(true);
     testEvidenceLogText->setMinimumHeight(120);
@@ -2747,18 +2785,26 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     refreshTestCaseModel();
 
     connect(testNewSessionBtn, &QPushButton::clicked, this, &MainWindow::createTestSession);
+    connect(testOpenSessionBtn, &QPushButton::clicked, this, &MainWindow::openExistingTestSession);
     connect(testOpenSessionDirBtn, &QPushButton::clicked, this, &MainWindow::openTestSessionDirectory);
     connect(importBtn, &QPushButton::clicked, this, &MainWindow::importTestCases);
-    connect(testExportResultBtn, &QPushButton::clicked, this, &MainWindow::exportTestCaseResults);
-    connect(testExportExcelBtn, &QPushButton::clicked, this, &MainWindow::exportTestCaseResultsExcel);
-    connect(testExportMarkdownBtn, &QPushButton::clicked, this, &MainWindow::exportTestReportMarkdown);
-    connect(testExportPdfBtn, &QPushButton::clicked, this, &MainWindow::exportTestReportPdf);
+    connect(testExportResultAction, &QAction::triggered, this, &MainWindow::exportTestCaseResults);
+    connect(testExportExcelAction, &QAction::triggered, this, &MainWindow::exportTestCaseResultsExcel);
+    connect(testExportMarkdownAction, &QAction::triggered, this, &MainWindow::exportTestReportMarkdown);
+    connect(testExportPdfAction, &QAction::triggered, this, &MainWindow::exportTestReportPdf);
     connect(testStartCaseBtn, &QPushButton::clicked, this, &MainWindow::startSelectedTestCase);
     connect(testRunAutoBtn, &QPushButton::clicked, this, &MainWindow::runSelectedTestCaseAuto);
     connect(testJudgeCaseBtn, &QPushButton::clicked, this, &MainWindow::judgeSelectedTestCase);
     connect(testSafeRunJudgeBtn, &QPushButton::clicked, this, &MainWindow::safeRunAndJudgeSelectedTestCase);
     connect(testBindStressBtn, &QPushButton::clicked, this, &MainWindow::bindStressStatsToSelectedTestCase);
     connect(testSaveResultBtn, &QPushButton::clicked, this, &MainWindow::saveSelectedTestCaseResult);
+    connect(testCopyKeyFramesBtn, &QPushButton::clicked, this, &MainWindow::copySelectedTestCaseKeyFrames);
+    connect(testResultCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+        markTestResultDirty();
+    });
+    connect(testActualResultEdit, &QTextEdit::textChanged, this, &MainWindow::markTestResultDirty);
+    connect(testDefectIdEdit, &QLineEdit::textChanged, this, &MainWindow::markTestResultDirty);
+    connect(testCaseRemarkEdit, &QTextEdit::textChanged, this, &MainWindow::markTestResultDirty);
     connect(testRunFilteredBtn, &QPushButton::clicked, this, &MainWindow::runFilteredTestCases);
     connect(testRetestFailedBtn, &QPushButton::clicked, this, &MainWindow::retestFailedCases);
     connect(testTemplatePresetCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::applyTestTemplatePreset);
@@ -2766,13 +2812,24 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     connect(testPriorityFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::refreshTestCaseModel);
     connect(testResultFilterCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &MainWindow::refreshTestCaseModel);
     connect(testSearchEdit, &QLineEdit::textChanged, this, &MainWindow::refreshTestCaseModel);
-    connect(testCaseTableView->selectionModel(), &QItemSelectionModel::currentRowChanged, this, [this](const QModelIndex &, const QModelIndex &) {
+    connect(testCaseTableView->selectionModel(), &QItemSelectionModel::currentRowChanged, this, [this](const QModelIndex &current, const QModelIndex &previous) {
+        if (testResultDirty && !confirmSaveOrDiscardTestResultChanges()) {
+            QSignalBlocker blocker(testCaseTableView->selectionModel());
+            if (previous.isValid()) {
+                testCaseTableView->selectRow(previous.row());
+            } else {
+                testCaseTableView->clearSelection();
+            }
+            return;
+        }
+        Q_UNUSED(current);
         refreshTestCaseDetail();
     });
 
     if (testCaseModel->rowCount() > 0) {
         testCaseTableView->selectRow(0);
     }
+    refreshTestCaseDetail();
     updateTestExecutionControls();
     scrollArea->setWidget(widget);
     return scrollArea;
@@ -2847,11 +2904,14 @@ void MainWindow::refreshTestCaseDetail()
         if (testExpectationText != nullptr) {
             testExpectationText->clear();
         }
+        updateTestExecutionSummary();
+        updateEvidenceSummary();
         return;
     }
 
     const TestCase testCase = testCaseModel->caseAt(current.row());
     const TestCaseResult result = testCaseService.resultForCase(testCase.id);
+    loadingTestCaseDetail = true;
     testCaseTitleValue->setText(QStringLiteral("%1  %2  %3").arg(testCase.id, testCase.module, testCase.priority));
     testCaseDetailText->setPlainText(QStringLiteral(
         "测试类型：%1\n执行模式：%2\n命令模板：%3\n判定模板：%4\n超时/重试：%5 ms / %6 次\n依据：%7\n\n前置条件：\n%8\n\n测试数据：\n%9\n\n操作步骤：\n%10\n\n预期结果：\n%11\n\n人工提示：\n%12")
@@ -2866,7 +2926,7 @@ void MainWindow::refreshTestCaseDetail()
              testCase.testData,
              testCase.steps,
              testCase.expectedResult,
-             testCase.manualPrompt.isEmpty() ? QStringLiteral("-") : testCase.manualPrompt));
+             cleanDisplayText(testCase.manualPrompt, QStringLiteral("-"))));
     if (testExpectationText != nullptr) {
         testExpectationText->setPlainText(protocolExpectationText(testCase));
     }
@@ -2884,53 +2944,195 @@ void MainWindow::refreshTestCaseDetail()
     if (testCaseRemarkEdit != nullptr) {
         testCaseRemarkEdit->setPlainText(result.remark);
     }
+    loadingTestCaseDetail = false;
+    testResultDirty = false;
+    updateTestExecutionSummary();
+    updateEvidenceSummary();
+}
+
+void MainWindow::markTestResultDirty()
+{
+    if (!loadingTestCaseDetail && testCaseTableView != nullptr && testCaseTableView->currentIndex().isValid()) {
+        testResultDirty = true;
+    }
+}
+
+bool MainWindow::confirmSaveOrDiscardTestResultChanges()
+{
+    if (!testResultDirty) {
+        return true;
+    }
+    const QMessageBox::StandardButton choice = QMessageBox::question(
+        this,
+        QStringLiteral("测试记录未保存"),
+        QStringLiteral("当前用例的结果记录尚未保存，是否先保存？"),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+        QMessageBox::Save);
+    if (choice == QMessageBox::Cancel) {
+        return false;
+    }
+    if (choice == QMessageBox::Discard) {
+        testResultDirty = false;
+        return true;
+    }
+
+    QString error;
+    if (!saveCurrentTestCaseResult(&error)) {
+        QMessageBox::warning(this,
+            QStringLiteral("测试执行"),
+            QStringLiteral("保存测试结果失败：caseId=%1\n原因：%2")
+                .arg(selectedCaseId(), error.isEmpty() ? QStringLiteral("unknown error") : error));
+        return false;
+    }
+    testCaseService.finishActiveCase();
+    testResultDirty = false;
+    refreshTestCaseModel();
+    return true;
+}
+
+void MainWindow::updateTestExecutionSummary()
+{
+    if (testExecutionSummaryText == nullptr) {
+        return;
+    }
+    if (testCaseTableView == nullptr || testCaseModel == nullptr || !testCaseTableView->currentIndex().isValid()) {
+        testExecutionSummaryText->setPlainText(QStringLiteral("请选择测试用例。"));
+        return;
+    }
+
+    const TestCase testCase = testCaseModel->caseAt(testCaseTableView->currentIndex().row());
+    const TestCaseResult result = testCaseService.resultForCase(testCase.id);
+    const QString statusText = testResultStatusText(result.status);
+    const QString judgeReason = cleanDisplayText(result.judgeReason, QStringLiteral("-"));
+    const QString failureCategory = testFailureCategoryText(result.failureCategory);
+    const QString keyFrameText = result.keyFrames.isEmpty() ? QStringLiteral("-") : result.keyFrames.join(QStringLiteral("\n"));
+    QString nextAction = QStringLiteral("按用例步骤执行后保存记录。");
+    if (result.status == TestResultStatus::Passed) {
+        nextAction = QStringLiteral("用例已通过，可继续下一条。");
+    } else if (result.status == TestResultStatus::Failed || result.status == TestResultStatus::Blocked) {
+        nextAction = QStringLiteral("建议加入复测清单，并优先查看关键帧与判定原因。");
+    } else if (testCase.executionMode == QStringLiteral("auto")) {
+        nextAction = QStringLiteral("可直接使用“自动执行本用例”。");
+    } else if (!testCase.manualPrompt.trimmed().isEmpty()) {
+        nextAction = cleanDisplayText(testCase.manualPrompt, QStringLiteral("按用例步骤执行后保存记录。"));
+    }
+
+    testExecutionSummaryText->setPlainText(QStringLiteral(
+        "用例ID：%1\n模块：%2\n优先级：%3\n执行模式：%4\n当前结果：%5\n判定原因：%6\n失败归类：%7\n关键帧：%8 条\n\n关键帧摘要：\n%9\n\n下一步建议：\n%10")
+        .arg(testCase.id,
+             testCase.module,
+             testCase.priority,
+             testCase.executionMode.isEmpty() ? QStringLiteral("manual") : testCase.executionMode,
+             statusText,
+             judgeReason,
+             failureCategory)
+        .arg(result.keyFrames.size())
+        .arg(keyFrameText,
+             nextAction));
+}
+
+void MainWindow::updateEvidenceSummary()
+{
+    const QString caseId = selectedCaseId();
+    const TestCaseResult result = caseId.isEmpty() ? TestCaseResult() : testCaseService.resultForCase(caseId);
+    if (testEvidenceSummaryValue != nullptr) {
+        testEvidenceSummaryValue->setText(QStringLiteral("当前用例：%1 | 结果：%2 | 关键帧：%3")
+            .arg(caseId.isEmpty() ? QStringLiteral("-") : caseId,
+                 caseId.isEmpty() ? QStringLiteral("-") : testResultStatusText(result.status))
+            .arg(caseId.isEmpty() ? 0 : result.keyFrames.size()));
+    }
+    if (testCopyKeyFramesBtn != nullptr) {
+        testCopyKeyFramesBtn->setEnabled(!caseId.isEmpty() && !result.keyFrames.isEmpty());
+    }
+}
+
+void MainWindow::copySelectedTestCaseKeyFrames()
+{
+    const QString caseId = selectedCaseId();
+    if (caseId.isEmpty()) {
+        return;
+    }
+    const TestCaseResult result = testCaseService.resultForCase(caseId);
+    if (result.keyFrames.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("复制关键帧"), QStringLiteral("当前用例没有关键帧。"));
+        return;
+    }
+    QClipboard *clipboard = QApplication::clipboard();
+    if (clipboard == nullptr) {
+        QMessageBox::warning(this, QStringLiteral("复制关键帧"), QStringLiteral("Failed to access clipboard: caseId=%1").arg(caseId));
+        return;
+    }
+    clipboard->setText(result.keyFrames.join(QStringLiteral("\n")));
+}
+
+void MainWindow::updateTestExecutionTabAvailability()
+{
+    if (rfidTabs == nullptr || testExecutionTab == nullptr || protocolModeCombo == nullptr) {
+        return;
+    }
+    const int tabIndex = rfidTabs->indexOf(testExecutionTab);
+    if (tabIndex < 0) {
+        return;
+    }
+
+    const bool meituanProtocol = protocolModeCombo->currentIndex() == 0;
+    rfidTabs->setTabEnabled(tabIndex, meituanProtocol);
+    rfidTabs->setTabToolTip(tabIndex, meituanProtocol ? QString() : QStringLiteral("测试执行仅支持美团协议"));
+    if (!meituanProtocol && rfidTabs->currentWidget() == testExecutionTab) {
+        const int monitorIndex = rfidStackedWidget == nullptr ? 0 : rfidTabs->indexOf(rfidStackedWidget);
+        rfidTabs->setCurrentIndex(monitorIndex >= 0 ? monitorIndex : 0);
+    }
 }
 
 void MainWindow::updateTestExecutionControls()
 {
     const bool hasCase = testCaseTableView != nullptr && testCaseTableView->currentIndex().isValid();
     const bool busy = stressTestService.stats().running || isOtaRunning() || productionTestService.isRunning();
-    const bool canStartCase = hasCase && testCaseService.hasSession() && canStarted && !busy;
+    const bool meituanProtocol = protocolModeCombo == nullptr || protocolModeCombo->currentIndex() == 0;
+    const bool canStartCase = meituanProtocol && hasCase && testCaseService.hasSession() && canStarted && !busy;
+    const bool canExport = meituanProtocol && !testCaseService.cases().isEmpty();
 
     if (testStartCaseBtn != nullptr) {
         testStartCaseBtn->setEnabled(canStartCase);
     }
     if (testSaveResultBtn != nullptr) {
-        testSaveResultBtn->setEnabled(hasCase && testCaseService.hasSession());
+        testSaveResultBtn->setEnabled(meituanProtocol && hasCase && testCaseService.hasSession());
     }
-    if (testExportResultBtn != nullptr) {
-        testExportResultBtn->setEnabled(!testCaseService.cases().isEmpty());
+    if (testExportResultAction != nullptr) {
+        testExportResultAction->setEnabled(canExport);
     }
-    if (testExportExcelBtn != nullptr) {
-        testExportExcelBtn->setEnabled(!testCaseService.cases().isEmpty());
+    if (testExportExcelAction != nullptr) {
+        testExportExcelAction->setEnabled(canExport);
     }
-    if (testExportMarkdownBtn != nullptr) {
-        testExportMarkdownBtn->setEnabled(!testCaseService.cases().isEmpty());
+    if (testExportMarkdownAction != nullptr) {
+        testExportMarkdownAction->setEnabled(canExport);
     }
-    if (testExportPdfBtn != nullptr) {
-        testExportPdfBtn->setEnabled(!testCaseService.cases().isEmpty());
+    if (testExportPdfAction != nullptr) {
+        testExportPdfAction->setEnabled(canExport);
     }
     if (testJudgeCaseBtn != nullptr) {
-        testJudgeCaseBtn->setEnabled(hasCase && testCaseService.hasSession());
+        testJudgeCaseBtn->setEnabled(meituanProtocol && hasCase && testCaseService.hasSession());
     }
     if (testSafeRunJudgeBtn != nullptr) {
-        testSafeRunJudgeBtn->setEnabled(hasCase && testCaseService.hasSession());
+        testSafeRunJudgeBtn->setEnabled(meituanProtocol && hasCase && testCaseService.hasSession());
     }
     if (testRunAutoBtn != nullptr) {
         testRunAutoBtn->setEnabled(canStartCase);
     }
     if (testRunFilteredBtn != nullptr) {
-        testRunFilteredBtn->setEnabled(testCaseService.hasSession() && canStarted && !busy && testCaseModel != nullptr && testCaseModel->rowCount() > 0);
+        testRunFilteredBtn->setEnabled(meituanProtocol && testCaseService.hasSession() && canStarted && !busy && testCaseModel != nullptr && testCaseModel->rowCount() > 0);
     }
     if (testRetestFailedBtn != nullptr) {
-        testRetestFailedBtn->setEnabled(testCaseService.hasSession() && canStarted && !busy);
+        testRetestFailedBtn->setEnabled(meituanProtocol && testCaseService.hasSession() && canStarted && !busy);
     }
     if (testBindStressBtn != nullptr) {
-        testBindStressBtn->setEnabled(hasCase && testCaseService.hasSession());
+        testBindStressBtn->setEnabled(meituanProtocol && hasCase && testCaseService.hasSession());
     }
     if (testOpenSessionDirBtn != nullptr) {
         testOpenSessionDirBtn->setEnabled(testCaseService.hasSession());
     }
+    updateEvidenceSummary();
+    updateTestExecutionTabAvailability();
 }
 
 void MainWindow::updateTestSessionStats()
@@ -3035,7 +3237,53 @@ void MainWindow::createTestSession()
         testEvidenceLogText->clear();
         testEvidenceLogText->append(QStringLiteral("会话已创建：%1").arg(sessionDir));
     }
+    testResultDirty = false;
     refreshTestCaseModel();
+}
+
+void MainWindow::openExistingTestSession()
+{
+    if (testCaseService.hasActiveCase()) {
+        QMessageBox::warning(this, QStringLiteral("测试会话"), QStringLiteral("当前用例正在记录证据，请先保存或结束当前用例后再打开历史会话。"));
+        return;
+    }
+    if (!confirmSaveOrDiscardTestResultChanges()) {
+        return;
+    }
+
+    const QString filePath = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("打开测试会话"),
+        testCaseService.hasSession() ? testCaseService.session().sessionDirectory : QCoreApplication::applicationDirPath(),
+        QStringLiteral("会话文件 (session.json);;JSON 文件 (*.json)"));
+    if (filePath.isEmpty()) {
+        return;
+    }
+
+    QString error;
+    if (!testCaseService.loadSession(filePath, &error)) {
+        QMessageBox::warning(this, QStringLiteral("测试会话"), error);
+        return;
+    }
+
+    const TestSession session = testCaseService.session();
+    if (testProjectEdit != nullptr) testProjectEdit->setText(session.projectName);
+    if (testSoftwareVersionEdit != nullptr) testSoftwareVersionEdit->setText(session.softwareVersion);
+    if (testFirmwareVersionEdit != nullptr) testFirmwareVersionEdit->setText(session.firmwareVersion);
+    if (testDeviceSnEdit != nullptr) testDeviceSnEdit->setText(session.deviceSn);
+    if (testTesterEdit != nullptr) testTesterEdit->setText(session.tester);
+    if (testEnvironmentCombo != nullptr) testEnvironmentCombo->setCurrentText(session.environment);
+    if (testSessionRemarkEdit != nullptr) testSessionRemarkEdit->setPlainText(session.remark);
+    if (testSessionDirectoryValue != nullptr) testSessionDirectoryValue->setText(session.sessionDirectory);
+    if (testEvidenceLogText != nullptr) {
+        testEvidenceLogText->clear();
+        testEvidenceLogText->append(QStringLiteral("已打开历史会话：%1").arg(session.sessionDirectory));
+    }
+
+    testResultDirty = false;
+    refreshTestCaseModel();
+    refreshProgressBoard();
+    updateTestExecutionSummary();
 }
 
 void MainWindow::openTestSessionDirectory()
@@ -3048,6 +3296,25 @@ void MainWindow::openTestSessionDirectory()
 
 void MainWindow::importTestCases()
 {
+    if (testCaseService.hasActiveCase()) {
+        QMessageBox::warning(this, QStringLiteral("导入用例"), QStringLiteral("当前用例正在记录证据，请先保存或结束当前用例后再导入。"));
+        return;
+    }
+    if (!confirmSaveOrDiscardTestResultChanges()) {
+        return;
+    }
+    if (testCaseService.hasSession()) {
+        const QMessageBox::StandardButton answer = QMessageBox::question(
+            this,
+            QStringLiteral("导入用例确认"),
+            QStringLiteral("导入新用例会重置当前测试结果，确认继续吗？"),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            return;
+        }
+    }
+
     const QString filePath = QFileDialog::getOpenFileName(
         this,
         QStringLiteral("导入测试用例 JSON"),
@@ -3064,12 +3331,17 @@ void MainWindow::importTestCases()
     }
     refreshTestCaseFilters();
     refreshTestCaseModel();
+    testResultDirty = false;
     QMessageBox::information(this, QStringLiteral("导入用例"), QStringLiteral("已导入 %1 条测试用例。").arg(testCaseService.cases().size()));
 }
 
 void MainWindow::startSelectedTestCase()
 {
     if (testCaseTableView == nullptr || !testCaseTableView->currentIndex().isValid()) {
+        return;
+    }
+    if (protocolModeCombo != nullptr && protocolModeCombo->currentIndex() != 0) {
+        QMessageBox::warning(this, QStringLiteral("测试执行"), QStringLiteral("测试执行仅支持美团协议。"));
         return;
     }
     if (stressTestService.stats().running || isOtaRunning() || productionTestService.isRunning()) {
@@ -3082,22 +3354,38 @@ void MainWindow::startSelectedTestCase()
     }
 
     const TestCase testCase = testCaseModel->caseAt(testCaseTableView->currentIndex().row());
+    if (!confirmOverwriteEvidenceForCase(testCase.id, QStringLiteral("重新开始执行"))) {
+        return;
+    }
     QString error;
     if (!testCaseService.startCase(testCase.id, &error)) {
         QMessageBox::warning(this, QStringLiteral("测试执行"), error);
         return;
     }
-    if (testEvidenceLogText != nullptr) {
-        testEvidenceLogText->clear();
-        testEvidenceLogText->append(QStringLiteral("开始执行用例：%1").arg(testCase.id));
-    }
+    resetCurrentCaseEvidenceView(QStringLiteral("开始执行用例：%1").arg(testCase.id));
     refreshTestCaseModel();
 }
 
 void MainWindow::saveSelectedTestCaseResult()
 {
-    if (testCaseTableView == nullptr || !testCaseTableView->currentIndex().isValid()) {
+    QString error;
+    if (!saveCurrentTestCaseResult(&error)) {
+        QMessageBox::warning(this,
+            QStringLiteral("测试执行"),
+            QStringLiteral("保存测试结果失败：caseId=%1\n原因：%2")
+                .arg(selectedCaseId(), error.isEmpty() ? QStringLiteral("unknown error") : error));
         return;
+    }
+    testCaseService.finishActiveCase();
+    testResultDirty = false;
+    refreshTestCaseModel();
+}
+
+bool MainWindow::saveCurrentTestCaseResult(QString *error)
+{
+    if (testCaseTableView == nullptr || !testCaseTableView->currentIndex().isValid()) {
+        if (error) *error = QStringLiteral("未选择有效用例");
+        return false;
     }
     const TestCase testCase = testCaseModel->caseAt(testCaseTableView->currentIndex().row());
     TestCaseResult result = testCaseService.resultForCase(testCase.id);
@@ -3107,13 +3395,7 @@ void MainWindow::saveSelectedTestCaseResult()
     result.defectId = testDefectIdEdit == nullptr ? QString() : testDefectIdEdit->text().trimmed();
     result.remark = testCaseRemarkEdit == nullptr ? QString() : testCaseRemarkEdit->toPlainText().trimmed();
 
-    QString error;
-    if (!testCaseService.saveResult(result, &error)) {
-        QMessageBox::warning(this, QStringLiteral("测试执行"), error);
-        return;
-    }
-    testCaseService.finishActiveCase();
-    refreshTestCaseModel();
+    return testCaseService.saveResult(result, error);
 }
 
 void MainWindow::exportTestCaseResults()
@@ -3398,6 +3680,10 @@ bool MainWindow::precheckTestExecution(const TestCase &testCase, QString *reason
         if (reason) *reason = QStringLiteral("请先新建测试会话。");
         return false;
     }
+    if (protocolModeCombo != nullptr && protocolModeCombo->currentIndex() != 0) {
+        if (reason) *reason = QStringLiteral("测试执行仅支持美团协议。");
+        return false;
+    }
     if (!canStarted) {
         if (reason) *reason = QStringLiteral("请先启动 CAN。");
         return false;
@@ -3413,29 +3699,370 @@ bool MainWindow::precheckTestExecution(const TestCase &testCase, QString *reason
     return true;
 }
 
+bool MainWindow::confirmOverwriteEvidenceForCase(const QString &caseId, const QString &actionText)
+{
+    if (caseId.isEmpty() || !testCaseService.evidenceExistsForCase(caseId)) {
+        return true;
+    }
+    if (testBatchOverwriteConfirmed) {
+        return true;
+    }
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this,
+        QStringLiteral("覆盖历史证据确认"),
+        QStringLiteral("用例 %1 已存在历史证据，%2会覆盖该用例证据日志。\n是否继续？")
+            .arg(caseId, actionText),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    return answer == QMessageBox::Yes;
+}
+
+bool MainWindow::precheckTestJudgeContext(const TestCase &testCase, QString *reason) const
+{
+    if (!testCaseService.hasSession()) {
+        if (reason) *reason = QStringLiteral("请先新建测试会话。");
+        return false;
+    }
+    if (protocolModeCombo != nullptr && protocolModeCombo->currentIndex() != 0) {
+        if (reason) *reason = QStringLiteral("测试执行仅支持美团协议。");
+        return false;
+    }
+    if (stressTestService.stats().running || isOtaRunning() || productionTestService.isRunning()) {
+        if (reason) *reason = QStringLiteral("压力测试、OTA 或产线检测运行中，不能执行测试判定。");
+        return false;
+    }
+    if (testCase.id.isEmpty()) {
+        if (reason) *reason = QStringLiteral("未选择有效用例。");
+        return false;
+    }
+    if (!testCaseService.hasActiveCase() && readEvidenceText(testCase.id).trimmed().isEmpty() && !canStarted) {
+        if (reason) *reason = QStringLiteral("当前用例暂无证据日志，请先启动 CAN 或开始记录。");
+        return false;
+    }
+    return true;
+}
+
 bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
 {
+    auto setMessage = [message](const QString &text) {
+        if (message) {
+            *message = text;
+        }
+    };
+    auto parsePeriodConfig = [](const QString &text, quint16 *canId, quint16 *periodMs) {
+        QRegularExpression regex(QStringLiteral("\\b05\\s+29\\s+([0-9A-Fa-f]{2})\\s+([0-9A-Fa-f]{2})\\s+([0-9A-Fa-f]{2})\\s+([0-9A-Fa-f]{2})\\b"));
+        const QRegularExpressionMatch match = regex.match(text);
+        if (!match.hasMatch()) {
+            return false;
+        }
+        bool ok = false;
+        const quint16 parsedId = static_cast<quint16>((match.captured(1).toUInt(&ok, 16) << 8));
+        if (!ok) return false;
+        const quint16 parsedIdLow = static_cast<quint16>(match.captured(2).toUInt(&ok, 16));
+        if (!ok) return false;
+        const quint16 parsedPeriod = static_cast<quint16>((match.captured(3).toUInt(&ok, 16) << 8));
+        if (!ok) return false;
+        const quint16 parsedPeriodLow = static_cast<quint16>(match.captured(4).toUInt(&ok, 16));
+        if (!ok) return false;
+        if (canId != nullptr) {
+            *canId = static_cast<quint16>(parsedId | parsedIdLow);
+        }
+        if (periodMs != nullptr) {
+            *periodMs = static_cast<quint16>(parsedPeriod | parsedPeriodLow);
+        }
+        return true;
+    };
+    auto shortWait = [](int ms) {
+        QEventLoop waitLoop;
+        QTimer::singleShot(ms, &waitLoop, &QEventLoop::quit);
+        waitLoop.exec();
+    };
+    auto waitUntilDiagnosticIdle = [this, &shortWait](int timeoutMs) {
+        QElapsedTimer timer;
+        timer.start();
+        while (rfidDiagnosticTransfer.isBusy() && timer.elapsed() < timeoutMs) {
+            shortWait(50);
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        }
+        return !rfidDiagnosticTransfer.isBusy();
+    };
+    auto queryProgramStatusPayload = []() {
+        return QByteArray::fromHex("01A4555555555555");
+    };
+    auto currentDeviceIdBytes = [this]() {
+        const QString deviceId = rfidService.state().deviceId.trimmed();
+        if (deviceId.isEmpty()) {
+            return QByteArray();
+        }
+        return deviceId.toLatin1();
+    };
+    auto currentHardwareVersionBytes = [this]() {
+        QByteArray data;
+        const quint16 version = rfidService.hardwareVersion();
+        if (version == 0) {
+            return data;
+        }
+        data.append(static_cast<char>((version >> 8) & 0xFF));
+        data.append(static_cast<char>(version & 0xFF));
+        return data;
+    };
+
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x01_set_scan_period")) {
-        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetScanPeriodFrame(0x28));
-        if (message) *message = QStringLiteral("已发送扫描周期配置 400ms：02 01 28 55 55 55 55 55");
+        QRegularExpression payloadRegex(QStringLiteral("\\b02\\s+01\\s+([0-9A-Fa-f]{2})\\b"));
+        const QRegularExpressionMatch match = payloadRegex.match(testCase.testData);
+        if (!match.hasMatch()) {
+            setMessage(QStringLiteral("该用例未在测试数据中配置明确的 02 01 XX 命令，已阻止自动发送。"));
+            return false;
+        }
+        bool ok = false;
+        const quint8 period = static_cast<quint8>(match.captured(1).toUInt(&ok, 16));
+        if (!ok) {
+            setMessage(QStringLiteral("扫描周期参数解析失败，已阻止自动发送。"));
+            return false;
+        }
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetScanPeriodFrame(period));
+        setMessage(QStringLiteral("已发送扫描周期配置：ID=0x007 数据=02 01 %1 55 55 55 55 55")
+            .arg(period, 2, 16, QChar('0')).toUpper());
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x02_reboot")) {
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
-        if (message) *message = QStringLiteral("已发送重启指令：01 02 55 55 55 55 55 55");
+        setMessage(QStringLiteral("已发送重启指令：ID=0x007 数据=01 02 55 55 55 55 55 55"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x02_reboot_for_broadcast_start")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
+        setMessage(QStringLiteral("已发送重启指令，正在采集重启后的 0x2C0~0x2C6 启动广播。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.control_0x207_start")) {
+        rfidScanning = true;
+        updateMeituanTopStatus();
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
+        setMessage(QStringLiteral("已发送 0x207 开始检测：ID=0x207 数据=01 55 55 55 55 55 55 55；已同步当前 RFID 控制状态，后续 0x207 周期帧将保持开始检测。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.control_0x207_stop")) {
+        rfidScanning = false;
+        updateMeituanTopStatus();
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
+        setMessage(QStringLiteral("已发送 0x207 停止检测：ID=0x207 数据=00 55 55 55 55 55 55 55；已同步当前 RFID 控制状态，后续 0x207 周期帧将保持停止检测。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.control_0x207_invalid_modes")) {
+        const bool timerWasActive = rfidControlTimer != nullptr && rfidControlTimer->isActive();
+        const bool originalScanning = rfidScanning;
+        if (timerWasActive) {
+            rfidControlTimer->stop();
+        }
+        sendRfidFrame(RfidProtocol::ControlFrameId, QByteArray::fromHex("0255555555555555"));
+        shortWait(400);
+        sendRfidFrame(RfidProtocol::ControlFrameId, QByteArray::fromHex("FF55555555555555"));
+        shortWait(400);
+        rfidScanning = originalScanning;
+        updateMeituanTopStatus();
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(originalScanning));
+        if (timerWasActive) {
+            rfidControlTimer->start();
+        }
+        setMessage(QStringLiteral("已发送非法 0x207 工作模式 0x02 和 0xFF，并已恢复执行前的 0x207 状态。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.control_0x207_toggle_10")) {
+        const bool timerWasActive = rfidControlTimer != nullptr && rfidControlTimer->isActive();
+        const bool originalScanning = rfidScanning;
+        if (timerWasActive) {
+            rfidControlTimer->stop();
+        }
+        for (int i = 0; i < 10; ++i) {
+            sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
+            shortWait(600);
+            sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
+            shortWait(600);
+        }
+        rfidScanning = originalScanning;
+        updateMeituanTopStatus();
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(originalScanning));
+        if (timerWasActive) {
+            rfidControlTimer->start();
+        }
+        setMessage(QStringLiteral("已发送 10 轮 0x207 开始/停止切换，并已恢复执行前的 0x207 状态。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.control_0x207_pause_timer")) {
+        testSavedRfidControlTimerActive = rfidControlTimer != nullptr && rfidControlTimer->isActive();
+        testSavedRfidScanning = rfidScanning;
+        testHasSavedRfidControlState = true;
+        if (rfidControlTimer != nullptr) {
+            rfidControlTimer->stop();
+        }
+        setMessage(QStringLiteral("已暂停 0x207 周期发送，等待设备上报通信异常或安全状态。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x10_jump_app")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x01));
+        setMessage(QStringLiteral("已发送跳转 APP：ID=0x007 数据=02 10 01 55 55 55 55 55"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x10_jump_boot")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x02));
+        setMessage(QStringLiteral("已发送跳转 BOOT：ID=0x007 数据=02 10 02 55 55 55 55 55"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x10_jump_app_and_query")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x01));
+        shortWait(500);
+        sendRfidFrame(RfidProtocol::RequestFrameId, queryProgramStatusPayload());
+        setMessage(QStringLiteral("已发送跳转 APP，并发送 OTA 程序位置查询 SID=0xA4。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x10_jump_boot_and_query")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x02));
+        shortWait(500);
+        sendRfidFrame(RfidProtocol::RequestFrameId, queryProgramStatusPayload());
+        setMessage(QStringLiteral("已发送跳转 BOOT，并发送 OTA 程序位置查询 SID=0xA4；判定后会恢复 APP。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x11_reset")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSoftwareResetFrame());
+        setMessage(QStringLiteral("已发送软件复位：ID=0x007 数据=01 11 55 55 55 55 55 55"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x28_broadcast_disable")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationControlFrame(false));
+        setMessage(QStringLiteral("已发送禁用周期广播：ID=0x007 数据=02 28 00 55 55 55 55 55"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x28_broadcast_enable")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationControlFrame(true));
+        setMessage(QStringLiteral("已发送使能周期广播：ID=0x007 数据=02 28 01 55 55 55 55 55"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x85_diag_enable")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationDiagnosticFrame(true));
+        setMessage(QStringLiteral("已发送启用故障诊断：ID=0x007 数据=02 85 01 55 55 55 55 55"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x85_diag_disable")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationDiagnosticFrame(false));
+        setMessage(QStringLiteral("已发送禁用故障诊断：ID=0x007 数据=02 85 00 55 55 55 55 55"));
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config")) {
-        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(RfidProtocol::StatusFrameId, 1000));
-        if (message) *message = QStringLiteral("已发送 0x29 周期配置：目标 0x2C0，周期 1000ms。");
+        quint16 canId = 0;
+        quint16 periodMs = 0;
+        if (!parsePeriodConfig(testCase.testData, &canId, &periodMs)) {
+            setMessage(QStringLiteral("0x29 周期配置测试数据格式无效，已阻止自动发送。"));
+            return false;
+        }
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(canId, periodMs));
+        setMessage(QStringLiteral("已发送 0x29 周期配置：ID=0x007 目标=0x%1 周期=0x%2。")
+            .arg(canId, 3, 16, QChar('0'))
+            .arg(periodMs, 4, 16, QChar('0'))
+            .toUpper());
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x01_invalid_length")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("0101555555555555"));
+        shortWait(400);
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("0301329955555555"));
+        setMessage(QStringLiteral("已发送 SID=0x01 异常长度请求：缺少周期字节和多余非法字节各 1 条。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_invalid_config")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("052903FF00055555"));
+        shortWait(400);
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("052902C000055555"));
+        shortWait(400);
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("032902C055555555"));
+        setMessage(QStringLiteral("已发送 SID=0x29 非法配置请求：非法ID、周期小于10ms、长度错误各 1 条。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.can_short_dlc_probe")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("0102"));
+        shortWait(200);
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("02013255"));
+        shortWait(200);
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("062902C00064"));
+        setMessage(QStringLiteral("已发送 DLC=2/4/6 的短帧探测请求，用于确认设备安全忽略或规范响应。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.nvm_write_current_hw_version")) {
+        const QByteArray data = currentHardwareVersionBytes();
+        if (data.isEmpty()) {
+            setMessage(QStringLiteral("当前未采集到有效 0x2C3 硬件版本，已阻止自动写入。请先重启采集版本广播。"));
+            return false;
+        }
+        if (!rfidDiagnosticTransfer.startWriteNonVolatile(0xE7E0, data)) {
+            setMessage(QStringLiteral("启动硬件版本回写失败，请确认诊断传输未被占用。"));
+            return false;
+        }
+        setMessage(QStringLiteral("已按当前 0x2C3 硬件版本回写 DID=0xE7E0。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.nvm_write_current_device_id") ||
+        testCase.commandTemplate == QStringLiteral("mt.nvm_writeback_sn_and_reboot")) {
+        const QByteArray data = currentDeviceIdBytes();
+        if (data.isEmpty()) {
+            setMessage(QStringLiteral("当前未采集到有效设备 ID，已阻止自动写入。请先采集 0x2C4/0x2C5。"));
+            return false;
+        }
+        if (!rfidDiagnosticTransfer.startWriteNonVolatile(0xE7E1, data)) {
+            setMessage(QStringLiteral("启动设备 ID/SN 回写失败，请确认诊断传输未被占用。"));
+            return false;
+        }
+        if (testCase.commandTemplate == QStringLiteral("mt.nvm_writeback_sn_and_reboot")) {
+            if (!waitUntilDiagnosticIdle(5000)) {
+                setMessage(QStringLiteral("设备 ID/SN 写入仍在进行，已阻止自动重启以避免中断写入。"));
+                return false;
+            }
+            shortWait(500);
+            sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
+            setMessage(QStringLiteral("已回写当前设备 ID/SN，并发送重启指令用于回读验证。"));
+            return true;
+        }
+        setMessage(QStringLiteral("已按当前 0x2C4/0x2C5 设备 ID 回写 DID=0xE7E1。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.nvm_double_write_current_hw_version")) {
+        const QByteArray data = currentHardwareVersionBytes();
+        if (data.isEmpty()) {
+            setMessage(QStringLiteral("当前未采集到有效 0x2C3 硬件版本，已阻止连续写入。"));
+            return false;
+        }
+        if (!rfidDiagnosticTransfer.startWriteNonVolatile(0xE7E0, data)) {
+            setMessage(QStringLiteral("启动第一次硬件版本写入失败，请确认诊断传输未被占用。"));
+            return false;
+        }
+        shortWait(100);
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildWriteNonVolatileFrame(0xE7E0, data));
+        setMessage(QStringLiteral("已连续发送两次 DID=0xE7E0 硬件版本写入请求，等待设备忙处理或串行响应。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_query_program_status")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, queryProgramStatusPayload());
+        setMessage(QStringLiteral("已发送 OTA 程序位置查询：ID=0x007 数据=01 A4 55 55 55 55 55 55。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.diag_invalid_requests")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("0199555555555555"));
+        setMessage(QStringLiteral("已发送不支持的诊断服务请求：01 99 55 55 55 55 55 55。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x2e_invalid_did")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("052EFFFF00005555"));
+        setMessage(QStringLiteral("已发送 SID=0x2E 非法 DID 请求：05 2E FF FF 00 00 55 55。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x2e_invalid_length")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("052EE7E100005555"));
+        setMessage(QStringLiteral("已发送 SID=0x2E 长度错误请求：DID=E7E1 但 SN 数据长度不足。"));
         return true;
     }
 
-    if (message) {
-        *message = testCase.manualPrompt.isEmpty()
-            ? QStringLiteral("该用例未配置可安全自动发送的命令，请手动执行步骤后使用自动判定。")
-            : testCase.manualPrompt;
-    }
+    setMessage(testCase.manualPrompt.isEmpty()
+        ? QStringLiteral("该用例未配置可安全自动发送的命令，请手动执行步骤后使用自动判定。")
+        : testCase.manualPrompt);
     return false;
 }
 
@@ -3446,9 +4073,16 @@ void MainWindow::runSelectedTestCaseAuto()
     }
 
     const TestCase testCase = testCaseModel->caseAt(testCaseTableView->currentIndex().row());
+    if (testCase.executionMode == QStringLiteral("semi") && !testCase.semiAssistTemplate.trimmed().isEmpty()) {
+        runSelectedTestCaseSemiAssist();
+        return;
+    }
     QString reason;
     if (!precheckTestExecution(testCase, &reason)) {
         QMessageBox::warning(this, QStringLiteral("自动执行"), reason);
+        return;
+    }
+    if (!confirmOverwriteEvidenceForCase(testCase.id, QStringLiteral("自动执行"))) {
         return;
     }
 
@@ -3457,6 +4091,7 @@ void MainWindow::runSelectedTestCaseAuto()
         QMessageBox::warning(this, QStringLiteral("自动执行"), error);
         return;
     }
+    resetCurrentCaseEvidenceView(QStringLiteral("自动执行用例：%1").arg(testCase.id));
 
     QString commandMessage;
     const bool commandSent = sendAutoTestCommand(testCase, &commandMessage);
@@ -3466,25 +4101,233 @@ void MainWindow::runSelectedTestCaseAuto()
     if (!commandSent && testCase.executionMode == QStringLiteral("manual")) {
         QMessageBox::information(this, QStringLiteral("自动执行"), commandMessage);
     }
+    if (!commandSent && testCase.executionMode == QStringLiteral("auto")) {
+        TestCaseResult result = testCaseService.resultForCase(testCase.id);
+        result.caseId = testCase.id;
+        result.status = TestResultStatus::Blocked;
+        result.failureCategory = QStringLiteral("command_not_sent");
+        result.judgeReason = commandMessage;
+        result.actualResult = QStringLiteral("[自动执行] %1\n[自动判定] 自动命令未发送，已阻塞。").arg(commandMessage);
+        if (!testCaseService.saveResult(result, &error)) {
+            QMessageBox::warning(this,
+                QStringLiteral("自动执行"),
+                QStringLiteral("保存测试结果失败：caseId=%1\n原因：%2")
+                    .arg(testCase.id, error.isEmpty() ? QStringLiteral("unknown error") : error));
+            return;
+        }
+        testCaseService.finishActiveCase();
+        refreshTestCaseModel();
+        return;
+    }
+
+    int waitMs = qBound(300, testCase.timeoutMs, 30000);
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x02_reboot") ||
+        testCase.commandTemplate == QStringLiteral("mt.sid_0x11_reset") ||
+        testCase.judgeTemplate == QStringLiteral("mt.broadcast_all_present_after_reboot") ||
+        testCase.judgeTemplate == QStringLiteral("mt.reboot_response_and_broadcast") ||
+        testCase.judgeTemplate == QStringLiteral("mt.positive_response_and_broadcast") ||
+        testCase.judgeTemplate == QStringLiteral("mt.period_config_response_and_effect") ||
+        testCase.judgeTemplate == QStringLiteral("mt.broadcast_recovered")) {
+        waitMs = qMax(waitMs, 5000);
+    } else if (testCase.executionMode == QStringLiteral("auto")) {
+        waitMs = qMax(waitMs, 3000);
+    }
 
     QEventLoop waitLoop;
-    QTimer::singleShot(qMax(300, testCase.timeoutMs), &waitLoop, &QEventLoop::quit);
+    QTimer::singleShot(waitMs, &waitLoop, &QEventLoop::quit);
     waitLoop.exec();
 
     const TestJudgeResult judgeResult = testCaseJudge.judge(testCase, readEvidenceText(testCase.id));
+    QString restoreMessage;
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config") &&
+        testCase.testData.contains(QStringLiteral("FF FF"), Qt::CaseInsensitive)) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(0x02C0, 0x0064));
+        restoreMessage = QStringLiteral("已发送 0x29 恢复命令：目标 0x2C0 周期恢复为 0x0064。");
+    }
+    if (testCase.postCommandTemplate == QStringLiteral("mt.control_0x207_restore_saved")) {
+        if (testHasSavedRfidControlState) {
+            rfidScanning = testSavedRfidScanning;
+            updateMeituanTopStatus();
+            sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(rfidScanning));
+            if (testSavedRfidControlTimerActive && rfidControlTimer != nullptr) {
+                rfidControlTimer->start();
+            }
+            restoreMessage = restoreMessage.isEmpty()
+                ? QStringLiteral("已恢复执行前的 0x207 周期发送状态。")
+                : restoreMessage + QStringLiteral(" 已恢复执行前的 0x207 周期发送状态。");
+        }
+        testHasSavedRfidControlState = false;
+    } else if (testCase.postCommandTemplate == QStringLiteral("mt.sid_0x10_jump_app")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x01));
+        restoreMessage = restoreMessage.isEmpty()
+            ? QStringLiteral("已发送跳转 APP 恢复命令。")
+            : restoreMessage + QStringLiteral(" 已发送跳转 APP 恢复命令。");
+    }
     TestCaseResult result = testCaseService.resultForCase(testCase.id);
     result.caseId = testCase.id;
     result.status = judgeResult.status;
     result.judgeReason = judgeResult.reason;
     result.failureCategory = judgeResult.failureCategory;
     result.keyFrames = judgeResult.keyFrames;
-    QString actual = QStringLiteral("[自动执行] %1\n[自动判定] %2").arg(commandMessage, judgeResult.reason);
+    QString actual = QStringLiteral("[自动执行] %1\n[等待窗口] %2 ms\n[判定模板] %3\n[自动判定] %4")
+        .arg(commandMessage,
+             QString::number(waitMs),
+             testCase.judgeTemplate.isEmpty() ? QStringLiteral("-") : testCase.judgeTemplate,
+             judgeResult.reason);
     if (!judgeResult.keyFrames.isEmpty()) {
         actual.append(QStringLiteral("\n[关键帧]\n%1").arg(judgeResult.keyFrames.join(QStringLiteral("\n"))));
     }
+    if (!restoreMessage.isEmpty()) {
+        actual.append(QStringLiteral("\n[恢复动作] %1").arg(restoreMessage));
+    }
     result.actualResult = actual.trimmed();
     if (!testCaseService.saveResult(result, &error)) {
-        QMessageBox::warning(this, QStringLiteral("自动执行"), error);
+        QMessageBox::warning(this,
+            QStringLiteral("自动执行"),
+            QStringLiteral("保存测试结果失败：caseId=%1\n原因：%2")
+                .arg(testCase.id, error.isEmpty() ? QStringLiteral("unknown error") : error));
+        return;
+    }
+    testCaseService.finishActiveCase();
+    refreshTestCaseModel();
+}
+
+bool MainWindow::sendSemiAssistCommand(const TestCase &testCase, QString *message)
+{
+    auto setMessage = [message](const QString &text) {
+        if (message) {
+            *message = text;
+        }
+    };
+
+    const QString assistTemplate = testCase.semiAssistTemplate.trimmed();
+    if (assistTemplate == QStringLiteral("mt.semi.tag_present") ||
+        assistTemplate == QStringLiteral("mt.semi.tag_16byte") ||
+        assistTemplate == QStringLiteral("mt.semi.tag_absent") ||
+        assistTemplate == QStringLiteral("mt.semi.tag_24byte") ||
+        assistTemplate == QStringLiteral("mt.semi.tag_residue")) {
+        rfidScanning = true;
+        updateMeituanTopStatus();
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
+        setMessage(QStringLiteral("半自动辅助已发送 0x207 开始检测，正在采集广播证据。"));
+        return true;
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.version_frame") ||
+        assistTemplate == QStringLiteral("mt.semi.device_id")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
+        setMessage(QStringLiteral("半自动辅助已发送 SID=0x02 重启请求，正在采集启动后的广播证据。"));
+        return true;
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.fault_status")) {
+        setMessage(QStringLiteral("半自动辅助不发送额外命令，仅采集 0x2C0 故障状态证据。"));
+        return true;
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.fault_control_status")) {
+        rfidScanning = true;
+        updateMeituanTopStatus();
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
+        QEventLoop waitLoop;
+        QTimer::singleShot(300, &waitLoop, &QEventLoop::quit);
+        waitLoop.exec();
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
+        setMessage(QStringLiteral("半自动辅助已发送 0x207 开始/停止命令，正在采集故障状态证据。"));
+        return true;
+    }
+
+    setMessage(cleanDisplayText(testCase.manualPrompt,
+        QStringLiteral("暂不支持该半自动辅助模板，请按步骤手动执行。")));
+    return false;
+}
+
+void MainWindow::runSelectedTestCaseSemiAssist()
+{
+    if (testCaseTableView == nullptr || !testCaseTableView->currentIndex().isValid()) {
+        return;
+    }
+
+    const TestCase testCase = testCaseModel->caseAt(testCaseTableView->currentIndex().row());
+    QString reason;
+    if (!precheckTestExecution(testCase, &reason)) {
+        QMessageBox::warning(this, QStringLiteral("半自动执行"), reason);
+        return;
+    }
+    if (!confirmOverwriteEvidenceForCase(testCase.id, QStringLiteral("半自动执行"))) {
+        return;
+    }
+
+    const QString prompt = cleanDisplayText(
+        testCase.semiPrompt.trimmed().isEmpty() ? testCase.manualPrompt : testCase.semiPrompt,
+        QStringLiteral("请确认外部测试条件已准备好，然后开始半自动执行。"));
+    if (QMessageBox::question(this,
+            QStringLiteral("半自动执行确认"),
+            prompt,
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+
+    QString error;
+    if (!testCaseService.startCase(testCase.id, &error)) {
+        QMessageBox::warning(this, QStringLiteral("半自动执行"), error);
+        return;
+    }
+    resetCurrentCaseEvidenceView(QStringLiteral("半自动执行用例：%1").arg(testCase.id));
+
+    QString commandMessage;
+    const bool commandSent = sendSemiAssistCommand(testCase, &commandMessage);
+    if (testEvidenceLogText != nullptr) {
+        testEvidenceLogText->append(QStringLiteral("[半自动执行] %1").arg(commandMessage));
+    }
+    if (!commandSent) {
+        TestCaseResult result = testCaseService.resultForCase(testCase.id);
+        result.caseId = testCase.id;
+        result.status = TestResultStatus::Blocked;
+        result.failureCategory = QStringLiteral("semi_assist_not_sent");
+        result.judgeReason = commandMessage;
+        result.actualResult = QStringLiteral("[半自动执行] %1").arg(commandMessage);
+        if (!testCaseService.saveResult(result, &error)) {
+            QMessageBox::warning(this, QStringLiteral("半自动执行"), error);
+        }
+        testCaseService.finishActiveCase();
+        refreshTestCaseModel();
+        return;
+    }
+
+    const int waitMs = qBound(500, testCase.semiWaitMs > 0 ? testCase.semiWaitMs : testCase.timeoutMs, 30000);
+    QEventLoop waitLoop;
+    QTimer::singleShot(waitMs, &waitLoop, &QEventLoop::quit);
+    waitLoop.exec();
+
+    TestCase judgeCase = testCase;
+    if (!judgeCase.semiJudgeTemplate.trimmed().isEmpty()) {
+        judgeCase.judgeTemplate = judgeCase.semiJudgeTemplate.trimmed();
+    }
+    const TestJudgeResult judgeResult = testCaseJudge.judge(judgeCase, readEvidenceText(testCase.id));
+    TestCaseResult result = testCaseService.resultForCase(testCase.id);
+    result.caseId = testCase.id;
+    result.status = judgeResult.status == TestResultStatus::Passed
+        ? TestResultStatus::Blocked
+        : judgeResult.status;
+    result.failureCategory = judgeResult.status == TestResultStatus::Passed
+        ? QStringLiteral("待人工确认")
+        : judgeResult.failureCategory;
+    result.judgeReason = judgeResult.status == TestResultStatus::Passed
+        ? QStringLiteral("机器预判通过，需人工确认外部场景后保存为通过。")
+        : judgeResult.reason;
+    result.keyFrames = judgeResult.keyFrames;
+    result.actualResult = QStringLiteral("[半自动执行] %1\n[等待窗口] %2 ms\n[半自动判定模板] %3\n[机器预判] %4\n[保存建议] %5")
+        .arg(commandMessage,
+             QString::number(waitMs),
+             judgeCase.judgeTemplate.isEmpty() ? QStringLiteral("-") : judgeCase.judgeTemplate,
+             judgeResult.reason,
+             judgeResult.status == TestResultStatus::Passed
+                ? QStringLiteral("证据满足机器规则，请结合外部场景人工确认后保存为通过。")
+                : QStringLiteral("按机器预判处理，必要时结合外部场景复核。"));
+    if (!judgeResult.keyFrames.isEmpty()) {
+        result.actualResult.append(QStringLiteral("\n[关键帧]\n%1").arg(judgeResult.keyFrames.join(QStringLiteral("\n"))));
+    }
+    if (!testCaseService.saveResult(result, &error)) {
+        QMessageBox::warning(this, QStringLiteral("半自动执行"), error);
         return;
     }
     testCaseService.finishActiveCase();
@@ -3507,11 +4350,30 @@ void MainWindow::runFilteredTestCases()
     }
 
     const int count = casesToRun.size();
+    int overwriteCount = 0;
+    for (const TestCase &testCase : qAsConst(casesToRun)) {
+        if (testCase.executionMode == QStringLiteral("auto") && testCaseService.evidenceExistsForCase(testCase.id)) {
+            ++overwriteCount;
+        }
+    }
+    if (overwriteCount > 0) {
+        const QMessageBox::StandardButton overwriteAnswer = QMessageBox::question(
+            this,
+            QStringLiteral("覆盖历史证据确认"),
+            QStringLiteral("批量执行中有 %1 条自动用例已有历史证据，继续将覆盖这些用例的证据日志。是否继续？").arg(overwriteCount),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        if (overwriteAnswer != QMessageBox::Yes) {
+            return;
+        }
+        testBatchOverwriteConfirmed = true;
+    }
     if (QMessageBox::question(this,
             QStringLiteral("批量执行确认"),
-            QStringLiteral("将按当前筛选条件执行 %1 条用例。\n自动用例会直接发送安全命令；半自动/手工用例只记录阻塞提示，不会执行持久化写入。")
+            QStringLiteral("将按当前筛选条件执行 %1 条用例。\n自动用例会按用例配置发送测试命令；半自动/手工用例不会自动发送指令，若已有证据将尝试自动判定。")
                 .arg(count),
             QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+        testBatchOverwriteConfirmed = false;
         return;
     }
 
@@ -3542,14 +4404,33 @@ void MainWindow::runFilteredTestCases()
         if (testCase.executionMode != QStringLiteral("auto")) {
             TestCaseResult result = testCaseService.resultForCase(testCase.id);
             result.caseId = testCase.id;
-            result.status = TestResultStatus::Blocked;
-            result.failureCategory = QStringLiteral("manual_required");
-            result.judgeReason = testCase.manualPrompt.isEmpty()
-                ? QStringLiteral("半自动/手工用例未执行，请按步骤操作后再自动判定。")
-                : testCase.manualPrompt;
-            result.actualResult = result.judgeReason;
+            if (testCaseService.evidenceExistsForCase(testCase.id)) {
+                const TestJudgeResult judgeResult = testCaseJudge.judge(testCase, readEvidenceText(testCase.id));
+                result.status = judgeResult.status;
+                result.failureCategory = judgeResult.failureCategory;
+                result.judgeReason = judgeResult.reason;
+                result.keyFrames = judgeResult.keyFrames;
+                result.actualResult = QStringLiteral("[批量判定] 半自动/手工用例未自动发送指令，仅基于已有证据判定。\n[自动判定] %1")
+                    .arg(judgeResult.reason);
+                if (!judgeResult.keyFrames.isEmpty()) {
+                    result.actualResult.append(QStringLiteral("\n[关键帧]\n%1").arg(judgeResult.keyFrames.join(QStringLiteral("\n"))));
+                }
+            } else {
+                result.status = TestResultStatus::Blocked;
+                result.failureCategory = QStringLiteral("manual_required");
+                result.judgeReason = testCase.manualPrompt.isEmpty()
+                    ? QStringLiteral("半自动/手工用例未执行，请按步骤操作后再自动判定。")
+                    : testCase.manualPrompt;
+                result.actualResult = result.judgeReason;
+            }
             QString error;
-            testCaseService.saveResult(result, &error);
+            if (!testCaseService.saveResult(result, &error)) {
+                QMessageBox::warning(this,
+                    QStringLiteral("批量执行"),
+                    QStringLiteral("保存测试结果失败：caseId=%1\n原因：%2")
+                        .arg(testCase.id, error.isEmpty() ? QStringLiteral("unknown error") : error));
+                break;
+            }
             ++failedOrBlocked;
             if (testFailPauseCheck != nullptr && testFailPauseCheck->isChecked()) {
                 break;
@@ -3569,6 +4450,7 @@ void MainWindow::runFilteredTestCases()
         }
         QApplication::processEvents();
     }
+    testBatchOverwriteConfirmed = false;
     refreshTestCaseModel();
     QMessageBox::information(this, QStringLiteral("批量执行"), QStringLiteral("批量执行结束：通过 %1，失败/阻塞 %2。").arg(passed).arg(failedOrBlocked));
 }
@@ -3592,7 +4474,7 @@ void MainWindow::retestFailedCases()
     }
     if (QMessageBox::question(this,
             QStringLiteral("复测确认"),
-            QStringLiteral("将复测 %1 条失败/阻塞用例。自动用例会发送安全命令，其他用例保留人工提示。").arg(failedCases.size()),
+            QStringLiteral("将复测 %1 条失败/阻塞用例。自动用例会按用例配置发送测试命令，其他用例保留人工提示。").arg(failedCases.size()),
             QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
         return;
     }
@@ -3630,7 +4512,13 @@ void MainWindow::retestFailedCases()
                 : testCase.manualPrompt;
             result.actualResult = result.judgeReason;
             QString error;
-            testCaseService.saveResult(result, &error);
+            if (!testCaseService.saveResult(result, &error)) {
+                QMessageBox::warning(this,
+                    QStringLiteral("复测"),
+                    QStringLiteral("保存测试结果失败：caseId=%1\n原因：%2")
+                        .arg(testCase.id, error.isEmpty() ? QStringLiteral("unknown error") : error));
+                break;
+            }
         }
         ++handled;
         QApplication::processEvents();
@@ -3695,7 +4583,14 @@ void MainWindow::judgeSelectedTestCase()
         result.actualResult = testActualResultEdit->toPlainText().trimmed();
     }
     QString error;
-    testCaseService.saveResult(result, &error);
+    if (!testCaseService.saveResult(result, &error)) {
+        QMessageBox::warning(this,
+            QStringLiteral("测试执行"),
+            QStringLiteral("保存测试结果失败：caseId=%1\n原因：%2")
+                .arg(testCase.id, error.isEmpty() ? QStringLiteral("unknown error") : error));
+        return;
+    }
+    testResultDirty = false;
     refreshTestCaseModel();
 }
 
@@ -3705,20 +4600,26 @@ void MainWindow::safeRunAndJudgeSelectedTestCase()
     if (caseId.isEmpty()) {
         return;
     }
-    if (!testCaseService.hasSession()) {
-        QMessageBox::warning(this, QStringLiteral("测试执行"), QStringLiteral("请先新建测试会话。"));
+    if (testCaseTableView == nullptr || !testCaseTableView->currentIndex().isValid()) {
+        return;
+    }
+    const TestCase testCase = testCaseModel->caseAt(testCaseTableView->currentIndex().row());
+    QString reason;
+    if (!precheckTestJudgeContext(testCase, &reason)) {
+        QMessageBox::warning(this, QStringLiteral("测试执行"), reason);
         return;
     }
 
     if (!testCaseService.hasActiveCase() || testCaseService.activeCaseId() != caseId) {
+        if (!confirmOverwriteEvidenceForCase(caseId, QStringLiteral("安全执行"))) {
+            return;
+        }
         QString error;
         if (!testCaseService.startCase(caseId, &error)) {
             QMessageBox::warning(this, QStringLiteral("测试执行"), error);
             return;
         }
-        if (testEvidenceLogText != nullptr) {
-            testEvidenceLogText->append(QStringLiteral("安全执行：已启动当前用例证据记录，不自动发送任何指令。"));
-        }
+        resetCurrentCaseEvidenceView(QStringLiteral("安全执行：已启动当前用例证据记录，不自动发送任何指令。"));
     }
     judgeSelectedTestCase();
     refreshTestCaseModel();
@@ -3770,7 +4671,10 @@ void MainWindow::bindStressStatsToSelectedTestCase()
 
     QString error;
     if (!testCaseService.saveResult(result, &error)) {
-        QMessageBox::warning(this, QStringLiteral("测试执行"), error);
+        QMessageBox::warning(this,
+            QStringLiteral("测试执行"),
+            QStringLiteral("保存测试结果失败：caseId=%1\n原因：%2")
+                .arg(testCase.id, error.isEmpty() ? QStringLiteral("unknown error") : error));
         return;
     }
     refreshTestCaseModel();
@@ -3802,6 +4706,18 @@ void MainWindow::appendTestEvidenceFrame(const CanFrame &frame, const QString &d
             testEvidenceLogText->clear();
             testEvidenceLogText->append(QStringLiteral("证据日志显示已超过 1000 行，完整内容请查看会话目录日志文件。"));
         }
+    }
+}
+
+void MainWindow::resetCurrentCaseEvidenceView(const QString &message)
+{
+    if (testEvidenceLogText == nullptr) {
+        return;
+    }
+    testEvidenceLogText->clear();
+    const QString trimmed = message.trimmed();
+    if (!trimmed.isEmpty()) {
+        testEvidenceLogText->append(trimmed);
     }
 }
 
@@ -4196,7 +5112,9 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
     otaInjectMasterCheck = new QCheckBox(QStringLiteral("启用异常注入模拟"), otaErrorInjectionGroup);
     otaInjectCrcErrorCheck = new QCheckBox(QStringLiteral("注入 CRC 校验错误 (命令 A3 尾部)"), otaErrorInjectionGroup);
     otaInjectSeqErrorCheck = new QCheckBox(QStringLiteral("注入数据包号不连续 (包号失序)"), otaErrorInjectionGroup);
+    otaInjectVendorMismatchCheck = new QCheckBox(QStringLiteral("注入不匹配的厂商代码 (启动 A1)"), otaErrorInjectionGroup);
     otaInjectHwMismatchCheck = new QCheckBox(QStringLiteral("注入不匹配的硬件版本号 (启动 A1)"), otaErrorInjectionGroup);
+    otaInjectA2FirstFrameErrorCheck = new QCheckBox(QStringLiteral("注入 A2 首帧数据错误"), otaErrorInjectionGroup);
     otaInjectSilentTimeoutCheck = new QCheckBox(QStringLiteral("注入传输中途静默 (50% 进度时)"), otaErrorInjectionGroup);
     otaInjectIgnoreFcCheck = new QCheckBox(QStringLiteral("忽略流控 STmin 限制 (极速发送)"), otaErrorInjectionGroup);
     otaInjectIsoTpSnCheck = new QCheckBox(QStringLiteral("注入 ISO-TP 连续帧序号 (SN) 错误"), otaErrorInjectionGroup);
@@ -4205,7 +5123,9 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
     injectLayout->addWidget(otaInjectMasterCheck);
     injectLayout->addWidget(otaInjectCrcErrorCheck);
     injectLayout->addWidget(otaInjectSeqErrorCheck);
+    injectLayout->addWidget(otaInjectVendorMismatchCheck);
     injectLayout->addWidget(otaInjectHwMismatchCheck);
+    injectLayout->addWidget(otaInjectA2FirstFrameErrorCheck);
     injectLayout->addWidget(otaInjectSilentTimeoutCheck);
     injectLayout->addWidget(otaInjectIgnoreFcCheck);
     injectLayout->addWidget(otaInjectIsoTpSnCheck);
@@ -4500,7 +5420,7 @@ void MainWindow::updateMeituanTopStatus()
     }
 
     const QDateTime now = QDateTime::currentDateTime();
-    const bool online = lastRfidFrameTime.isValid() && lastRfidFrameTime.msecsTo(now) < 1500;
+    const bool online = lastRfidFrameTime.isValid() && lastRfidFrameTime.msecsTo(now) < MeituanOnlineTimeoutMs;
     const QString onlineText = online ? QStringLiteral("在线") : QStringLiteral("离线");
     const QString scanText = rfidScanning ? QStringLiteral("开") : QStringLiteral("停");
 
@@ -4544,8 +5464,8 @@ void MainWindow::updateQingjuOnlineStatus(bool clearOfflineData)
     }
 
     const QDateTime now = QDateTime::currentDateTime();
-    const bool npkOnline = lastQingjuNpkFrameTime.isValid() && lastQingjuNpkFrameTime.msecsTo(now) < 1500;
-    const bool rfrOnline = lastQingjuRfrFrameTime.isValid() && lastQingjuRfrFrameTime.msecsTo(now) < 1500;
+    const bool npkOnline = lastQingjuNpkFrameTime.isValid() && lastQingjuNpkFrameTime.msecsTo(now) < QingjuOnlineTimeoutMs;
+    const bool rfrOnline = lastQingjuRfrFrameTime.isValid() && lastQingjuRfrFrameTime.msecsTo(now) < QingjuOnlineTimeoutMs;
     const QString npkText = npkOnline ? QStringLiteral("在线") : QStringLiteral("离线");
     const QString rfrText = rfrOnline ? QStringLiteral("在线") : QStringLiteral("离线");
 
@@ -5153,12 +6073,12 @@ void MainWindow::exportCanLogSnapshot()
     flushPendingLogRows();
 
     const QString defaultFilePath = QDir(logDirectory).filePath(
-        QString("can_snapshot_%1.csv").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss")));
+        QString("can_snapshot_%1.txt").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss")));
     const QString filePath = QFileDialog::getSaveFileName(
         this,
         QStringLiteral("保存CAN日志"),
         defaultFilePath,
-        QStringLiteral("CSV文件 (*.csv)"));
+        QStringLiteral("文本文件 (*.txt);;CSV文件 (*.csv)"));
     if (filePath.isEmpty()) {
         return;
     }
@@ -5175,21 +6095,32 @@ void MainWindow::exportCanLogSnapshot()
         return QString("\"%1\"").arg(value);
     };
 
+    auto textField = [](QString value) {
+        value.replace('\r', ' ');
+        value.replace('\n', ' ');
+        value.replace('\t', ' ');
+        return value;
+    };
+
+    const bool isCsv = filePath.endsWith(QLatin1String(".csv"), Qt::CaseInsensitive);
+
     QTextStream stream(&file);
     QStringList headers;
     for (int column = 0; column < ui->tableWidget->columnCount(); ++column) {
         QTableWidgetItem *headerItem = ui->tableWidget->horizontalHeaderItem(column);
-        headers << csvEscape(headerItem == nullptr ? QString() : headerItem->text());
+        QString val = (headerItem == nullptr ? QString() : headerItem->text());
+        headers << (isCsv ? csvEscape(val) : textField(val));
     }
-    stream << headers.join(',') << '\n';
+    stream << headers.join(isCsv ? ',' : '\t') << '\n';
 
     for (int row = 0; row < ui->tableWidget->rowCount(); ++row) {
         QStringList rowValues;
         for (int column = 0; column < ui->tableWidget->columnCount(); ++column) {
             QTableWidgetItem *item = ui->tableWidget->item(row, column);
-            rowValues << csvEscape(item == nullptr ? QString() : item->text());
+            QString val = (item == nullptr ? QString() : item->text());
+            rowValues << (isCsv ? csvEscape(val) : textField(val));
         }
-        stream << rowValues.join(',') << '\n';
+        stream << rowValues.join(isCsv ? ',' : '\t') << '\n';
     }
 
     logService.logRuntime(LogLevel::Info, QString("CAN log snapshot exported: %1").arg(filePath));
@@ -5198,6 +6129,7 @@ void MainWindow::exportCanLogSnapshot()
 
 void MainWindow::applyCanLogCompact(bool compact)
 {
+    const int compactLogHeight = 82;
     canLogCompact = compact;
 
     if (compactCanLogButton != nullptr) {
@@ -5223,48 +6155,23 @@ void MainWindow::applyCanLogCompact(bool compact)
     }
 
     if (ui->groupBox_3 != nullptr) {
-        ui->groupBox_3->setMinimumHeight(compact ? 118 : 220);
-        ui->groupBox_3->setMaximumHeight(compact ? 140 : QWIDGETSIZE_MAX);
+        if (ui->groupBox_3->layout() != nullptr) {
+            ui->groupBox_3->layout()->setContentsMargins(
+                compact ? 10 : 10,
+                compact ? 14 : 20,
+                compact ? 10 : 10,
+                compact ? 6 : 10);
+        }
+        ui->groupBox_3->setMinimumHeight(compact ? compactLogHeight : 220);
+        ui->groupBox_3->setMaximumHeight(compact ? compactLogHeight + 10 : QWIDGETSIZE_MAX);
     }
     if (mainVerticalSplitter != nullptr) {
         if (compact) {
             const int totalHeight = qMax(600, mainVerticalSplitter->height());
-            mainVerticalSplitter->setSizes(QList<int>() << qMax(480, totalHeight - 128) << 128);
+            mainVerticalSplitter->setSizes(QList<int>() << qMax(480, totalHeight - compactLogHeight) << compactLogHeight);
         } else {
             const AppConfigData config = appConfig.load();
             mainVerticalSplitter->setSizes(QList<int>() << config.mainTopHeight << config.mainLogHeight);
-        }
-    }
-}
-
-void MainWindow::applyLayoutPreset(int preset)
-{
-    if (layoutPresetCombo != nullptr && layoutPresetCombo->currentIndex() != preset) {
-        layoutPresetCombo->blockSignals(true);
-        layoutPresetCombo->setCurrentIndex(qBound(0, preset, layoutPresetCombo->count() - 1));
-        layoutPresetCombo->blockSignals(false);
-    }
-
-    if (mainVerticalSplitter != nullptr) {
-        if (preset == 0) {
-            applyCanLogCompact(true);
-            mainVerticalSplitter->setSizes(QList<int>() << 720 << 128);
-        } else if (preset == 2) {
-            applyCanLogCompact(false);
-            mainVerticalSplitter->setSizes(QList<int>() << 720 << 320);
-        } else if (preset == 1) {
-            applyCanLogCompact(false);
-            mainVerticalSplitter->setSizes(QList<int>() << 620 << 240);
-        }
-    }
-
-    if (testCaseSplitter != nullptr) {
-        if (preset == 0) {
-            testCaseSplitter->setSizes(QList<int>() << 440 << 760);
-        } else if (preset == 2) {
-            testCaseSplitter->setSizes(QList<int>() << 680 << 980);
-        } else if (preset == 1) {
-            testCaseSplitter->setSizes(QList<int>() << 520 << 720);
         }
     }
 }
@@ -5294,11 +6201,6 @@ void MainWindow::syncCanLogWindowRows(const QVector<QStringList> &rows)
 
 void MainWindow::restoreLayoutConfig(const AppConfigData &config)
 {
-    if (layoutPresetCombo != nullptr) {
-        layoutPresetCombo->blockSignals(true);
-        layoutPresetCombo->setCurrentIndex(qBound(0, config.layoutPreset, layoutPresetCombo->count() - 1));
-        layoutPresetCombo->blockSignals(false);
-    }
     if (mainVerticalSplitter != nullptr) {
         mainVerticalSplitter->setSizes(QList<int>() << config.mainTopHeight << config.mainLogHeight);
     }
@@ -5433,6 +6335,7 @@ void MainWindow::loadAppConfig()
     if (protocolModeCombo != nullptr) {
         protocolModeCombo->setCurrentIndex(qBound(0, config.protocolMode, 4));
         onProtocolModeChanged(protocolModeCombo->currentIndex());
+        updateTestExecutionTabAvailability();
     }
 
     if (hlQueryModeCombo != nullptr) {
@@ -5577,9 +6480,7 @@ void MainWindow::saveAppConfig()
             config.testCaseDetailWidth = sizes.at(1);
         }
     }
-    if (layoutPresetCombo != nullptr) {
-        config.layoutPreset = layoutPresetCombo->currentIndex();
-    }
+    config.layoutPreset = 1;
     if (autoCompactLogOnTestExecutionCheck != nullptr) {
         config.autoCompactLogOnTestExecution = autoCompactLogOnTestExecutionCheck->isChecked();
     }
@@ -5657,6 +6558,22 @@ void MainWindow::closeEvent(QCloseEvent *event)
     canthread->wait();
     canthread->closeDevice();
     QMainWindow::closeEvent(event);
+}
+
+void MainWindow::moveEvent(QMoveEvent *event)
+{
+    QMainWindow::moveEvent(event);
+    if (canStarted && (protocolModeCombo != nullptr && protocolModeCombo->currentIndex() == 0) && lastRfidFrameTime.isValid()) {
+        lastRfidFrameTime = QDateTime::currentDateTime();
+    }
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    if (canStarted && (protocolModeCombo != nullptr && protocolModeCombo->currentIndex() == 0) && lastRfidFrameTime.isValid()) {
+        lastRfidFrameTime = QDateTime::currentDateTime();
+    }
 }
 
 MainWindow::~MainWindow()
@@ -6195,7 +7112,9 @@ void MainWindow::onOtaInjectMasterToggled(bool checked)
 {
     if (otaInjectCrcErrorCheck != nullptr) otaInjectCrcErrorCheck->setEnabled(checked);
     if (otaInjectSeqErrorCheck != nullptr) otaInjectSeqErrorCheck->setEnabled(checked);
+    if (otaInjectVendorMismatchCheck != nullptr) otaInjectVendorMismatchCheck->setEnabled(checked);
     if (otaInjectHwMismatchCheck != nullptr) otaInjectHwMismatchCheck->setEnabled(checked);
+    if (otaInjectA2FirstFrameErrorCheck != nullptr) otaInjectA2FirstFrameErrorCheck->setEnabled(checked);
     if (otaInjectSilentTimeoutCheck != nullptr) otaInjectSilentTimeoutCheck->setEnabled(checked);
     if (otaInjectIgnoreFcCheck != nullptr) otaInjectIgnoreFcCheck->setEnabled(checked);
     if (otaInjectIsoTpSnCheck != nullptr) otaInjectIsoTpSnCheck->setEnabled(checked);
@@ -6209,7 +7128,9 @@ OtaErrorConfig MainWindow::getOtaErrorConfig() const
         config.enabled = true;
         config.crcError = otaInjectCrcErrorCheck != nullptr && otaInjectCrcErrorCheck->isChecked();
         config.seqError = otaInjectSeqErrorCheck != nullptr && otaInjectSeqErrorCheck->isChecked();
+        config.vendorMismatch = otaInjectVendorMismatchCheck != nullptr && otaInjectVendorMismatchCheck->isChecked();
         config.hwMismatch = otaInjectHwMismatchCheck != nullptr && otaInjectHwMismatchCheck->isChecked();
+        config.a2FirstFrameDataError = otaInjectA2FirstFrameErrorCheck != nullptr && otaInjectA2FirstFrameErrorCheck->isChecked();
         config.silentTimeout = otaInjectSilentTimeoutCheck != nullptr && otaInjectSilentTimeoutCheck->isChecked();
         config.ignoreFcInterval = otaInjectIgnoreFcCheck != nullptr && otaInjectIgnoreFcCheck->isChecked();
         config.isoTpSnError = otaInjectIsoTpSnCheck != nullptr && otaInjectIsoTpSnCheck->isChecked();
@@ -6253,6 +7174,28 @@ void MainWindow::onProtocolModeChanged(int index)
         }
         productionTestService.stop(QStringLiteral("协议切换"));
         productionWritePending = false;
+    }
+    const int previousProtocolMode = appConfig.load().protocolMode;
+    if (index != previousProtocolMode && testResultDirty && !confirmSaveOrDiscardTestResultChanges()) {
+        if (protocolModeCombo != nullptr) {
+            protocolModeCombo->blockSignals(true);
+            protocolModeCombo->setCurrentIndex(qBound(0, previousProtocolMode, protocolModeCombo->count() - 1));
+            protocolModeCombo->blockSignals(false);
+        }
+        updateTestExecutionTabAvailability();
+        return;
+    }
+    if (testCaseService.hasActiveCase() && index != 0) {
+        QMessageBox::warning(this,
+            QStringLiteral("测试执行进行中"),
+            QStringLiteral("测试执行仅支持美团协议，请先完成或保存当前用例后再切换协议。"));
+        if (protocolModeCombo != nullptr) {
+            protocolModeCombo->blockSignals(true);
+            protocolModeCombo->setCurrentIndex(0);
+            protocolModeCombo->blockSignals(false);
+        }
+        updateTestExecutionTabAvailability();
+        return;
     }
 
     AppConfigData config = appConfig.load();
@@ -6435,6 +7378,8 @@ void MainWindow::onProtocolModeChanged(int index)
     updateManualSendPanelMode();
     updateControlsState();
     updateStressTestPanel(stressTestService.stats());
+    updateTestExecutionTabAvailability();
+    updateTestExecutionControls();
 }
 
 void MainWindow::updateQingjuRfidPanel(const QingjuNpkState &state)

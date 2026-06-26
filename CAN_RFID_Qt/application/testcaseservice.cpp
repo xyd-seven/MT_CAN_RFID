@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -18,6 +19,33 @@ int jsonInt(const QJsonObject &object, const char *key, int defaultValue)
 {
     const QJsonValue value = object.value(QString::fromLatin1(key));
     return value.isDouble() ? value.toInt(defaultValue) : defaultValue;
+}
+
+bool jsonBool(const QJsonObject &object, const char *key, bool defaultValue)
+{
+    const QJsonValue value = object.value(QString::fromLatin1(key));
+    return value.isBool() ? value.toBool(defaultValue) : defaultValue;
+}
+
+QStringList jsonStringList(const QJsonObject &object, const char *key)
+{
+    QStringList values;
+    const QJsonValue value = object.value(QString::fromLatin1(key));
+    if (value.isArray()) {
+        const QJsonArray array = value.toArray();
+        for (const QJsonValue &item : array) {
+            const QString text = item.toString().trimmed();
+            if (!text.isEmpty()) {
+                values.append(text.toUpper());
+            }
+        }
+    } else {
+        const QString text = value.toString().trimmed();
+        if (!text.isEmpty()) {
+            values.append(text.toUpper());
+        }
+    }
+    return values;
 }
 
 void inferAutomationFields(TestCase *testCase)
@@ -141,6 +169,17 @@ bool TestCaseService::loadCasesFromJsonData(const QByteArray &jsonData, QString 
         testCase.commandTemplate = jsonString(object, "commandTemplate");
         testCase.judgeTemplate = jsonString(object, "judgeTemplate");
         testCase.manualPrompt = jsonString(object, "manualPrompt");
+        testCase.expectedNegativeSid = jsonString(object, "expectedNegativeSid").toUpper();
+        testCase.allowedNrc = jsonStringList(object, "allowedNrc");
+        testCase.keyFrameIds = jsonStringList(object, "keyFrameIds");
+        testCase.judgeWindow = jsonString(object, "judgeWindow");
+        testCase.postCommandTemplate = jsonString(object, "postCommandTemplate");
+        testCase.requiredPrefix = jsonString(object, "requiredPrefix");
+        testCase.allowEmptyValue = jsonBool(object, "allowEmptyValue", true);
+        testCase.semiAssistTemplate = jsonString(object, "semiAssistTemplate");
+        testCase.semiPrompt = jsonString(object, "semiPrompt");
+        testCase.semiJudgeTemplate = jsonString(object, "semiJudgeTemplate");
+        testCase.semiWaitMs = jsonInt(object, "semiWaitMs", 1000);
         testCase.timeoutMs = jsonInt(object, "timeoutMs", 1000);
         testCase.retryCount = jsonInt(object, "retryCount", 0);
         inferAutomationFields(&testCase);
@@ -220,6 +259,108 @@ bool TestCaseService::createSession(const TestSession &session, QString *error)
         it->lastRetestAt = QDateTime();
     }
     return saveSessionJson(error);
+}
+
+bool TestCaseService::loadSession(const QString &sessionJsonPath, QString *error)
+{
+    QFile file(sessionJsonPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        if (error) {
+            *error = QStringLiteral("无法打开会话文件: %1").arg(sessionJsonPath);
+        }
+        return false;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        if (error) {
+            *error = QStringLiteral("会话 JSON 格式无效: %1").arg(parseError.errorString());
+        }
+        return false;
+    }
+
+    const QJsonObject root = document.object();
+    const QFileInfo sessionFileInfo(sessionJsonPath);
+    TestSession loadedSession;
+    loadedSession.sessionId = root.value(QStringLiteral("sessionId")).toString(sessionFileInfo.dir().dirName());
+    loadedSession.projectName = root.value(QStringLiteral("projectName")).toString(QStringLiteral("美团RFID CAN通信"));
+    loadedSession.softwareVersion = root.value(QStringLiteral("softwareVersion")).toString();
+    loadedSession.firmwareVersion = root.value(QStringLiteral("firmwareVersion")).toString();
+    loadedSession.deviceSn = root.value(QStringLiteral("deviceSn")).toString();
+    loadedSession.tester = root.value(QStringLiteral("tester")).toString();
+    loadedSession.environment = root.value(QStringLiteral("environment")).toString();
+    loadedSession.remark = root.value(QStringLiteral("remark")).toString();
+    loadedSession.createdAt = QDateTime::fromString(root.value(QStringLiteral("createdAt")).toString(), Qt::ISODate);
+    if (!loadedSession.createdAt.isValid()) {
+        loadedSession.createdAt = sessionFileInfo.lastModified();
+    }
+    loadedSession.sessionDirectory = root.value(QStringLiteral("sessionDirectory")).toString();
+    if (loadedSession.sessionDirectory.trimmed().isEmpty()) {
+        loadedSession.sessionDirectory = sessionFileInfo.absolutePath();
+    }
+
+    QDir dir;
+    if (!dir.mkpath(loadedSession.sessionDirectory) ||
+        !dir.mkpath(QDir(loadedSession.sessionDirectory).filePath(QStringLiteral("evidence")))) {
+        if (error) {
+            *error = QStringLiteral("无法访问会话目录: %1").arg(loadedSession.sessionDirectory);
+        }
+        return false;
+    }
+
+    QMap<QString, TestCaseResult> loadedResults;
+    for (const TestCase &testCase : qAsConst(m_cases)) {
+        TestCaseResult result;
+        result.caseId = testCase.id;
+        loadedResults.insert(testCase.id, result);
+    }
+
+    const QJsonArray results = root.value(QStringLiteral("results")).toArray();
+    for (const QJsonValue &value : results) {
+        if (!value.isObject()) {
+            continue;
+        }
+        const QJsonObject object = value.toObject();
+        const QString caseId = object.value(QStringLiteral("caseId")).toString().trimmed();
+        if (caseId.isEmpty() || !loadedResults.contains(caseId)) {
+            continue;
+        }
+
+        TestCaseResult result = loadedResults.value(caseId);
+        result.caseId = caseId;
+        result.status = testResultStatusFromText(object.value(QStringLiteral("status")).toString());
+        result.actualResult = object.value(QStringLiteral("actualResult")).toString();
+        result.defectId = object.value(QStringLiteral("defectId")).toString();
+        result.remark = object.value(QStringLiteral("remark")).toString();
+        result.startedAt = QDateTime::fromString(object.value(QStringLiteral("startedAt")).toString(), Qt::ISODate);
+        result.finishedAt = QDateTime::fromString(object.value(QStringLiteral("finishedAt")).toString(), Qt::ISODate);
+        result.evidenceLogPath = object.value(QStringLiteral("evidenceLogPath")).toString();
+        if (result.evidenceLogPath.trimmed().isEmpty()) {
+            const QString candidate = QDir(loadedSession.sessionDirectory).filePath(QStringLiteral("evidence/%1.log").arg(caseId));
+            if (QFileInfo::exists(candidate)) {
+                result.evidenceLogPath = candidate;
+            }
+        }
+        result.failureCategory = object.value(QStringLiteral("failureCategory")).toString();
+        result.judgeReason = object.value(QStringLiteral("judgeReason")).toString();
+        result.keyFrames.clear();
+        const QJsonArray keyFrames = object.value(QStringLiteral("keyFrames")).toArray();
+        for (const QJsonValue &keyFrame : keyFrames) {
+            result.keyFrames.append(keyFrame.toString());
+        }
+        result.previousStatus = object.value(QStringLiteral("previousStatus")).toString();
+        result.previousFailureReason = object.value(QStringLiteral("previousFailureReason")).toString();
+        result.retestCount = object.value(QStringLiteral("retestCount")).toInt(0);
+        result.lastRetestAt = QDateTime::fromString(object.value(QStringLiteral("lastRetestAt")).toString(), Qt::ISODate);
+        loadedResults.insert(caseId, result);
+    }
+
+    m_session = loadedSession;
+    m_results = loadedResults;
+    m_activeCaseId.clear();
+    m_hasSession = true;
+    return true;
 }
 
 bool TestCaseService::hasSession() const
@@ -469,6 +610,21 @@ QString TestCaseService::evidencePathForCase(const QString &caseId) const
         return QString();
     }
     return caseEvidencePath(caseId);
+}
+
+bool TestCaseService::evidenceExistsForCase(const QString &caseId) const
+{
+    if (!m_hasSession || !m_results.contains(caseId)) {
+        return false;
+    }
+
+    const TestCaseResult result = m_results.value(caseId);
+    QString path = result.evidenceLogPath;
+    if (path.trimmed().isEmpty()) {
+        path = caseEvidencePath(caseId);
+    }
+    QFileInfo info(path);
+    return info.exists() && info.size() > 0;
 }
 
 bool TestCaseService::saveSessionJson(QString *error) const

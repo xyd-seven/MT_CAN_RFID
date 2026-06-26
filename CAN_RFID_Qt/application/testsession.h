@@ -29,6 +29,17 @@ struct TestCase
     QString commandTemplate;
     QString judgeTemplate;
     QString manualPrompt;
+    QString expectedNegativeSid;
+    QStringList allowedNrc;
+    QStringList keyFrameIds;
+    QString judgeWindow;
+    QString postCommandTemplate;
+    QString requiredPrefix;
+    bool allowEmptyValue = true;
+    QString semiAssistTemplate;
+    QString semiPrompt;
+    QString semiJudgeTemplate;
+    int semiWaitMs = 1000;
     int timeoutMs = 1000;
     int retryCount = 0;
 };
