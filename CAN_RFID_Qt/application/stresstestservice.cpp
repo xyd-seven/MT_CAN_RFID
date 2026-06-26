@@ -350,11 +350,13 @@ void StressTestService::updateTagPart(quint32 frameId, const QByteArray &payload
     }
 
     const QString newTag = currentTagText();
-    currentStats.currentTag = newTag;
-    if (!newTag.isEmpty()) {
-        currentStats.lastTagUpdateTime = QDateTime::currentDateTime();
-        uniqueTags.insert(newTag);
-        currentStats.uniqueTagCount = static_cast<quint64>(uniqueTags.size());
+    if (isValidTagText(newTag)) {
+        currentStats.currentTag = newTag;
+        if (!uniqueTags.contains(newTag)) {
+            uniqueTags.insert(newTag);
+            currentStats.lastTagUpdateTime = QDateTime::currentDateTime();
+            currentStats.uniqueTagCount = static_cast<quint64>(uniqueTags.size());
+        }
     }
     if (!previousTag.isEmpty() && previousTag != newTag) {
         ++currentStats.tagChangeCount;
