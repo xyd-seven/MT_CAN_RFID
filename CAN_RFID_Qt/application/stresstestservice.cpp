@@ -338,7 +338,6 @@ void StressTestService::handleStatusFrame(const CanFrame &frame)
 
 void StressTestService::updateTagPart(quint32 frameId, const QByteArray &payload)
 {
-    const QString previousTag = currentTagText();
     const QString payloadText = RfidProtocol::parseAsciiPayload(payload);
 
     if (frameId == RfidProtocol::TagPart1FrameId) {
@@ -347,28 +346,6 @@ void StressTestService::updateTagPart(quint32 frameId, const QByteArray &payload
         tagPart2 = payloadText;
     } else if (frameId == RfidProtocol::TagPart3FrameId) {
         tagPart3 = payloadText;
-    }
-
-    const QString newTag = currentTagText();
-    
-    // Check if tag parts are logically complete to prevent intermediate/fragment tags.
-    bool partsComplete = false;
-    if (newTag.length() == 16 && !tagPart1.isEmpty() && !tagPart2.isEmpty() && tagPart3.isEmpty()) {
-        partsComplete = true;
-    } else if (newTag.length() == 24 && !tagPart1.isEmpty() && !tagPart2.isEmpty() && !tagPart3.isEmpty()) {
-        partsComplete = true;
-    }
-
-    if (partsComplete && isValidTagText(newTag)) {
-        currentStats.currentTag = newTag;
-        if (!uniqueTags.contains(newTag)) {
-            uniqueTags.insert(newTag);
-            currentStats.lastTagUpdateTime = QDateTime::currentDateTime();
-            currentStats.uniqueTagCount = static_cast<quint64>(uniqueTags.size());
-        }
-    }
-    if (!previousTag.isEmpty() && previousTag != newTag) {
-        ++currentStats.tagChangeCount;
     }
 }
 
@@ -440,7 +417,20 @@ void StressTestService::markSuccess()
 
     if (currentTagIsValid()) {
         ++currentStats.validTagCount;
-        currentStats.lastSuccessTag = currentTagText();
+        const QString newTag = currentTagText();
+        currentStats.currentTag = newTag;
+
+        if (!uniqueTags.contains(newTag)) {
+            uniqueTags.insert(newTag);
+            currentStats.lastTagUpdateTime = QDateTime::currentDateTime();
+            currentStats.uniqueTagCount = static_cast<quint64>(uniqueTags.size());
+        }
+
+        if (!currentStats.lastSuccessTag.isEmpty() && currentStats.lastSuccessTag != newTag) {
+            ++currentStats.tagChangeCount;
+        }
+
+        currentStats.lastSuccessTag = newTag;
         currentStats.lastFailureReason.clear();
         return;
     }
