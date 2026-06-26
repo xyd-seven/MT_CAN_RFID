@@ -36,6 +36,7 @@ private:
     void ensureSerialLogOpen();
     QString levelText(LogLevel level) const;
     QString csvEscape(const QString &value) const;
+    QString textField(const QString &value) const;
 
     QString logDirectory;
     bool canAutoSaveEnabled;

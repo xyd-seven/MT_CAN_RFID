@@ -381,6 +381,10 @@ QingjuOtaService::QingjuOtaService(QingjuCanManager *canManager, QObject *parent
 
 QingjuOtaService::~QingjuOtaService()
 {
+    if (m_worker && m_worker->isRunning()) {
+        m_worker->requestAbort();
+        m_worker->wait();
+    }
 }
 
 QString QingjuOtaService::stateText() const

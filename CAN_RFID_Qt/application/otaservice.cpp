@@ -1,14 +1,53 @@
-﻿#include "otaservice.h"
+#ifdef _WIN32
+#include <windows.h>
+#include <mmsystem.h>
+#endif
+
+#include "otaservice.h"
+#include "canthread.h"
 #include "domain/crc16.h"
 #include <QDebug>
 
+namespace {
+constexpr int OtaMaxRetryCount = 3;
+constexpr int OtaDefaultChunkSize = 128;
+constexpr int OtaMaxChunkSize = 240;
+constexpr int OtaA2ResponseTimeoutMs = 500;
+constexpr int OtaA3ResponseTimeoutMs = 1000;
+constexpr int OtaA1ResponseTimeoutMs = 3000;
+constexpr int OtaA4ResponseTimeoutMs = 3000;
+constexpr int OtaConsecutiveFrameIntervalMs = 1;
+constexpr int OtaMaxWaitFrameCount = 3;
+constexpr int OtaPendingFrameLimit = 200;
+
+class WindowsTimerResolutionGuard {
+public:
+    WindowsTimerResolutionGuard() {
+#ifdef Q_OS_WIN
+        if (timeBeginPeriod(1) == TIMERR_NOERROR) {
+            enabled = true;
+        }
+#endif
+    }
+    ~WindowsTimerResolutionGuard() {
+#ifdef Q_OS_WIN
+        if (enabled) {
+            timeEndPeriod(1);
+        }
+#endif
+    }
+private:
+    bool enabled = false;
+};
+}
+
 OtaWorker::OtaWorker(QObject *parent) :
     QThread(parent),
+    m_canthread(nullptr),
     vendorCode(0x02), // UHF
     hwVersion(0),
     swVersion(0),
     protocolVersion(0x02), // OTA protocol version
-    hasResponse(false),
     abortRequested(false),
     queryOnlyMode(false)
 {
@@ -20,7 +59,7 @@ OtaWorker::~OtaWorker()
     wait();
 }
 
-void OtaWorker::setup(const QString &filePath, const IsoTpConfig &cfg, quint8 vendor, quint16 hw, quint16 sw, quint8 proto, const OtaErrorConfig &injectCfg, bool queryOnly)
+void OtaWorker::setup(const QString &filePath, const IsoTpConfig &cfg, quint8 vendor, quint16 hw, quint16 sw, quint8 proto, CANThread *canthread, const OtaErrorConfig &injectCfg, bool queryOnly)
 {
     firmwarePath = filePath;
     config = cfg;
@@ -33,6 +72,10 @@ void OtaWorker::setup(const QString &filePath, const IsoTpConfig &cfg, quint8 ve
     queryOnlyMode = queryOnly;
     lastError.clear();
     injectConfig = injectCfg;
+    m_canthread = canthread;
+
+    QMutexLocker locker(&mutex);
+    m_pendingFrames.clear();
 }
 
 void OtaWorker::requestAbort()
@@ -44,9 +87,14 @@ void OtaWorker::requestAbort()
 
 void OtaWorker::handleIncomingFrame(const CanFrame &frame)
 {
+    if (frame.id != config.responseId || frame.channel != config.channel) {
+        return;
+    }
     QMutexLocker locker(&mutex);
-    responseFrame = frame;
-    hasResponse = true;
+    if (m_pendingFrames.size() >= OtaPendingFrameLimit) {
+        m_pendingFrames.dequeue();
+    }
+    m_pendingFrames.enqueue(frame);
     waitCondition.wakeAll();
 }
 
@@ -62,41 +110,30 @@ bool OtaWorker::waitForFrame(quint32 expectedId, quint8 firstByteMask, quint8 ex
 
     QMutexLocker locker(&mutex);
     while (true) {
+        if (abortRequested.load()) {
+            return false;
+        }
+
+        while (!m_pendingFrames.isEmpty()) {
+            CanFrame frame = m_pendingFrames.dequeue();
+            if (frame.id == expectedId && frame.channel == config.channel && !frame.data.isEmpty()) {
+                quint8 byte0 = static_cast<quint8>(frame.data[0]);
+                if ((byte0 & firstByteMask) == expectedFirstByte) {
+                    matchedFrame = frame;
+                    return true;
+                }
+            }
+        }
+
         int remaining = timeoutMs - timer.elapsed();
         if (remaining <= 0) {
             return false;
         }
 
-        if (!hasResponse) {
-            if (!waitCondition.wait(&mutex, remaining)) {
-                return false; // Timeout
-            }
-        }
-
-        if (abortRequested.load()) {
-            return false;
-        }
-
-        if (hasResponse) {
-            if (responseFrame.id == expectedId && responseFrame.channel == config.channel && !responseFrame.data.isEmpty()) {
-                quint8 byte0 = static_cast<quint8>(responseFrame.data[0]);
-                if ((byte0 & firstByteMask) == expectedFirstByte) {
-                    matchedFrame = responseFrame;
-                    return true;
-                }
-            }
-            hasResponse = false; // Not a match, discard and keep waiting
+        if (!waitCondition.wait(&mutex, remaining)) {
+            return false; // Timeout
         }
     }
-}
-
-bool OtaWorker::waitForFlowControl(int timeoutMs, IsoTpFlowControl &fc)
-{
-    CanFrame frame;
-    if (!waitForFrame(config.responseId, 0xF0, 0x30, timeoutMs, frame)) {
-        return false;
-    }
-    return IsoTpTransport::parseFlowControl(frame.data, fc);
 }
 
 bool OtaWorker::waitForResponse(quint8 expectedSid, int timeoutMs, QByteArray &payload)
@@ -106,52 +143,100 @@ bool OtaWorker::waitForResponse(quint8 expectedSid, int timeoutMs, QByteArray &p
 
     QMutexLocker locker(&mutex);
     while (true) {
-        int remaining = timeoutMs - timer.elapsed();
-        if (remaining <= 0) {
-            lastError = "Response wait timeout";
-            return false;
-        }
-
-        if (!hasResponse) {
-            if (!waitCondition.wait(&mutex, remaining)) {
-                lastError = "Wait condition timeout";
-                return false;
-            }
-        }
-
         if (abortRequested.load()) {
             lastError = "Abort requested";
             return false;
         }
 
-        if (hasResponse) {
-            if (responseFrame.id == config.responseId && responseFrame.channel == config.channel && responseFrame.data.size() >= 2) {
-                quint8 byte0 = static_cast<quint8>(responseFrame.data[0]);
-                quint8 byte1 = static_cast<quint8>(responseFrame.data[1]);
+        while (!m_pendingFrames.isEmpty()) {
+            CanFrame frame = m_pendingFrames.dequeue();
+            if (frame.id == config.responseId && frame.channel == config.channel && frame.data.size() >= 2) {
+                quint8 byte0 = static_cast<quint8>(frame.data[0]);
+                quint8 byte1 = static_cast<quint8>(frame.data[1]);
 
-                // ISO-TP 鍗曞抚 (SF) 鏍￠獙锛氶珮 4 浣嶄负 0
+                // ISO-TP 单帧 (SF) 校验：高 4 位为 0
                 if ((byte0 & 0xF0) == 0x00) {
                     if (byte1 == expectedSid) {
                         int len = byte0;
-                        if (len > 0 && len <= 7 && responseFrame.data.size() >= len + 1) {
-                            payload = responseFrame.data.mid(1, len);
+                        if (len > 0 && len <= 7 && frame.data.size() >= len + 1) {
+                            payload = frame.data.mid(1, len);
                             return true;
                         }
                     }
-                    // 璐熷搷搴旀牎楠?(0x7F)
-                    else if (byte1 == 0x7F && responseFrame.data.size() >= 4) {
-                        quint8 originalSid = static_cast<quint8>(responseFrame.data[2]);
-                        quint8 nrc = static_cast<quint8>(responseFrame.data[3]);
-                        if (originalSid == (expectedSid - 0x40)) { // 姣斿姝ｅ搷搴斾负 0xE1 (A1+0x40)锛屽搴斿師璇锋眰涓?0xA1
+                    // 负响应校验 (0x7F)
+                    else if (byte1 == 0x7F && frame.data.size() >= 4) {
+                        quint8 originalSid = static_cast<quint8>(frame.data[2]);
+                        quint8 nrc = static_cast<quint8>(frame.data[3]);
+                        if (originalSid == (expectedSid - 0x40)) { // 比如正响应为 0xE1 (A1+0x40)
                             lastError = QString("Negative response: NRC=0x%1").arg(nrc, 2, 16, QChar('0'));
                             return false;
                         }
                     }
                 }
             }
-            hasResponse = false; // Not a match, discard and keep waiting
+        }
+
+        int remaining = timeoutMs - timer.elapsed();
+        if (remaining <= 0) {
+            lastError = "Response wait timeout";
+            return false;
+        }
+
+        if (!waitCondition.wait(&mutex, remaining)) {
+            lastError = "Wait condition timeout";
+            return false;
         }
     }
+}
+
+bool OtaWorker::waitForFlowControlWithWait(int timeoutMs, IsoTpFlowControl &fc)
+{
+    {
+        QMutexLocker locker(&mutex);
+        clearPendingFramesLocked(); // Clear queue before waiting!
+    }
+
+    int waitCount = 0;
+    QElapsedTimer timer;
+    timer.start();
+
+    while (true) {
+        if (abortRequested.load()) {
+            lastError = "Abort requested during Flow Control";
+            return false;
+        }
+
+        int remaining = timeoutMs - timer.elapsed();
+        if (remaining <= 0) {
+            lastError = "Flow Control timeout";
+            return false;
+        }
+
+        CanFrame frame;
+        // Wait for Flow Control frame: expected ID = responseId, first byte mask = 0xF0, expected first byte = 0x30 (Flow Control)
+        if (!waitForFrame(config.responseId, 0xF0, 0x30, remaining, frame)) {
+            lastError = "Flow Control wait failed";
+            return false;
+        }
+
+        if (!IsoTpTransport::parseFlowControl(frame.data, fc)) {
+            lastError = "Parse Flow Control failed";
+            return false;
+        }
+
+        if (fc.flowStatus == 1) { // WAIT
+            waitCount++;
+            if (waitCount > OtaMaxWaitFrameCount) {
+                lastError = "Too many WAIT flow control frames";
+                return false;
+            }
+            // Restart timer and wait again
+            timer.restart();
+            continue;
+        }
+        break;
+    }
+    return true;
 }
 
 bool OtaWorker::sendSingleFrame(quint8 sid, const QByteArray &params)
@@ -171,7 +256,14 @@ bool OtaWorker::sendSingleFrame(quint8 sid, const QByteArray &params)
 
     {
         QMutexLocker locker(&mutex);
-        hasResponse = false;
+        clearPendingFramesLocked(); // Clear queue before sending request!
+    }
+
+    if (m_canthread != nullptr && m_canthread->isRunning()) {
+        m_canthread->sendClassicData(frames[0].id, config.channel, frames[0].data);
+    } else {
+        lastError = "CAN device is not ready or thread dead";
+        return false;
     }
 
     emit transmitFrame(frames[0].id, frames[0].data);
@@ -188,67 +280,35 @@ bool OtaWorker::sendMultiFrame(const QByteArray &payload, int timeoutMs)
     QByteArray ffPayload = payload.left(6);
     CanFrame ffFrame = transport.buildFirstFrame(ffPayload, totalSize);
 
-    // 鍙戦€侀甯?(FF)
+    // 发送首帧 (FF)
     {
         QMutexLocker locker(&mutex);
-        hasResponse = false;
+        clearPendingFramesLocked(); // Clear queue before sending FF!
+    }
+    
+    if (m_canthread != nullptr && m_canthread->isRunning()) {
+        m_canthread->sendClassicData(ffFrame.id, config.channel, ffFrame.data);
+    } else {
+        lastError = "CAN device is not ready or thread dead";
+        return false;
     }
     emit transmitFrame(ffFrame.id, ffFrame.data);
 
-    // 绛夊緟娴佹帶甯?(FC)
-    QMutexLocker locker(&mutex);
+    // 等待流控帧 (FC)
     IsoTpFlowControl fc;
-    bool fcReceived = false;
-    QElapsedTimer timer;
-    timer.start();
-
-    while (true) {
-        int remaining = timeoutMs - timer.elapsed();
-        if (remaining <= 0) {
-            break;
-        }
-
-        if (!hasResponse) {
-            if (!waitCondition.wait(&mutex, remaining)) {
-                break;
-            }
-        }
-
-        if (abortRequested.load()) {
-            break;
-        }
-
-        if (hasResponse) {
-            if (responseFrame.id == config.responseId && responseFrame.channel == config.channel) {
-                if (IsoTpTransport::parseFlowControl(responseFrame.data, fc)) {
-                    fcReceived = true;
-                    break;
-                }
-            }
-            hasResponse = false; // Not a match, discard and keep waiting
-        }
-    }
-
-    if (abortRequested.load()) {
-        lastError = "Abort requested during Flow Control";
+    if (!waitForFlowControlWithWait(timeoutMs, fc)) {
         return false;
     }
 
-    if (!fcReceived) {
-        lastError = "Flow Control timeout";
-        return false;
-    }
-
-    if (fc.flowStatus == 1) { // WAIT
-        lastError = "Flow status WAIT not supported";
-        return false;
-    } else if (fc.flowStatus == 2) { // OVERFLOW
+    if (fc.flowStatus == 2) { // OVERFLOW
         lastError = "Flow status OVERFLOW";
         return false;
+    } else if (fc.flowStatus != 0) { // CTS
+        lastError = QString("Flow status error: %1").arg(fc.flowStatus);
+        return false;
     }
 
-    // 鍙戦€佽繛缁抚 (CF)
-    locker.unlock();
+    // 发送连续帧 (CF)
     int offset = 6;
     quint8 seq = 1;
     int bsCount = 0;
@@ -259,7 +319,7 @@ bool OtaWorker::sendMultiFrame(const QByteArray &payload, int timeoutMs)
             return false;
         }
 
-        // 甯ч棿闅旀帶鍒?(STmin)
+        // 帧间隔控制 (STmin)
         int stMin = fc.stMin;
         qint64 targetNsecs = 0;
         if (stMin == 0) {
@@ -290,7 +350,7 @@ bool OtaWorker::sendMultiFrame(const QByteArray &payload, int timeoutMs)
 
         if (injectConfig.enabled && injectConfig.isoTpSnError && seq == 3) {
             if (!cfFrame.data.isEmpty()) {
-                // 鏁呮剰灏嗗簭鍙蜂负 3 鐨勮繛缁抚鐨?SN 瀛楄妭绡℃敼涓?5 (璺冲寘)
+                // 故意将序号为 3 的连续帧的 SN 字节篡改为 5 (跳包)
                 cfFrame.data[0] = static_cast<char>((cfFrame.data[0] & 0xF0) | 0x05);
             }
         }
@@ -298,62 +358,29 @@ bool OtaWorker::sendMultiFrame(const QByteArray &payload, int timeoutMs)
         offset += len;
         seq = (seq + 1) & 0x0F;
 
-        // 鍙戦€佽繛缁抚
-        locker.relock();
-        hasResponse = false;
-        locker.unlock();
+        // 发送连续帧
+        if (m_canthread != nullptr && m_canthread->isRunning()) {
+            m_canthread->sendClassicData(cfFrame.id, config.channel, cfFrame.data);
+        } else {
+            lastError = "CAN device is not ready or thread dead during CF";
+            return false;
+        }
         emit transmitFrame(cfFrame.id, cfFrame.data);
 
         bsCount++;
         if (fc.blockSize > 0 && bsCount >= fc.blockSize && offset < totalSize) {
-
             bsCount = 0;
-            fcReceived = false;
-            timer.restart();
-            locker.relock();
-            hasResponse = false;
-
-            while (true) {
-                int remaining = timeoutMs - timer.elapsed();
-                if (remaining <= 0) {
-                    break;
-                }
-
-                if (!hasResponse) {
-                    if (!waitCondition.wait(&mutex, remaining)) {
-                        break;
-                    }
-                }
-
-                if (abortRequested.load()) {
-                    break;
-                }
-
-                if (hasResponse) {
-                    if (responseFrame.id == config.responseId && responseFrame.channel == config.channel) {
-                        if (IsoTpTransport::parseFlowControl(responseFrame.data, fc)) {
-                            fcReceived = true;
-                            break;
-                        }
-                    }
-                    hasResponse = false; // Not a match, discard and keep waiting
-                }
-            }
-
-            if (abortRequested.load()) {
+            // 每次等待流控帧前，清除之前累积的流控帧/数据帧
+            if (!waitForFlowControlWithWait(timeoutMs, fc)) {
                 return false;
             }
-
-            if (!fcReceived) {
-                lastError = "Consecutive Flow Control timeout";
+            if (fc.flowStatus == 2) { // OVERFLOW
+                lastError = "Flow status OVERFLOW during CF";
+                return false;
+            } else if (fc.flowStatus != 0) {
+                lastError = QString("Flow status error during CF: %1").arg(fc.flowStatus);
                 return false;
             }
-
-            if (fc.flowStatus != 0) { // CTS
-                lastError = QString("Flow status error: %1").arg(fc.flowStatus);
-                return false;
-            }
-            locker.unlock();
         }
     }
 
@@ -362,26 +389,27 @@ bool OtaWorker::sendMultiFrame(const QByteArray &payload, int timeoutMs)
 
 void OtaWorker::run()
 {
+    WindowsTimerResolutionGuard timerGuard;
+
     if (queryOnlyMode) {
-        updateStatus(static_cast<int>(OtaService::State::QueryProgram), QStringLiteral("\u6b63\u5728\u67e5\u8be2\u7a0b\u5e8f\u4f4d\u7f6e..."), 0);
-        for (int retry = 0; retry < 3; ++retry) {
+        updateStatus(static_cast<int>(OtaService::State::QueryProgram), QStringLiteral("正在查询程序位置..."), 0);
+        for (int retry = 0; retry < OtaMaxRetryCount; ++retry) {
             if (sendSingleFrame(0xA4)) {
                 QByteArray responsePayload;
-                if (waitForResponse(0xE4, 3000, responsePayload) && responsePayload.size() >= 2) {
+                if (waitForResponse(0xE4, OtaA4ResponseTimeoutMs, responsePayload) && responsePayload.size() >= 2) {
                     const quint8 location = static_cast<quint8>(responsePayload[1]);
                     const QString locationText = (location == 0x00) ? QStringLiteral("BOOT") : QStringLiteral("APP");
                     updateStatus(static_cast<int>(OtaService::State::Completed),
-                                 QStringLiteral("\u7a0b\u5e8f\u4f4d\u7f6e\uff1a%1").arg(locationText), 100);
+                                 QStringLiteral("程序位置：%1").arg(locationText), 100);
                     return;
                 }
             }
-            msleep(100);
         }
-        updateStatus(static_cast<int>(OtaService::State::Failed), QStringLiteral("\u67e5\u8be2\u7a0b\u5e8f\u4f4d\u7f6e\u5931\u8d25"), 0);
+        updateStatus(static_cast<int>(OtaService::State::Failed), QStringLiteral("查询程序位置失败"), 0);
         return;
     }
 
-    // --- 鎻愬墠璇诲彇鍥轰欢鏂囦欢 (浠ユ敮鎸佽秺鏉冪洿鎺ュ彂鍖呮祴璇? ---
+    // --- 提前读取固件文件 (以支持越权直接发包测试) ---
     QFile file(firmwarePath);
     if (!file.open(QIODevice::ReadOnly)) {
         updateStatus(static_cast<int>(OtaService::State::Failed), QStringLiteral("无法打开固件文件"), 5);
@@ -395,21 +423,22 @@ void OtaWorker::run()
         return;
     }
     quint32 fileSize = fileData.size();
-    int chunkSize = 128; // 榛樿鍒嗗寘瀛楄妭鏁帮紝浣滀负鍑芥暟浣滅敤鍩熷彉閲忎互閬垮厤 goto 浜ゅ弶鍒濆鍖?
-    // 瓒婃潈鐩存帴鍙戝寘娴嬭瘯娉ㄥ叆
+    int chunkSize = OtaDefaultChunkSize; // 默认分包字节数，作为函数作用域变量以避免 goto 交叉初始化
+    // 越权直接发包测试注入
     if (injectConfig.enabled && injectConfig.outOfOrderState) {
         updateStatus(static_cast<int>(OtaService::State::SendData), QStringLiteral("[注入] 越权发包：跳过握手直接下发固件包..."), 15);
         chunkSize = 240;
         goto send_data_phase;
     }
 
-    { // 鎻℃墜闃舵灞€閮ㄤ綔鐢ㄥ煙锛岄槻姝?goto 浜ゅ弶鍒濆鍖栨湰鍦板彉閲?        // --- Phase 1: Query (鏌ヨ) ---
+    { // 握手阶段局部作用域，防止 goto 交叉初始化本地变量
+        // --- Phase 1: Query (查询) ---
         updateStatus(static_cast<int>(OtaService::State::QueryProgram), QStringLiteral("正在查询程序位置..."), 0);
         bool queryOk = false;
-        for (int retry = 0; retry < 3; ++retry) {
+        for (int retry = 0; retry < OtaMaxRetryCount; ++retry) {
             if (sendSingleFrame(0xA4)) {
                 QByteArray e4Resp;
-                if (waitForResponse(0xE4, 3000, e4Resp)) {
+                if (waitForResponse(0xE4, OtaA4ResponseTimeoutMs, e4Resp)) {
                     if (e4Resp.size() >= 2) {
                         quint8 location = static_cast<quint8>(e4Resp[1]);
                         QString locText = (location == 0x00) ? QStringLiteral("BOOT") : QStringLiteral("APP");
@@ -419,10 +448,9 @@ void OtaWorker::run()
                     }
                 }
             }
-            msleep(100);
         }
         if (!queryOk) {
-            // 鏌ヨ澶辫触閫氬父闈炶嚧鍛斤紝浠呮墦鍗版棩蹇楀苟缁х画
+            // 查询失败通常非致命，仅打印日志并继续
             qWarning() << "Query program location timeout or failed: " << lastError;
             updateStatus(static_cast<int>(OtaService::State::QueryProgram), QStringLiteral("查询程序位置失败，继续尝试升级"), 5);
         }
@@ -432,7 +460,7 @@ void OtaWorker::run()
             return;
         }
 
-        // --- Phase 2: Start Upgrade (寮€濮? ---
+        // --- Phase 2: Start Upgrade (开始) ---
         updateStatus(static_cast<int>(OtaService::State::StartUpgrade), QStringLiteral("正在启动固件升级，包大小：%1 字节...").arg(fileSize), 10);
         
         QByteArray a1Payload;
@@ -450,7 +478,7 @@ void OtaWorker::run()
         }
         a1Payload.append(static_cast<char>(sendVendorCode));
         if (injectConfig.enabled && injectConfig.hwMismatch) {
-            // 鏁呮剰鍙戦€侀敊璇殑纭欢鐗堟湰锛屾ā鎷熺‖浠剁増鏈笉鍖归厤
+            // 故意发送错误的硬件版本，模拟硬件版本不匹配
             a1Payload.append(static_cast<char>(0xFF));
             a1Payload.append(static_cast<char>(0xFF));
         } else {
@@ -465,17 +493,20 @@ void OtaWorker::run()
         a1Payload.append(static_cast<char>(fileSize & 0xFF));
 
         bool startOk = false;
-        int negotiatedChunkSize = 128; // 榛樿鍒嗗寘瀛楄妭鏁颁负128
-        for (int retry = 0; retry < 3; ++retry) {
-            if (sendMultiFrame(a1Payload, 3000)) {
+        int negotiatedChunkSize = OtaDefaultChunkSize; // 默认分包字节数为128
+        for (int retry = 0; retry < OtaMaxRetryCount; ++retry) {
+            if (sendMultiFrame(a1Payload, OtaA1ResponseTimeoutMs)) {
                 QByteArray e1Resp;
-                if (waitForResponse(0xE1, 3000, e1Resp)) {
+                if (waitForResponse(0xE1, OtaA1ResponseTimeoutMs, e1Resp)) {
                     if (e1Resp.size() >= 2 && static_cast<quint8>(e1Resp[1]) == 0x00) {
                         startOk = true;
                         if (e1Resp.size() >= 4) {
                             quint16 parsedSize = (static_cast<quint8>(e1Resp[2]) << 8) | static_cast<quint8>(e1Resp[3]);
-                            if (parsedSize >= 64 && parsedSize <= 1024) {
+                            if (parsedSize >= 64 && parsedSize <= OtaMaxChunkSize) {
                                 negotiatedChunkSize = parsedSize;
+                            } else {
+                                qWarning() << "OTA start response: invalid negotiated packet size" << parsedSize << ", fallback to default" << OtaDefaultChunkSize;
+                                negotiatedChunkSize = OtaDefaultChunkSize;
                             }
                         }
                         QString sysStatusText = QStringLiteral("Unknown");
@@ -498,16 +529,16 @@ void OtaWorker::run()
                 updateStatus(static_cast<int>(OtaService::State::Abort), QStringLiteral("升级已被用户中止"), 10);
                 return;
             }
-            msleep(100);
         }
 
         if (!startOk) {
             updateStatus(static_cast<int>(OtaService::State::Failed), QStringLiteral("升级启动请求失败: ") + lastError, 10);
             return;
         }
-        chunkSize = negotiatedChunkSize; // 瀵煎嚭鍗忓晢鍖呭ぇ灏忓埌澶栭儴鍙橀噺
-    } // 缁撴潫浣滅敤鍩?
-    // --- Phase 3: Send Data (鍙戝寘闃舵) ---
+        chunkSize = negotiatedChunkSize; // 导出协商包大小到外部变量
+    } // 结束作用域
+
+    // --- Phase 3: Send Data (发包阶段) ---
 send_data_phase:
     updateStatus(static_cast<int>(OtaService::State::SendData), QStringLiteral("开始下发固件包..."), 15);
     int totalChunks = (fileData.size() + chunkSize - 1) / chunkSize;
@@ -516,7 +547,7 @@ send_data_phase:
     for (int i = 0; i < totalChunks; ++i) {
         if (abortRequested.load()) {
             updateStatus(static_cast<int>(OtaService::State::Abort), QStringLiteral("升级已被用户中止"), 15);
-            sendSingleFrame(0xA3, QByteArray(1, 0x02)); // 涓鍗囩骇鍛戒护
+            sendSingleFrame(0xA3, QByteArray(1, 0x02)); // 中止升级命令
             return;
         }
 
@@ -548,7 +579,7 @@ send_data_phase:
         }
 
         if (injectConfig.enabled && injectConfig.seqError && chunkId == 3) {
-            // 鏁呮剰绡℃敼绗?3 鍖呯殑鍖呭彿涓?99锛屽埗閫犲寘鍙蜂笉杩炵画
+            // 故意篡改第 3 包的包号为 99，制造包号不连续
             chunkId = 99;
         }
 
@@ -559,10 +590,10 @@ send_data_phase:
         a2Payload.append(chunkData);
 
         bool chunkOk = false;
-        for (int retry = 0; retry < 3; ++retry) {
-            if (sendMultiFrame(a2Payload, 3000)) {
+        for (int retry = 0; retry < OtaMaxRetryCount; ++retry) {
+            if (sendMultiFrame(a2Payload, OtaA2ResponseTimeoutMs)) {
                 QByteArray e2Resp;
-                if (waitForResponse(0xE2, 3000, e2Resp)) {
+                if (waitForResponse(0xE2, OtaA2ResponseTimeoutMs, e2Resp)) {
                     if (e2Resp.size() >= 4) {
                         quint16 respChunkId = (static_cast<quint8>(e2Resp[1]) << 8) | static_cast<quint8>(e2Resp[2]);
                         quint8 writeStatus = static_cast<quint8>(e2Resp[3]);
@@ -577,41 +608,40 @@ send_data_phase:
             }
             if (abortRequested.load()) {
                 updateStatus(static_cast<int>(OtaService::State::Abort), QStringLiteral("升级已被用户中止"), 15);
-                sendSingleFrame(0xA3, QByteArray(1, 0x02)); // 涓鍗囩骇鍛戒护
+                sendSingleFrame(0xA3, QByteArray(1, 0x02)); // 中止升级命令
                 return;
             }
-            msleep(10);
         }
 
         if (!chunkOk) {
             updateStatus(static_cast<int>(OtaService::State::Failed), QStringLiteral("发送数据包失败，包号 %1，错误: ").arg(chunkId) + lastError);
-            sendSingleFrame(0xA3, QByteArray(1, 0x02)); // 涓鍗囩骇鍛戒护
+            sendSingleFrame(0xA3, QByteArray(1, 0x02)); // 中止升级命令
             return;
         }
 
-        int progressPercent = 15 + ((i + 1) * 80 / totalChunks); // 15% 鍒?95%
+        int progressPercent = 15 + ((i + 1) * 80 / totalChunks); // 15% 到 95%
         updateStatus(static_cast<int>(OtaService::State::SendData), QStringLiteral("已写入包 %1/%2").arg(chunkId).arg(totalChunks), progressPercent);
     }
 
-    // --- Phase 4: Finish & Verify (缁撴潫鏍￠獙) ---
+    // --- Phase 4: Finish & Verify (结束校验) ---
     updateStatus(static_cast<int>(OtaService::State::FinishUpgrade), QStringLiteral("固件下发完成，正在计算校验码..."), 95);
     quint16 finalCrc = calculateCrc16(reinterpret_cast<const quint8*>(fileData.constData()), fileData.size());
     
     if (injectConfig.enabled && injectConfig.crcError) {
-        // 鏍￠獙鐮佸彇鍙嶏紝鍒堕€?CRC16 鏍￠獙閿欒
+        // 校验码取反，制造 CRC16 校验错误
         finalCrc ^= 0xFFFF;
     }
 
     QByteArray a3Params;
-    a3Params.append(static_cast<char>(0x01)); // 鎵ц鍗囩骇
-    a3Params.append(static_cast<char>(finalCrc & 0xFF)); // 灏忕妯″紡 CRC
+    a3Params.append(static_cast<char>(0x01)); // 执行升级
+    a3Params.append(static_cast<char>(finalCrc & 0xFF)); // 小端模式 CRC
     a3Params.append(static_cast<char>((finalCrc >> 8) & 0xFF));
 
     bool finishOk = false;
-    for (int retry = 0; retry < 3; ++retry) {
+    for (int retry = 0; retry < OtaMaxRetryCount; ++retry) {
         if (sendSingleFrame(0xA3, a3Params)) {
             QByteArray e3Resp;
-            if (waitForResponse(0xE3, 3000, e3Resp)) {
+            if (waitForResponse(0xE3, OtaA3ResponseTimeoutMs, e3Resp)) {
                 if (e3Resp.size() >= 2) {
                     quint8 status = static_cast<quint8>(e3Resp[1]);
                     if (status == 0x00) {
@@ -619,7 +649,7 @@ send_data_phase:
                         break;
                     } else if (status == 0x01) {
                         lastError = QStringLiteral("固件校验错误 (CRC16 校验失败)");
-                        break; // 鏍￠獙澶辫触閲嶈瘯鏃犵敤
+                        break; // 校验失败重试无用
                     } else if (status == 0x02) {
                         lastError = QStringLiteral("设备端升级已中止");
                         break;
@@ -631,7 +661,6 @@ send_data_phase:
             updateStatus(static_cast<int>(OtaService::State::Abort), QStringLiteral("升级已被用户中止"), 95);
             return;
         }
-        msleep(100);
     }
 
     if (finishOk) {
@@ -650,13 +679,30 @@ OtaService::OtaService(QObject *parent) :
     QObject(parent),
     currentState(State::Idle),
     currentProgress(0),
-    vendorCode(0x02), // 榛樿瓒呴珮棰戝▉绉戝 (0x02)
+    vendorCode(0x02), // 默认超高频威科姆 (0x02)
     hwVersion(0),
-    swVersion(0)
+    swVersion(0),
+    m_canthread(nullptr)
 {
     worker = new OtaWorker(this);
     connect(worker, &OtaWorker::transmitFrame, this, &OtaService::transmitFrame);
     connect(worker, &OtaWorker::statusUpdated, this, &OtaService::onWorkerStatusUpdated);
+}
+
+void OtaService::setCanThread(CANThread *canthread)
+{
+    m_canthread = canthread;
+    if (m_canthread != nullptr) {
+        connect(m_canthread, &CANThread::recvedFrames, this, [this](const QVector<CanFrame> &frames) {
+            if (worker != nullptr && worker->isRunning()) {
+                for (const CanFrame &frame : frames) {
+                    if (frame.id == config.responseId && frame.channel == config.channel) {
+                        worker->handleIncomingFrame(frame);
+                    }
+                }
+            }
+        }, Qt::DirectConnection); // 使用 DirectConnection 建立跨线程实时直连！
+    }
 }
 
 OtaService::~OtaService()
@@ -725,7 +771,7 @@ void OtaService::queryProgramLocation()
     }
     setState(State::QueryProgram, QStringLiteral("准备查询程序位置..."));
     currentProgress = 0;
-    worker->setup(QString(), config, vendorCode, hwVersion, swVersion, 0x02, OtaErrorConfig(), true);
+    worker->setup(QString(), config, vendorCode, hwVersion, swVersion, 0x02, m_canthread, OtaErrorConfig(), true);
     worker->start();
 }
 
@@ -740,7 +786,7 @@ void OtaService::startUpgrade(const QString &firmwarePath, const OtaErrorConfig 
     }
     setState(State::StartUpgrade, QStringLiteral("准备启动升级流程..."));
     currentProgress = 0;
-    worker->setup(firmwarePath, config, vendorCode, hwVersion, swVersion, 0x02, injectCfg);
+    worker->setup(firmwarePath, config, vendorCode, hwVersion, swVersion, 0x02, m_canthread, injectCfg);
     worker->start();
 }
 
@@ -756,9 +802,18 @@ void OtaService::abortUpgrade()
 
 void OtaService::handleIncomingFrame(const CanFrame &frame)
 {
+    if (m_canthread != nullptr) {
+        // Handled by direct connection in CANThread context, skip to avoid duplicates.
+        return;
+    }
     if (worker->isRunning()) {
         worker->handleIncomingFrame(frame);
     }
+}
+
+void OtaWorker::clearPendingFramesLocked()
+{
+    m_pendingFrames.clear();
 }
 
 void OtaService::onWorkerStatusUpdated(int stateVal, const QString &message, int progressPercent)
@@ -777,4 +832,3 @@ void OtaService::setState(State state, const QString &message)
     currentMessage = message;
     emit otaStateChanged(currentState, message);
 }
-

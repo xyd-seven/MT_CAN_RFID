@@ -76,6 +76,7 @@ DEPENDPATH += $$PWD \
     $$PWD/third_party/zlgcan
 
 win32: LIBS += -L$$PWD/third_party/zlgcan -lzlgcan
+win32: LIBS += -lwinmm
 win32:!win32-g++: PRE_TARGETDEPS += $$PWD/third_party/zlgcan/zlgcan.lib
 
 win32 {

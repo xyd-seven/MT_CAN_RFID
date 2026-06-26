@@ -103,15 +103,15 @@ void LogService::logCanFrame(const CanFrame &frame)
     }
 
     QTextStream stream(&canLogFile);
-    stream << csvEscape(frame.hostDateTime.toString("yyyy-MM-dd HH:mm:ss.zzz")) << ','
-           << frame.channel << ','
-           << csvEscape(frame.directionText()) << ','
-           << csvEscape(frame.idText()) << ','
-           << csvEscape(frame.frameTypeText()) << ','
-           << csvEscape(frame.payloadTypeText()) << ','
-           << frame.dlc() << ','
-           << csvEscape(frame.protocolText()) << ','
-           << csvEscape(frame.dataText().trimmed()) << ','
+    stream << textField(frame.hostDateTime.toString("yyyy-MM-dd HH:mm:ss.zzz")) << '\t'
+           << frame.channel << '\t'
+           << textField(frame.directionText()) << '\t'
+           << textField(frame.idText()) << '\t'
+           << textField(frame.frameTypeText()) << '\t'
+           << textField(frame.payloadTypeText()) << '\t'
+           << frame.dlc() << '\t'
+           << textField(frame.protocolText()) << '\t'
+           << textField(frame.dataText().trimmed()) << '\t'
            << (frame.hasZlgTimestamp ? QString::number(frame.zlgTimestampRaw) : QString()) << '\n';
     ++pendingCanRows;
     if (pendingCanRows >= FlushRowThreshold) {
@@ -135,16 +135,16 @@ void LogService::logSerialFrame(bool isTx,
     }
 
     QTextStream stream(&serialLogFile);
-    stream << csvEscape(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")) << ','
-           << csvEscape(QStringLiteral("RS485")) << ','
-           << csvEscape(isTx ? QStringLiteral("发送") : QStringLiteral("接收")) << ','
-           << csvEscape(protocolId) << ','
-           << csvEscape(QStringLiteral("数据帧")) << ','
-           << csvEscape(QStringLiteral("-")) << ','
-           << data.size() << ','
-           << csvEscape(QStringLiteral("-")) << ','
-           << csvEscape(QString::fromLatin1(data.toHex(' ').toUpper())) << ','
-           << csvEscape(decodeText) << '\n';
+    stream << textField(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz")) << '\t'
+           << textField(QStringLiteral("RS485")) << '\t'
+           << textField(isTx ? QStringLiteral("发送") : QStringLiteral("接收")) << '\t'
+           << textField(protocolId) << '\t'
+           << textField(QStringLiteral("数据帧")) << '\t'
+           << textField(QStringLiteral("-")) << '\t'
+           << data.size() << '\t'
+           << textField(QStringLiteral("-")) << '\t'
+           << textField(QString::fromLatin1(data.toHex(' ').toUpper())) << '\t'
+           << textField(decodeText) << '\n';
     ++pendingSerialRows;
     if (pendingSerialRows >= FlushRowThreshold) {
         serialLogFile.flush();
@@ -200,7 +200,7 @@ void LogService::ensureCanLogOpen()
     pendingCanRows = 0;
 
     const QString filePath = QDir(logDirectory).filePath(
-        QString("can_%1.csv").arg(today.toString("yyyyMMdd")));
+        QString("can_%1.txt").arg(today.toString("yyyyMMdd")));
     canLogFile.setFileName(filePath);
     const bool existed = QFile::exists(filePath);
     if (!canLogFile.open(QIODevice::Append | QIODevice::Text)) {
@@ -208,7 +208,7 @@ void LogService::ensureCanLogOpen()
     }
     if (!existed) {
         QTextStream stream(&canLogFile);
-        stream << "pc_time,channel,direction,id,frame_type,payload_type,dlc,protocol,data,zlg_timestamp_raw\n";
+        stream << "pc_time\tchannel\tdirection\tid\tframe_type\tpayload_type\tdlc\tprotocol\tdata\tzlg_timestamp_raw\n";
     }
 }
 
@@ -230,7 +230,7 @@ void LogService::ensureSerialLogOpen()
     pendingSerialRows = 0;
 
     const QString filePath = QDir(logDirectory).filePath(
-        QString("serial_%1.csv").arg(today.toString("yyyyMMdd")));
+        QString("serial_%1.txt").arg(today.toString("yyyyMMdd")));
     serialLogFile.setFileName(filePath);
     const bool existed = QFile::exists(filePath);
     if (!serialLogFile.open(QIODevice::Append | QIODevice::Text)) {
@@ -238,7 +238,7 @@ void LogService::ensureSerialLogOpen()
     }
     if (!existed) {
         QTextStream stream(&serialLogFile);
-        stream << "pc_time,channel,direction,id,frame_type,payload_type,dlc,protocol,data,protocol_decode\n";
+        stream << "pc_time\tchannel\tdirection\tid\tframe_type\tpayload_type\tdlc\tprotocol\tdata\tprotocol_decode\n";
     }
 }
 
@@ -261,4 +261,13 @@ QString LogService::csvEscape(const QString &value) const
     QString escaped = value;
     escaped.replace("\"", "\"\"");
     return QString("\"%1\"").arg(escaped);
+}
+
+QString LogService::textField(const QString &value) const
+{
+    QString res = value;
+    res.replace('\r', ' ');
+    res.replace('\n', ' ');
+    res.replace('\t', ' ');
+    return res;
 }

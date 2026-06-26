@@ -8,9 +8,12 @@
 #include <QString>
 #include <QThread>
 #include <QWaitCondition>
+#include <QQueue>
 #include <atomic>
 #include "domain/canframe.h"
 #include "domain/isotptransport.h"
+
+class CANThread;
 
 struct OtaErrorConfig
 {
@@ -33,7 +36,7 @@ public:
     explicit OtaWorker(QObject *parent = nullptr);
     ~OtaWorker();
 
-    void setup(const QString &filePath, const IsoTpConfig &cfg, quint8 vendor, quint16 hw, quint16 sw, quint8 proto, const OtaErrorConfig &injectCfg = OtaErrorConfig(), bool queryOnly = false);
+    void setup(const QString &filePath, const IsoTpConfig &cfg, quint8 vendor, quint16 hw, quint16 sw, quint8 proto, CANThread *canthread, const OtaErrorConfig &injectCfg = OtaErrorConfig(), bool queryOnly = false);
     void requestAbort();
     void handleIncomingFrame(const CanFrame &frame);
 
@@ -48,10 +51,13 @@ private:
     bool waitForFlowControl(int timeoutMs, IsoTpFlowControl &fc);
     bool waitForResponse(quint8 expectedSid, int timeoutMs, QByteArray &payload);
     bool waitForFrame(quint32 expectedId, quint8 firstByteMask, quint8 expectedFirstByte, int timeoutMs, CanFrame &matchedFrame);
+    bool waitForFlowControlWithWait(int timeoutMs, IsoTpFlowControl &fc);
     void updateStatus(int stateVal, const QString &msg, int progress = -1);
     bool sendSingleFrame(quint8 sid, const QByteArray &params = QByteArray());
     bool sendMultiFrame(const QByteArray &payload, int timeoutMs);
+    void clearPendingFramesLocked();
 
+    CANThread *m_canthread;
     QString firmwarePath;
     IsoTpConfig config;
     quint8 vendorCode;
@@ -60,8 +66,7 @@ private:
     quint8 protocolVersion;
     QMutex mutex;
     QWaitCondition waitCondition;
-    CanFrame responseFrame;
-    bool hasResponse;
+    QQueue<CanFrame> m_pendingFrames;
     std::atomic_bool abortRequested;
     bool queryOnlyMode;
     QString lastError;
@@ -98,6 +103,7 @@ public:
     void queryProgramLocation();
     void startUpgrade(const QString &firmwarePath, const OtaErrorConfig &injectCfg = OtaErrorConfig());
     void abortUpgrade();
+    void setCanThread(CANThread *canthread);
     void handleIncomingFrame(const CanFrame &frame);
 
 signals:
@@ -118,6 +124,7 @@ private:
     quint8 vendorCode;
     quint16 hwVersion;
     quint16 swVersion;
+    CANThread *m_canthread;
     OtaWorker *worker;
 };
 
