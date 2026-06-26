@@ -265,6 +265,7 @@ MainWindow::MainWindow(QWidget *parent) :
 
     // Instantiate background services first to avoid nullpointer dereferences during UI setup/loading config
     canthread = new CANThread();
+    otaService.setCanThread(canthread);
     qingjuCanManager = new QingjuCanManager(canthread, this);
     qingjuRfidService = new QingjuRfidService(qingjuCanManager, this);
     qingjuOtaService = new QingjuOtaService(qingjuCanManager, this);
@@ -542,9 +543,7 @@ MainWindow::MainWindow(QWidget *parent) :
             otaProgressBar->setValue(percentage);
         }
     });
-    connect(&otaService, &OtaService::transmitFrame, this, [this](quint32 id, const QByteArray &payload) {
-        sendRfidFrame(id, payload);
-    });
+    connect(&otaService, &OtaService::transmitFrame, this, &MainWindow::logSentRfidFrame);
 
     connect(&rfidDiagnosticTransfer, &RfidDiagnosticTransfer::frameReady, this, [this](quint32 id, const QByteArray &payload) {
         sendRfidFrame(static_cast<UINT>(id), payload);
@@ -3119,6 +3118,19 @@ void MainWindow::sendRfidFrame(UINT canId, const QByteArray &payload)
     addCanFrameToList(frame);
 }
 
+void MainWindow::logSentRfidFrame(UINT canId, const QByteArray &payload)
+{
+    const UINT channel = static_cast<UINT>(ui->sendPathCombo->currentIndex());
+    CanFrame frame;
+    frame.id = canId;
+    frame.channel = channel;
+    frame.data = payload;
+    frame.direction = CanFrameDirection::Tx;
+    frame.protocol = CanFrameProtocol::ClassicCan;
+    frame.hostDateTime = QDateTime::currentDateTime();
+    addCanFrameToList(frame);
+}
+
 void MainWindow::handleRfidFrame(const CanFrame &frame)
 {
     if (frame.id == RfidProtocol::ResponseFrameId) {
@@ -4002,25 +4014,6 @@ void MainWindow::saveAppConfig()
         }
     }
 
-    if (mainVerticalSplitter != nullptr && !canLogCompact) {
-        const QList<int> sizes = mainVerticalSplitter->sizes();
-        if (sizes.size() >= 2 && sizes.at(0) > 0 && sizes.at(1) > 0) {
-            config.mainTopHeight = sizes.at(0);
-            config.mainLogHeight = sizes.at(1);
-        }
-    }
-    config.canLogCompact = canLogCompact;
-    if (testCaseSplitter != nullptr) {
-        const QList<int> sizes = testCaseSplitter->sizes();
-        if (sizes.size() >= 2 && sizes.at(0) > 0 && sizes.at(1) > 0) {
-            config.testCaseListWidth = sizes.at(0);
-            config.testCaseDetailWidth = sizes.at(1);
-        }
-    }
-    config.layoutPreset = 1;
-    if (autoCompactLogOnTestExecutionCheck != nullptr) {
-        config.autoCompactLogOnTestExecution = autoCompactLogOnTestExecutionCheck->isChecked();
-    }
 
     if (productionHwVerEdit != nullptr) {
         config.productionHwVer = productionHwVerEdit->text().trimmed();

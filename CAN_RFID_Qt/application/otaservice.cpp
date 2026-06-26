@@ -1,11 +1,12 @@
-#include "otaservice.h"
-#include "domain/crc16.h"
-#include <QDebug>
-
-#ifdef Q_OS_WIN
+#ifdef _WIN32
 #include <windows.h>
 #include <mmsystem.h>
 #endif
+
+#include "otaservice.h"
+#include "canthread.h"
+#include "domain/crc16.h"
+#include <QDebug>
 
 namespace {
 constexpr int OtaMaxRetryCount = 3;
@@ -42,6 +43,7 @@ private:
 
 OtaWorker::OtaWorker(QObject *parent) :
     QThread(parent),
+    m_canthread(nullptr),
     vendorCode(0x02), // UHF
     hwVersion(0),
     swVersion(0),
@@ -57,7 +59,7 @@ OtaWorker::~OtaWorker()
     wait();
 }
 
-void OtaWorker::setup(const QString &filePath, const IsoTpConfig &cfg, quint8 vendor, quint16 hw, quint16 sw, quint8 proto, const OtaErrorConfig &injectCfg, bool queryOnly)
+void OtaWorker::setup(const QString &filePath, const IsoTpConfig &cfg, quint8 vendor, quint16 hw, quint16 sw, quint8 proto, CANThread *canthread, const OtaErrorConfig &injectCfg, bool queryOnly)
 {
     firmwarePath = filePath;
     config = cfg;
@@ -70,6 +72,7 @@ void OtaWorker::setup(const QString &filePath, const IsoTpConfig &cfg, quint8 ve
     queryOnlyMode = queryOnly;
     lastError.clear();
     injectConfig = injectCfg;
+    m_canthread = canthread;
 
     QMutexLocker locker(&mutex);
     m_pendingFrames.clear();
@@ -256,6 +259,13 @@ bool OtaWorker::sendSingleFrame(quint8 sid, const QByteArray &params)
         clearPendingFramesLocked(); // Clear queue before sending request!
     }
 
+    if (m_canthread != nullptr && m_canthread->isRunning()) {
+        m_canthread->sendClassicData(frames[0].id, config.channel, frames[0].data);
+    } else {
+        lastError = "CAN device is not ready or thread dead";
+        return false;
+    }
+
     emit transmitFrame(frames[0].id, frames[0].data);
     return true;
 }
@@ -274,6 +284,13 @@ bool OtaWorker::sendMultiFrame(const QByteArray &payload, int timeoutMs)
     {
         QMutexLocker locker(&mutex);
         clearPendingFramesLocked(); // Clear queue before sending FF!
+    }
+    
+    if (m_canthread != nullptr && m_canthread->isRunning()) {
+        m_canthread->sendClassicData(ffFrame.id, config.channel, ffFrame.data);
+    } else {
+        lastError = "CAN device is not ready or thread dead";
+        return false;
     }
     emit transmitFrame(ffFrame.id, ffFrame.data);
 
@@ -342,6 +359,12 @@ bool OtaWorker::sendMultiFrame(const QByteArray &payload, int timeoutMs)
         seq = (seq + 1) & 0x0F;
 
         // 发送连续帧
+        if (m_canthread != nullptr && m_canthread->isRunning()) {
+            m_canthread->sendClassicData(cfFrame.id, config.channel, cfFrame.data);
+        } else {
+            lastError = "CAN device is not ready or thread dead during CF";
+            return false;
+        }
         emit transmitFrame(cfFrame.id, cfFrame.data);
 
         bsCount++;
@@ -630,11 +653,28 @@ OtaService::OtaService(QObject *parent) :
     currentProgress(0),
     vendorCode(0x02), // 默认超高频威科姆 (0x02)
     hwVersion(0),
-    swVersion(0)
+    swVersion(0),
+    m_canthread(nullptr)
 {
     worker = new OtaWorker(this);
     connect(worker, &OtaWorker::transmitFrame, this, &OtaService::transmitFrame);
     connect(worker, &OtaWorker::statusUpdated, this, &OtaService::onWorkerStatusUpdated);
+}
+
+void OtaService::setCanThread(CANThread *canthread)
+{
+    m_canthread = canthread;
+    if (m_canthread != nullptr) {
+        connect(m_canthread, &CANThread::recvedFrames, this, [this](const QVector<CanFrame> &frames) {
+            if (worker != nullptr && worker->isRunning()) {
+                for (const CanFrame &frame : frames) {
+                    if (frame.id == config.responseId && frame.channel == config.channel) {
+                        worker->handleIncomingFrame(frame);
+                    }
+                }
+            }
+        }, Qt::DirectConnection); // 使用 DirectConnection 建立跨线程实时直连！
+    }
 }
 
 OtaService::~OtaService()
@@ -703,7 +743,7 @@ void OtaService::queryProgramLocation()
     }
     setState(State::QueryProgram, QStringLiteral("准备查询程序位置..."));
     currentProgress = 0;
-    worker->setup(QString(), config, vendorCode, hwVersion, swVersion, 0x02, OtaErrorConfig(), true);
+    worker->setup(QString(), config, vendorCode, hwVersion, swVersion, 0x02, m_canthread, OtaErrorConfig(), true);
     worker->start();
 }
 
@@ -718,7 +758,7 @@ void OtaService::startUpgrade(const QString &firmwarePath, const OtaErrorConfig 
     }
     setState(State::StartUpgrade, QStringLiteral("准备启动升级流程..."));
     currentProgress = 0;
-    worker->setup(firmwarePath, config, vendorCode, hwVersion, swVersion, 0x02, injectCfg);
+    worker->setup(firmwarePath, config, vendorCode, hwVersion, swVersion, 0x02, m_canthread, injectCfg);
     worker->start();
 }
 
@@ -734,6 +774,10 @@ void OtaService::abortUpgrade()
 
 void OtaService::handleIncomingFrame(const CanFrame &frame)
 {
+    if (m_canthread != nullptr) {
+        // Handled by direct connection in CANThread context, skip to avoid duplicates.
+        return;
+    }
     if (worker->isRunning()) {
         worker->handleIncomingFrame(frame);
     }

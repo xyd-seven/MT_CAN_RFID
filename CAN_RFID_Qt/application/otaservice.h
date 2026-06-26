@@ -13,6 +13,8 @@
 #include "domain/canframe.h"
 #include "domain/isotptransport.h"
 
+class CANThread;
+
 struct OtaErrorConfig
 {
     bool enabled = false;
@@ -32,7 +34,7 @@ public:
     explicit OtaWorker(QObject *parent = nullptr);
     ~OtaWorker();
 
-    void setup(const QString &filePath, const IsoTpConfig &cfg, quint8 vendor, quint16 hw, quint16 sw, quint8 proto, const OtaErrorConfig &injectCfg = OtaErrorConfig(), bool queryOnly = false);
+    void setup(const QString &filePath, const IsoTpConfig &cfg, quint8 vendor, quint16 hw, quint16 sw, quint8 proto, CANThread *canthread, const OtaErrorConfig &injectCfg = OtaErrorConfig(), bool queryOnly = false);
     void requestAbort();
     void handleIncomingFrame(const CanFrame &frame);
 
@@ -53,6 +55,7 @@ private:
     bool sendMultiFrame(const QByteArray &payload, int timeoutMs);
     void clearPendingFramesLocked();
 
+    CANThread *m_canthread;
     QString firmwarePath;
     IsoTpConfig config;
     quint8 vendorCode;
@@ -98,6 +101,7 @@ public:
     void queryProgramLocation();
     void startUpgrade(const QString &firmwarePath, const OtaErrorConfig &injectCfg = OtaErrorConfig());
     void abortUpgrade();
+    void setCanThread(CANThread *canthread);
     void handleIncomingFrame(const CanFrame &frame);
 
 signals:
@@ -118,6 +122,7 @@ private:
     quint8 vendorCode;
     quint16 hwVersion;
     quint16 swVersion;
+    CANThread *m_canthread;
     OtaWorker *worker;
 };
 

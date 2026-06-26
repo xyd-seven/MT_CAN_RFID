@@ -117,6 +117,7 @@ private:
     void sendProductionScanControl(bool enabled);
     void abortRfidDiagnosticTransferSilently();
     void sendRfidFrame(UINT canId, const QByteArray &payload);
+    void logSentRfidFrame(UINT canId, const QByteArray &payload);
     void addCanFrameToList(const CanFrame &frame);
     void flushPendingLogRows();
     QString protocolDecodeText(const CanFrame &frame) const;
