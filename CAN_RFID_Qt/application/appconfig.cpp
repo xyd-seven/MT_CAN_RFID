@@ -55,6 +55,8 @@ AppConfigData AppConfig::load() const
     config.autoCompactLogOnTestExecution = settings.value("layout/autoCompactLogOnTestExecution", config.autoCompactLogOnTestExecution).toBool();
     config.productionHwVer = settings.value("production/hwVer", config.productionHwVer).toString();
     config.productionHwVerLocked = settings.value("production/hwVerLocked", config.productionHwVerLocked).toBool();
+    config.qingjuProductionHwVer = settings.value("production/qingjuHwVer", config.qingjuProductionHwVer).toString();
+    config.qingjuProductionHwVerLocked = settings.value("production/qingjuHwVerLocked", config.qingjuProductionHwVerLocked).toBool();
     config.productionMatChange = settings.value("production/matChange", config.productionMatChange).toString();
 
     if (config.logDirectory.isEmpty()) {
@@ -106,6 +108,8 @@ void AppConfig::save(const AppConfigData &config) const
     settings.setValue("layout/autoCompactLogOnTestExecution", config.autoCompactLogOnTestExecution);
     settings.setValue("production/hwVer", config.productionHwVer);
     settings.setValue("production/hwVerLocked", config.productionHwVerLocked);
+    settings.setValue("production/qingjuHwVer", config.qingjuProductionHwVer);
+    settings.setValue("production/qingjuHwVerLocked", config.qingjuProductionHwVerLocked);
     settings.setValue("production/matChange", config.productionMatChange);
     settings.sync();
 }

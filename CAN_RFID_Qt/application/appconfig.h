@@ -45,6 +45,8 @@ struct AppConfigData
     bool autoCompactLogOnTestExecution = true;
     QString productionHwVer = "";
     bool productionHwVerLocked = false;
+    QString qingjuProductionHwVer = "";
+    bool qingjuProductionHwVerLocked = false;
     QString productionMatChange = "";
 };
 

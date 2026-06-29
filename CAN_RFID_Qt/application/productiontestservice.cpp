@@ -301,15 +301,16 @@ bool ProductionTestService::validateSn(const QString &sn, int protocolMode, QStr
         return false;
     }
     if (protocolMode == 1) { // 青桔协议
-        if (normalizedSn.size() != 25) {
-            if (error != nullptr) *error = QStringLiteral("SN必须为25位");
+        const bool format1 = (normalizedSn.size() == 25 && normalizedSn.startsWith(QStringLiteral("AC020100300202")));
+        const bool format2 = (normalizedSn.size() == 19 && normalizedSn.startsWith(QStringLiteral("303040210")));
+        if (!format1 && !format2) {
+            if (error != nullptr) {
+                *error = QStringLiteral("青桔SN不符合规范：\n1. 25位且前14位为AC020100300202\n2. 19位且前9位为303040210");
+            }
             return false;
         }
-        if (!normalizedSn.startsWith(QStringLiteral("AC020100300202"))) {
-            if (error != nullptr) *error = QStringLiteral("SN前14位必须为AC020100300202");
-            return false;
-        }
-        static const QRegularExpression pattern(QStringLiteral("^[A-Z0-9]{25}$"));
+        const int expectedSize = format1 ? 25 : 19;
+        const QRegularExpression pattern(QString("^[A-Z0-9]{%1}$").arg(expectedSize));
         if (!pattern.match(normalizedSn).hasMatch()) {
             if (error != nullptr) *error = QStringLiteral("SN仅支持大写字母和数字");
             return false;

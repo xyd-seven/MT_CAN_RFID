@@ -1084,6 +1084,7 @@ void MainWindow::setupCompactMainLayout()
     QWidget *leftPanel = new QWidget(ui->centralWidget);
     leftPanel->setLayout(leftLayout);
     leftPanel->setMinimumWidth(230);
+    leftPanel->setMinimumHeight(640);
 
     QScrollArea *leftScrollArea = new QScrollArea(ui->centralWidget);
     leftScrollArea->setWidgetResizable(true);
@@ -2471,9 +2472,15 @@ QWidget *MainWindow::createProductionTestTab(QWidget *parent)
             productionStartBtn->setEnabled(false);
 
             AppConfigData config = appConfig.load();
-            config.productionHwVer = productionHwVerEdit->text().trimmed();
+            const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
+            if (protocolMode == 1) {
+                config.qingjuProductionHwVer = productionHwVerEdit->text().trimmed();
+                config.qingjuProductionHwVerLocked = false;
+            } else {
+                config.productionHwVer = productionHwVerEdit->text().trimmed();
+                config.productionHwVerLocked = false;
+            }
             config.productionMatChange = productionMatChangeEdit->text().trimmed();
-            config.productionHwVerLocked = false;
             appConfig.save(config);
         } else {
             QString error;
@@ -2500,9 +2507,14 @@ QWidget *MainWindow::createProductionTestTab(QWidget *parent)
             productionStartBtn->setEnabled(true);
 
             AppConfigData config = appConfig.load();
-            config.productionHwVer = hwVer;
+            if (protocolMode == 1) {
+                config.qingjuProductionHwVer = hwVer;
+                config.qingjuProductionHwVerLocked = true;
+            } else {
+                config.productionHwVer = hwVer;
+                config.productionHwVerLocked = true;
+            }
             config.productionMatChange = matChange;
-            config.productionHwVerLocked = true;
             appConfig.save(config);
 
             prepareProductionSnInput();
@@ -6083,7 +6095,14 @@ void MainWindow::processProductionScanText(const QString &text, bool showError)
     }
     QString error;
     const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
-    const int targetSize = (protocolMode == 1) ? 25 : 16;
+    int targetSize = 16;
+    if (protocolMode == 1) {
+        if (sn.startsWith(QStringLiteral("303040210"))) {
+            targetSize = 19;
+        } else {
+            targetSize = 25;
+        }
+    }
     if (!ProductionTestService::validateSn(sn, protocolMode, &error)) {
         if (showError || sn.size() >= targetSize) {
             appendProductionTestLog(QStringLiteral("扫码SN无效：%1，内容=%2").arg(error, sn));
@@ -6646,10 +6665,19 @@ void MainWindow::loadAppConfig()
     syncHlConfigToService();
     restoreLayoutConfig(config);
 
-    productionHwVerLocked = config.productionHwVerLocked;
-    if (productionHwVerEdit != nullptr) {
-        productionHwVerEdit->setText(config.productionHwVer);
-        productionHwVerEdit->setReadOnly(productionHwVerLocked);
+    const int protocolMode = config.protocolMode;
+    if (protocolMode == 1) {
+        productionHwVerLocked = config.qingjuProductionHwVerLocked;
+        if (productionHwVerEdit != nullptr) {
+            productionHwVerEdit->setText(config.qingjuProductionHwVer);
+            productionHwVerEdit->setReadOnly(productionHwVerLocked);
+        }
+    } else {
+        productionHwVerLocked = config.productionHwVerLocked;
+        if (productionHwVerEdit != nullptr) {
+            productionHwVerEdit->setText(config.productionHwVer);
+            productionHwVerEdit->setReadOnly(productionHwVerLocked);
+        }
     }
     if (productionMatChangeEdit != nullptr) {
         productionMatChangeEdit->setText(config.productionMatChange);
@@ -6788,13 +6816,21 @@ void MainWindow::saveAppConfig()
         config.autoCompactLogOnTestExecution = autoCompactLogOnTestExecutionCheck->isChecked();
     }
 
-    if (productionHwVerEdit != nullptr) {
-        config.productionHwVer = productionHwVerEdit->text().trimmed();
+    const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
+    if (protocolMode == 1) {
+        if (productionHwVerEdit != nullptr) {
+            config.qingjuProductionHwVer = productionHwVerEdit->text().trimmed();
+        }
+        config.qingjuProductionHwVerLocked = productionHwVerLocked;
+    } else {
+        if (productionHwVerEdit != nullptr) {
+            config.productionHwVer = productionHwVerEdit->text().trimmed();
+        }
+        config.productionHwVerLocked = productionHwVerLocked;
     }
     if (productionMatChangeEdit != nullptr) {
         config.productionMatChange = productionMatChangeEdit->text().trimmed();
     }
-    config.productionHwVerLocked = productionHwVerLocked;
     config.logDirectory = logDirectory;
     appConfig.save(config);
     logService.logRuntime(LogLevel::Info, QStringLiteral("Application settings saved"));
@@ -7515,6 +7551,17 @@ void MainWindow::onProtocolModeChanged(int index)
     }
 
     AppConfigData config = appConfig.load();
+    if (previousProtocolMode == 1) {
+        if (productionHwVerEdit != nullptr) {
+            config.qingjuProductionHwVer = productionHwVerEdit->text().trimmed();
+        }
+        config.qingjuProductionHwVerLocked = productionHwVerLocked;
+    } else {
+        if (productionHwVerEdit != nullptr) {
+            config.productionHwVer = productionHwVerEdit->text().trimmed();
+        }
+        config.productionHwVerLocked = productionHwVerLocked;
+    }
     config.protocolMode = index;
     appConfig.save(config);
 
@@ -7553,6 +7600,16 @@ void MainWindow::onProtocolModeChanged(int index)
         if (productionMatChangeEdit != nullptr) productionMatChangeEdit->show();
         qingjuRfidService->stopScan();
         updateMeituanTopStatus();
+
+        AppConfigData savedConfig = appConfig.load();
+        productionHwVerLocked = savedConfig.productionHwVerLocked;
+        if (productionHwVerEdit != nullptr) {
+            productionHwVerEdit->setText(savedConfig.productionHwVer);
+            productionHwVerEdit->setReadOnly(productionHwVerLocked);
+        }
+        if (productionHwVerLockBtn != nullptr) {
+            productionHwVerLockBtn->setText(productionHwVerLocked ? QStringLiteral("修改") : QStringLiteral("确定"));
+        }
         if (stressStatsStackedWidget != nullptr && mtStressPanel != nullptr) {
             stressStatsStackedWidget->setCurrentWidget(mtStressPanel);
         }
@@ -7578,6 +7635,16 @@ void MainWindow::onProtocolModeChanged(int index)
     } else if (index == 1) { // 青桔协议
         if (productionMatChangeLabel != nullptr) productionMatChangeLabel->hide();
         if (productionMatChangeEdit != nullptr) productionMatChangeEdit->hide();
+
+        AppConfigData savedConfig = appConfig.load();
+        productionHwVerLocked = savedConfig.qingjuProductionHwVerLocked;
+        if (productionHwVerEdit != nullptr) {
+            productionHwVerEdit->setText(savedConfig.qingjuProductionHwVer);
+            productionHwVerEdit->setReadOnly(productionHwVerLocked);
+        }
+        if (productionHwVerLockBtn != nullptr) {
+            productionHwVerLockBtn->setText(productionHwVerLocked ? QStringLiteral("修改") : QStringLiteral("确定"));
+        }
         if (rfidStackedWidget != nullptr && qjRfidPanel != nullptr) {
             rfidStackedWidget->setCurrentWidget(qjRfidPanel);
         }
@@ -8019,7 +8086,11 @@ void MainWindow::handleQjCustomLog(const QString &text)
 
 QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
 {
-    QWidget *panel = new QWidget(parent);
+    QScrollArea *scrollArea = new QScrollArea(parent);
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+
+    QWidget *panel = new QWidget(scrollArea);
     QGridLayout *mainLayout = new QGridLayout(panel);
     mainLayout->setContentsMargins(8, 8, 8, 8);
     mainLayout->setHorizontalSpacing(10);
@@ -8360,7 +8431,8 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     mainLayout->setColumnStretch(0, 1);
     mainLayout->setColumnStretch(1, 1);
 
-    return panel;
+    scrollArea->setWidget(panel);
+    return scrollArea;
 }
 
 // ==========================================
