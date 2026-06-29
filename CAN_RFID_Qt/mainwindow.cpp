@@ -396,6 +396,8 @@ MainWindow::MainWindow(QWidget *parent) :
     canthread = new CANThread();
     otaService.setCanThread(canthread);
     qingjuCanManager = new QingjuCanManager(canthread, this);
+    qingjuCanManager->setSendChannel(ui->sendPathCombo->currentIndex());
+    connect(ui->sendPathCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), qingjuCanManager, &QingjuCanManager::setSendChannel);
     qingjuRfidService = new QingjuRfidService(qingjuCanManager, this);
     qingjuOtaService = new QingjuOtaService(qingjuCanManager, this);
     qRegisterMetaType<Rs485State>("Rs485State");
@@ -635,9 +637,9 @@ MainWindow::MainWindow(QWidget *parent) :
             return;
         }
         if (srcAddr == 0x0A && destAddr == 0x01 && funcCode == 0x10) {
-            if (payload.size() >= 4) {
+            if (payload.size() >= 3) {
                 quint16 startReg = (static_cast<quint8>(payload.at(0)) << 8) | static_cast<quint8>(payload.at(1));
-                quint16 regCount = (static_cast<quint8>(payload.at(2)) << 8) | static_cast<quint8>(payload.at(3));
+                quint16 regCount = static_cast<quint8>(payload.at(2));
                 if (startReg == m_qingjuWritePendingRegister && regCount == m_qingjuWritePendingRegCount) {
                     productionWriteTimer->stop();
                     productionWritePending = false;

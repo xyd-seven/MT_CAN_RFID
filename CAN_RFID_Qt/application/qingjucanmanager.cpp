@@ -10,7 +10,13 @@ QingjuCanManager::QingjuCanManager(CANThread *canThread, QObject *parent)
     : QObject(parent)
     , m_canThread(canThread)
     , m_nextQueue(0)
+    , m_channel(0)
 {
+}
+
+void QingjuCanManager::setSendChannel(int channel)
+{
+    m_channel = channel;
 }
 
 void QingjuCanManager::handleIncomingFrame(const CanFrame &frame)
@@ -82,24 +88,31 @@ void QingjuCanManager::handleIncomingFrame(const CanFrame &frame)
     m_buffers.remove(key);
 
     // Modbus 报文格式校验：[Src] [Dest] [Func] [Payload] [CRC_L] [CRC_H]
-    // 最小长度：1+1+1+0+2 = 5 字节
-    if (packet.size() < 5) {
+    // 最小长度：1 (src) + 1 (dest) + 1 (func) + 2 (crc) = 5 字节
+    // 由于底层物理层没有传输前导的 2 字节地址，这里收到的 packet 最小大小应为 3 字节（func + crc）
+    if (packet.size() < 3) {
         return;
     }
 
-    quint16 receivedCrc = static_cast<quint8>(packet.at(packet.size() - 2)) |
-                          (static_cast<quint16>(static_cast<quint8>(packet.at(packet.size() - 1))) << 8);
+    // 将 CAN ID 中的源地址与目的地址做为前导字节补回数据包，以便参与 CRC-16 校验
+    QByteArray fullPacket;
+    fullPacket.append(id.srcAddr);
+    fullPacket.append(id.destAddr);
+    fullPacket.append(packet);
 
-    quint16 calculatedCrc = calculateModbusCrc16(reinterpret_cast<const quint8*>(packet.constData()), packet.size() - 2);
+    quint16 receivedCrc = static_cast<quint8>(fullPacket.at(fullPacket.size() - 2)) |
+                          (static_cast<quint16>(static_cast<quint8>(fullPacket.at(fullPacket.size() - 1))) << 8);
+
+    quint16 calculatedCrc = calculateModbusCrc16(reinterpret_cast<const quint8*>(fullPacket.constData()), fullPacket.size() - 2);
 
     if (receivedCrc != calculatedCrc) {
         return;
     }
 
-    quint8 src = packet.at(0);
-    quint8 dest = packet.at(1);
-    quint8 func = packet.at(2);
-    QByteArray payload = packet.mid(3, packet.size() - 5);
+    quint8 src = fullPacket.at(0);
+    quint8 dest = fullPacket.at(1);
+    quint8 func = fullPacket.at(2);
+    QByteArray payload = fullPacket.mid(3, fullPacket.size() - 5);
 
     emit modbusPacketReceived(src, dest, func, payload);
 }
@@ -123,7 +136,10 @@ bool QingjuCanManager::sendModbusRequest(quint8 destAddr, quint8 funcCode, const
     packet.append(crc & 0xFF);
     packet.append((crc >> 8) & 0xFF);
 
-    int totalBytes = packet.size();
+    // 剥离数据包前导的 2 字节（srcAddr 与 destAddr），因为它们仅参与 CRC 计算，不通过 CAN 数据区传输
+    QByteArray transmitPacket = packet.mid(2);
+
+    int totalBytes = transmitPacket.size();
     int numFrames = (totalBytes + 7) / 8;
 
     quint8 queue = m_nextQueue;
@@ -133,7 +149,7 @@ bool QingjuCanManager::sendModbusRequest(quint8 destAddr, quint8 funcCode, const
     for (int i = 0; i < numFrames; ++i) {
         int offset = i * 8;
         int len = qMin(8, totalBytes - offset);
-        QByteArray frameData = packet.mid(offset, len);
+        QByteArray frameData = transmitPacket.mid(offset, len);
 
         QingjuCanId id;
         id.priority = priority;
@@ -146,7 +162,7 @@ bool QingjuCanManager::sendModbusRequest(quint8 destAddr, quint8 funcCode, const
         id.index = numFrames - 1 - i; // 从 N-1 递减至 0
 
         quint32 rawId = id.toRawId();
-        if (!m_canThread->sendData(rawId, 1, 0, 0, 0, frameData.constData(), frameData.size())) {
+        if (!m_canThread->sendData(rawId, 1, 0, 0, m_channel, frameData.constData(), frameData.size())) {
             success = false;
         }
 

@@ -29,6 +29,9 @@ public:
     // 辅助接口：读取多个寄存器 (功能码 0x03)
     bool readRegisters(quint8 destAddr, quint16 startReg, quint8 regCount, quint8 priority = 5);
 
+public slots:
+    void setSendChannel(int channel);
+
 signals:
     // 当收到并重组出完整的 Modbus 包且 CRC 校验通过时触发
     void modbusPacketReceived(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload);
@@ -44,6 +47,7 @@ private:
     quint8 m_nextQueue;
     QMap<quint32, AssemblyBuffer> m_buffers; // key: (srcAddr << 16) | (destAddr << 8) | queue
     QMutex m_sendMutex;
+    int m_channel;
 };
 
 #endif // QINGJUCANMANAGER_H
