@@ -126,6 +126,7 @@ private:
     quint16 swVersion;
     CANThread *m_canthread;
     OtaWorker *worker;
+    QMetaObject::Connection m_recvedFramesConn;
 };
 
 #endif // OTASERVICE_H

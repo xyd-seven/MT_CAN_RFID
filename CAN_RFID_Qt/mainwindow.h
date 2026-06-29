@@ -190,6 +190,7 @@ private:
     void updateRs485TopStatus();
     void updateManualSendPanelMode();
     bool isOtaRunning() const;
+    void setTestExecutionUiEnabled(bool enabled);
     void oneClickStartCan();
     void startStressTest();
     void stopStressTest(bool autoStopped);
@@ -203,6 +204,15 @@ private:
     void openCanLogWindow();
     void syncCanLogWindowRows(const QVector<QStringList> &rows);
 
+private:
+    struct TestRunGuard {
+        MainWindow *mw;
+        bool isNested;
+        TestRunGuard(MainWindow *m);
+        ~TestRunGuard();
+    };
+
+private:
     Ui::MainWindow *ui;
     CANThread *canthread;
     QLabel *rfidWorkModeValue;
@@ -270,6 +280,7 @@ private:
     OtaService otaService;
     RfidDiagnosticTransfer rfidDiagnosticTransfer;
     bool productionWritePending;
+    bool m_testExecutionRunning;
     QLabel *otaStateValue;
     QLabel *otaMessageValue;
     QLabel *otaFirmwarePathValue;
@@ -347,6 +358,8 @@ private:
     QPushButton *testRetestFailedBtn;
     QPushButton *testBindStressBtn;
     QPushButton *testSaveResultBtn;
+    QPushButton *testImportBtn;
+    QToolButton *testExportMenuBtn;
     QAction *testExportResultAction;
     QAction *testExportExcelAction;
     QAction *testExportMarkdownAction;

@@ -691,9 +691,12 @@ OtaService::OtaService(QObject *parent) :
 
 void OtaService::setCanThread(CANThread *canthread)
 {
+    if (m_recvedFramesConn) {
+        QObject::disconnect(m_recvedFramesConn);
+    }
     m_canthread = canthread;
     if (m_canthread != nullptr) {
-        connect(m_canthread, &CANThread::recvedFrames, this, [this](const QVector<CanFrame> &frames) {
+        m_recvedFramesConn = connect(m_canthread, &CANThread::recvedFrames, this, [this](const QVector<CanFrame> &frames) {
             if (worker != nullptr && worker->isRunning()) {
                 for (const CanFrame &frame : frames) {
                     if (frame.id == config.responseId && frame.channel == config.channel) {
@@ -701,12 +704,15 @@ void OtaService::setCanThread(CANThread *canthread)
                     }
                 }
             }
-        }, Qt::DirectConnection); // 使用 DirectConnection 建立跨线程实时直连！
+        }, Qt::DirectConnection); // 使用 DirectConnection 并绑定 this 生命期守护
     }
 }
 
 OtaService::~OtaService()
 {
+    if (m_recvedFramesConn) {
+        QObject::disconnect(m_recvedFramesConn);
+    }
     if (worker->isRunning()) {
         worker->requestAbort();
         worker->wait();

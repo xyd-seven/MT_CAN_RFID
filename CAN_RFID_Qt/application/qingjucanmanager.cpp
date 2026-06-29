@@ -175,6 +175,9 @@ bool QingjuCanManager::sendModbusRequest(quint8 destAddr, quint8 funcCode, const
 
 bool QingjuCanManager::writeRegisters(quint8 destAddr, quint16 startReg, const QVector<quint16> &values, bool forceNoAck, quint8 priority)
 {
+    if (values.isEmpty() || values.size() > 125) {
+        return false;
+    }
     quint8 func = forceNoAck ? 0x90 : 0x10;
     QByteArray payload;
     payload.append(static_cast<char>((startReg >> 8) & 0xFF));
@@ -189,6 +192,9 @@ bool QingjuCanManager::writeRegisters(quint8 destAddr, quint16 startReg, const Q
 
 bool QingjuCanManager::readRegisters(quint8 destAddr, quint16 startReg, quint8 regCount, quint8 priority)
 {
+    if (regCount == 0 || regCount > 125) {
+        return false;
+    }
     QByteArray payload;
     payload.append(static_cast<char>((startReg >> 8) & 0xFF));
     payload.append(static_cast<char>(startReg & 0xFF));

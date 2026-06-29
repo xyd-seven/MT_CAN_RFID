@@ -68,8 +68,14 @@ void CanLogWindow::appendRows(const QVector<QStringList> &rows)
     const bool wasAtBottom = (vBar == nullptr || vBar->value() == vBar->maximum());
 
     const int overflow = logTable->rowCount() + rows.size() - maxRows;
-    for (int i = 0; i < overflow; ++i) {
-        logTable->removeRow(0);
+    
+    logTable->setUpdatesEnabled(false);
+    if (overflow > 0) {
+        // 批量删除：每次删除量至少为 50 行，降低频繁删除带来的平移重绘成本
+        const int rowsToRemove = qMin(logTable->rowCount(), qMax(overflow, 50));
+        for (int i = 0; i < rowsToRemove; ++i) {
+            logTable->removeRow(0);
+        }
     }
 
     const int firstRow = logTable->rowCount();
@@ -85,6 +91,7 @@ void CanLogWindow::appendRows(const QVector<QStringList> &rows)
             logTable->setItem(row, column, item);
         }
     }
+    logTable->setUpdatesEnabled(true);
 
     if (wasAtBottom) {
         logTable->scrollToBottom();

@@ -66,8 +66,8 @@ void Rs485RfidService::startScan(int hostPollIntervalMs, int readMode)
     if (m_isScanning) return;
 
     m_isScanning = true;
-    m_readMode = readMode;
-    m_pollTimer->setInterval(hostPollIntervalMs);
+    m_readMode = qBound(1, readMode, 2);
+    m_pollTimer->setInterval(qBound(100, hostPollIntervalMs, 10000));
 
     // For FF protocol, send start detection (0x06) command
     if (m_protocolMode == 3) {

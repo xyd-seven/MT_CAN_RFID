@@ -170,6 +170,7 @@ MainWindow::MainWindow(QWidget *parent) :
     otaService(this),
     rfidDiagnosticTransfer(this),
     productionWritePending(false),
+    m_testExecutionRunning(false),
     testerPresentTimer(new QTimer(this)),
     rfidControlTimer(new QTimer(this)),
     rfidOnlineCheckTimer(new QTimer(this)),
@@ -1341,6 +1342,48 @@ bool MainWindow::isOtaRunning() const
                state == OtaService::State::StartUpgrade ||
                state == OtaService::State::SendData ||
                state == OtaService::State::FinishUpgrade;
+    }
+}
+
+void MainWindow::setTestExecutionUiEnabled(bool enabled)
+{
+    // 禁用/启用主要的连接与协议操作控件
+    ui->openDeviceBtn->setEnabled(enabled);
+    ui->closeDeviceBtn->setEnabled(enabled);
+    if (protocolModeCombo) {
+        protocolModeCombo->setEnabled(enabled);
+    }
+
+    // 禁用/启用测试执行面板按键
+    testRunFilteredBtn->setEnabled(enabled);
+    testRetestFailedBtn->setEnabled(enabled);
+    testStartCaseBtn->setEnabled(enabled);
+    testRunAutoBtn->setEnabled(enabled);
+    testJudgeCaseBtn->setEnabled(enabled);
+    testSafeRunJudgeBtn->setEnabled(enabled);
+    testBindStressBtn->setEnabled(enabled);
+    testSaveResultBtn->setEnabled(enabled);
+    if (testImportBtn) {
+        testImportBtn->setEnabled(enabled);
+    }
+    if (testExportMenuBtn) {
+        testExportMenuBtn->setEnabled(enabled);
+    }
+
+    // 禁用/启用压测按键（防止测试执行过程中去跑压测）
+    if (stressStartBtn) {
+        stressStartBtn->setEnabled(enabled);
+    }
+    if (stressStopBtn) {
+        stressStopBtn->setEnabled(enabled);
+    }
+    if (stressResetBtn) {
+        stressResetBtn->setEnabled(enabled);
+    }
+
+    if (enabled) {
+        // 恢复时，通过原有的动态状态机方法去计算各个控件的正确启用状态
+        updateControlsState();
     }
 }
 
@@ -2693,13 +2736,13 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     testResultFilterCombo = new QComboBox(filterGroup);
     testSearchEdit = new QLineEdit(filterGroup);
     testSearchEdit->setPlaceholderText(QStringLiteral("搜索用例ID/关键字"));
-    QPushButton *importBtn = new QPushButton(QStringLiteral("导入用例"), filterGroup);
+    testImportBtn = new QPushButton(QStringLiteral("导入用例"), filterGroup);
     QMenu *testExportMenu = new QMenu(QStringLiteral("导出"), filterGroup);
     testExportResultAction = testExportMenu->addAction(QStringLiteral("导出结果 CSV"));
     testExportExcelAction = testExportMenu->addAction(QStringLiteral("导出 Excel 副本"));
     testExportMarkdownAction = testExportMenu->addAction(QStringLiteral("导出 Markdown 报告"));
     testExportPdfAction = testExportMenu->addAction(QStringLiteral("导出 PDF 报告"));
-    QToolButton *testExportMenuBtn = new QToolButton(filterGroup);
+    testExportMenuBtn = new QToolButton(filterGroup);
     testExportMenuBtn->setText(QStringLiteral("导出"));
     testExportMenuBtn->setPopupMode(QToolButton::InstantPopup);
     testExportMenuBtn->setMenu(testExportMenu);
@@ -2741,7 +2784,7 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     autoCompactLogOnTestExecutionCheck = new QCheckBox(QStringLiteral("测试执行时自动收起CAN日志"), filterGroup);
     filterPresetLayout->addWidget(testRunFilteredBtn);
     filterPresetLayout->addWidget(testRetestFailedBtn);
-    filterPresetLayout->addWidget(importBtn);
+    filterPresetLayout->addWidget(testImportBtn);
     filterPresetLayout->addWidget(testExportMenuBtn);
     filterPresetLayout->addWidget(autoCompactLogOnTestExecutionCheck);
     connect(autoCompactLogOnTestExecutionCheck, &QCheckBox::toggled, this, [this]() {
@@ -2934,7 +2977,7 @@ QWidget *MainWindow::createTestExecutionTab(QWidget *parent)
     connect(testNewSessionBtn, &QPushButton::clicked, this, &MainWindow::createTestSession);
     connect(testOpenSessionBtn, &QPushButton::clicked, this, &MainWindow::openExistingTestSession);
     connect(testOpenSessionDirBtn, &QPushButton::clicked, this, &MainWindow::openTestSessionDirectory);
-    connect(importBtn, &QPushButton::clicked, this, &MainWindow::importTestCases);
+    connect(testImportBtn, &QPushButton::clicked, this, &MainWindow::importTestCases);
     connect(testExportResultAction, &QAction::triggered, this, &MainWindow::exportTestCaseResults);
     connect(testExportExcelAction, &QAction::triggered, this, &MainWindow::exportTestCaseResultsExcel);
     connect(testExportMarkdownAction, &QAction::triggered, this, &MainWindow::exportTestReportMarkdown);
@@ -4213,8 +4256,32 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
     return false;
 }
 
+MainWindow::TestRunGuard::TestRunGuard(MainWindow *m)
+    : mw(m)
+{
+    isNested = mw->m_testExecutionRunning;
+    if (!isNested) {
+        mw->m_testExecutionRunning = true;
+        mw->setTestExecutionUiEnabled(false);
+    }
+}
+
+MainWindow::TestRunGuard::~TestRunGuard()
+{
+    if (!isNested) {
+        mw->m_testExecutionRunning = false;
+        mw->setTestExecutionUiEnabled(true);
+    }
+}
+
 void MainWindow::runSelectedTestCaseAuto()
 {
+    if (m_testExecutionRunning) {
+        // 如果是外部按钮重入触发，则直接拦截
+        // 但注意：对于批量执行内部调用的情况，由于底层已经设置了 nesting 机制，这里会在 TestRunGuard 里做判断
+    }
+    TestRunGuard guard(this);
+
     if (testCaseTableView == nullptr || !testCaseTableView->currentIndex().isValid()) {
         return;
     }
@@ -4388,6 +4455,8 @@ bool MainWindow::sendSemiAssistCommand(const TestCase &testCase, QString *messag
 
 void MainWindow::runSelectedTestCaseSemiAssist()
 {
+    TestRunGuard guard(this);
+
     if (testCaseTableView == nullptr || !testCaseTableView->currentIndex().isValid()) {
         return;
     }
@@ -4483,6 +4552,11 @@ void MainWindow::runSelectedTestCaseSemiAssist()
 
 void MainWindow::runFilteredTestCases()
 {
+    if (m_testExecutionRunning) {
+        return;
+    }
+    TestRunGuard guard(this);
+
     if (testCaseModel == nullptr || testCaseModel->rowCount() == 0) {
         return;
     }
@@ -4604,6 +4678,11 @@ void MainWindow::runFilteredTestCases()
 
 void MainWindow::retestFailedCases()
 {
+    if (m_testExecutionRunning) {
+        return;
+    }
+    TestRunGuard guard(this);
+
     if (testCaseModel == nullptr) {
         return;
     }
@@ -6771,7 +6850,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
     logService.logRuntime(LogLevel::Info, QStringLiteral("Application closing"));
     stressRefreshTimer->stop();
     canthread->stop();
-    canthread->wait();
+    if (!canthread->wait(1000)) {
+        logService.logRuntime(LogLevel::Warning, QStringLiteral("CANThread did not exit gracefully during close event, wait timed out."));
+    }
     canthread->closeDevice();
     QMainWindow::closeEvent(event);
 }
@@ -6891,7 +6972,9 @@ void MainWindow::on_initCANBtn_clicked()
 void MainWindow::on_closeDeviceBtn_clicked()
 {
     canthread->stop();
-    canthread->wait();
+    if (!canthread->wait(1000)) {
+        logService.logRuntime(LogLevel::Warning, QStringLiteral("CANThread did not exit gracefully during close device, wait timed out."));
+    }
     canthread->closeDevice();
     logService.logRuntime(LogLevel::Info, QStringLiteral("CAN device closed"));
     ui->initCANBtn->setEnabled(false);
@@ -6948,7 +7031,9 @@ bool MainWindow::afterReSet()
 void MainWindow::on_reSetCANBtn_clicked()
 {
     canthread->stop();
-    canthread->wait();
+    if (!canthread->wait(1000)) {
+        logService.logRuntime(LogLevel::Warning, QStringLiteral("CANThread did not exit gracefully during CAN reset, wait timed out."));
+    }
     if(!canthread->reSetCAN())
     {
         logService.logRuntime(LogLevel::Error, QStringLiteral("Failed to reset CAN"));

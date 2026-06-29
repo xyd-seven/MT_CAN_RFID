@@ -266,3 +266,31 @@
 1. **青桔 OTA 实机确认**：需要继续用真实 NPK 固件验证从机返回的块号语义，确认 UI 中“已发送块/下一块”与设备请求一致。
 2. **青桔压测实机复测**：建议使用目标次数 100、1000 分别测试，确认总轮询次数严格等于目标值，且停止后设备寄存器恢复为 `A900=0/A901=1`。
 3. **非 ASCII 标签样本回归**：继续使用非 ASCII 标签验证产品型号、供应商、流水号和完整资产信息详情页均有内容显示。
+
+
+## 22. 最新交接补充（2026-06-29 - 整体代码审查缺陷加固与性能优化）
+
+本轮针对整体代码审查报告中指出的 P1 和 P2 级安全与性能隐患进行全面加固与优化收口：
+
+- **测试执行重入阻断 (P1)**：在 `MainWindow` 内部设计了 `TestRunGuard` 嵌套生命期守卫，配合底层的 `m_testExecutionRunning` 标志，在单个用例或批量用例执行期间将 UI 所有主要操作按键（连接、压测、导入、执行、重置等）进行灰度禁用，彻底消除了等待窗口局部事件循环派发导致的逻辑重入风险。
+- **美团 OTA 直连信号析构守护 (P2)**：通过声明 `m_recvedFramesConn` 记录连接，并在重置连接和 `OtaService` 析构时显式 `disconnect`，同时绑定 `this` 作为接收方生命周期 context，消除了跨线程 `DirectConnection` 导致的 Use-After-Free 野指针 Crash 隐患。
+- **RS485 服务层安全防御 (P2)**：对 `Rs485RfidService::startScan` 的 `hostPollIntervalMs` 和 `readMode` 进行了 `qBound` 限幅（轮询最小限定在 100ms，读取模式限制在 [1, 2] 内），阻止了异常参数导致定时器过载的风险。
+- **日志渲染与裁剪性能提升 (P2)**：在 `CanLogWindow::appendRows` 进行表格数据追加与裁剪时，首尾加入 `setUpdatesEnabled(false/true)`，并将每批次移行的裁剪粒度限制在至少 50 行，彻底消除了每一帧数据删除都要触发生命期内重绘表格排版的严重性能缺陷。
+- **青桔寄存器读写安全校验 (P2)**：在 `QingjuCanManager` 读写寄存器接口前置了 `values` 非空、非超长（限制最大 125 寄存器）以及读指令数量非零判定，防御了底层协议发出异常空载荷引起的无响应或异常。
+- **关闭/复位线程等待超时守护 (P2)**：将 `MainWindow::closeEvent`、关闭设备和复位 CAN 时的无超时 `canthread->wait()` 改为 `wait(1000)` 超时守护，防止工控机驱动层或硬件异常拔出导致上位机进程死锁残留。
+
+### 修改文件
+- `HANDOFF.md`
+- `CAN_RFID_Qt/canlogwindow.cpp`
+- `CAN_RFID_Qt/application/qingjucanmanager.cpp`
+- `CAN_RFID_Qt/application/rs485rfidservice.cpp`
+- `CAN_RFID_Qt/application/otaservice.h`
+- `CAN_RFID_Qt/application/otaservice.cpp`
+- `CAN_RFID_Qt/mainwindow.h`
+- `CAN_RFID_Qt/mainwindow.cpp`
+
+### 最新测试状态
+- Release 增量构建：PASS (2026-06-29 编译成功并生成 `release/CAN_RFID.exe`)
+- 测试重入置灰防御：PASS (启动批量/单例测试后，通道连接、协议切换、导入导出与测试主按钮被成功灰度禁用，退出后自动复原)
+- 日志高频刷新卡顿消除：PASS (表格更新时挂起，无周期性 CPU 重绘抖动)
+- 串口掉线物理关闭：PASS (最长 1s 内强制析构，无僵尸进程残留)
