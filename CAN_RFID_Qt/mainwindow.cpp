@@ -5867,8 +5867,8 @@ void MainWindow::startProductionTestFromInput()
 void MainWindow::startProductionTestFromSn(const QString &sn)
 {
     const int protocolMode = protocolModeCombo == nullptr ? 0 : protocolModeCombo->currentIndex();
-    if (protocolMode != 0) {
-        QMessageBox::warning(this, QStringLiteral("产线检测"), QStringLiteral("产线检测仅支持美团协议。"));
+    if (protocolMode != 0 && protocolMode != 1) {
+        QMessageBox::warning(this, QStringLiteral("产线检测"), QStringLiteral("产线检测仅支持美团与青桔协议。"));
         return;
     }
     if (!canStarted) {
@@ -5898,7 +5898,6 @@ void MainWindow::startProductionTestFromSn(const QString &sn)
     config.passRateThreshold = productionPassThresholdSpin == nullptr ? 95.0 : productionPassThresholdSpin->value();
     const QString hwVer = productionHwVerEdit == nullptr ? QString() : productionHwVerEdit->text().trimmed();
     const QString matChange = productionMatChangeEdit == nullptr ? QString() : productionMatChangeEdit->text().trimmed();
-    const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
     if (!productionTestService.start(protocolMode, sn, hwVer, matChange, config, &error)) {
         QMessageBox::warning(this, QStringLiteral("格式错误"), error);
         if (productionSnEdit != nullptr) {
