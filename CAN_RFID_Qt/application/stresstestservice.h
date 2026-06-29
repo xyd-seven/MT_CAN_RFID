@@ -46,6 +46,7 @@ public:
     void start();
     void stop();
     void reset();
+    void setTargetSamples(quint64 samples);
     void setOutputDirectory(const QString &directoryPath);
     void setAutoSaveEnabled(bool enabled);
     bool autoSaveEnabled() const;
@@ -58,6 +59,7 @@ public:
 
 private:
     void handleStatusFrame(const CanFrame &frame);
+    bool canAcceptSample() const;
     void updateTagPart(quint32 frameId, const QByteArray &payload);
     void updateRates();
     bool currentTagIsValid() const;
@@ -79,6 +81,7 @@ private:
     QSet<QString> uniqueTags;
     QString outputDirectory;
     bool autoSaveCsv = false;
+    quint64 targetSamples = 0;
     QFile sampleCsvFile;
     QElapsedTimer elapsedTimer;
     int pendingSampleRows = 0;

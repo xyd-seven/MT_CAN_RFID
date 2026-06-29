@@ -4,6 +4,41 @@
 #include <QElapsedTimer>
 #include <QTimer>
 
+namespace {
+
+QByteArray buildOtaPayload(quint8 key, const QByteArray &value = QByteArray())
+{
+    QByteArray payload;
+    payload.append(static_cast<char>(key));
+    payload.append(static_cast<char>((value.size() >> 8) & 0xFF));
+    payload.append(static_cast<char>(value.size() & 0xFF));
+    payload.append(value);
+    return payload;
+}
+
+bool parseOtaPayload(const QByteArray &payload, quint8 *key, QByteArray *value)
+{
+    if (payload.size() < 3) {
+        return false;
+    }
+
+    const int valueLength = (static_cast<quint8>(payload.at(1)) << 8) |
+                            static_cast<quint8>(payload.at(2));
+    if (payload.size() < 3 + valueLength) {
+        return false;
+    }
+
+    if (key != nullptr) {
+        *key = static_cast<quint8>(payload.at(0));
+    }
+    if (value != nullptr) {
+        *value = payload.mid(3, valueLength);
+    }
+    return true;
+}
+
+}
+
 QingjuOtaWorker::QingjuOtaWorker(QingjuCanManager *canManager, QObject *parent)
     : QThread(parent)
     , m_canManager(canManager)
@@ -78,9 +113,13 @@ bool QingjuOtaWorker::waitForResponse(quint8 expectedSrc, quint8 expectedFunc, q
         while (!m_pendingPackets.isEmpty()) {
             ModbusPacket packet = m_pendingPackets.dequeue();
             if (packet.srcAddr == expectedSrc && packet.funcCode == expectedFunc && !packet.payload.isEmpty()) {
-                quint8 key = static_cast<quint8>(packet.payload.at(0));
+                quint8 key = 0;
+                QByteArray value;
+                if (!parseOtaPayload(packet.payload, &key, &value)) {
+                    continue;
+                }
                 if (key == expectedKey) {
-                    outPayload = packet.payload;
+                    outPayload = value;
                     return true;
                 }
             }
@@ -120,11 +159,12 @@ void QingjuOtaWorker::run()
             return;
         }
         
-        emit transmitModbusRequest(m_targetAddr, 0x45, QByteArray::fromHex("01"), 7); // OTA 优先级为 7
-        if (waitForResponse(m_targetAddr, 0x45, 0x02, 1000, respPayload)) {
+        emit transmitModbusRequest(m_targetAddr, 0x45, buildOtaPayload(0x01), 7); // OTA 优先级为 7
+        if (waitForResponse(m_targetAddr, 0x45, 0x02, 2000, respPayload)) {
             enterOk = true;
             break;
         }
+        QThread::msleep(500);
     }
 
     if (!enterOk) {
@@ -132,9 +172,9 @@ void QingjuOtaWorker::run()
         return;
     }
 
-    // 检查进入升级响应：KEY(0x02) + Status(0x00:成功) + Error(0x00:成功)
-    if (respPayload.size() < 3 || static_cast<quint8>(respPayload.at(1)) != 0x00) {
-        quint8 errCode = respPayload.size() >= 3 ? static_cast<quint8>(respPayload.at(2)) : 0xFF;
+    // 检查进入升级响应 Value：Status(0x00:成功) + Error(0x00:成功)
+    if (respPayload.size() < 2 || static_cast<quint8>(respPayload.at(0)) != 0x00) {
+        quint8 errCode = respPayload.size() >= 2 ? static_cast<quint8>(respPayload.at(1)) : 0xFF;
         QString errText = "未知";
         if (errCode == 0x01) errText = "电量过低";
         else if (errCode == 0x02) errText = "不支持固件升级";
@@ -196,9 +236,7 @@ void QingjuOtaWorker::run()
     infoVal.append(static_cast<char>((sendCrc >> 8) & 0xFF));
     infoVal.append(static_cast<char>(sendCrc & 0xFF));
 
-    QByteArray reqPayload;
-    reqPayload.append(static_cast<char>(0x13));
-    reqPayload.append(infoVal);
+    const QByteArray reqPayload = buildOtaPayload(0x13, infoVal);
 
     emit transmitModbusRequest(m_targetAddr, 0x45, reqPayload, 7);
 
@@ -207,13 +245,13 @@ void QingjuOtaWorker::run()
         return;
     }
 
-    // 检查响应：KEY(0x14) + Status(1Byte) + BlockSize(1Byte) + ReqBlockNo(2Bytes)
-    if (respPayload.size() < 5) {
+    // 检查响应 Value：Status(1Byte) + BlockSize(1Byte) + ReqBlockNo(2Bytes)
+    if (respPayload.size() < 4) {
         emit statusUpdated(5, "固件信息响应数据长度错误", 5);
         return;
     }
 
-    quint8 otaStatus = static_cast<quint8>(respPayload.at(1));
+    quint8 otaStatus = static_cast<quint8>(respPayload.at(0));
     if (otaStatus == 0x00 || otaStatus == 0x02) {
         emit statusUpdated(6, "从机提示已是最新，无需升级", 100);
         return;
@@ -224,14 +262,14 @@ void QingjuOtaWorker::run()
         return;
     }
 
-    quint8 blockSizeCode = static_cast<quint8>(respPayload.at(2));
+    quint8 blockSizeCode = static_cast<quint8>(respPayload.at(1));
     int blockSize = 128;
     if (blockSizeCode == 0x01) blockSize = 64;
     else if (blockSizeCode == 0x02) blockSize = 128;
     else if (blockSizeCode == 0x03) blockSize = 240;
     else if (blockSizeCode == 0x04) blockSize = 192;
 
-    quint16 nextBlock = (static_cast<quint8>(respPayload.at(3)) << 8) | static_cast<quint8>(respPayload.at(4));
+    quint16 nextBlock = (static_cast<quint8>(respPayload.at(2)) << 8) | static_cast<quint8>(respPayload.at(3));
 
     int totalBlocks = (fileSize + blockSize - 1) / blockSize;
 
@@ -252,7 +290,8 @@ void QingjuOtaWorker::run()
             return;
         }
 
-        int offset = nextBlock * blockSize;
+        const quint16 sentBlock = nextBlock;
+        int offset = sentBlock * blockSize;
         int len = qMin(blockSize, static_cast<int>(fileSize) - offset);
         QByteArray chunk = fileData.mid(offset, len);
 
@@ -265,8 +304,8 @@ void QingjuOtaWorker::run()
         // 固件类型 (1字节)：NPK=0x0A，RFR=0x0B
         blockVal.append(static_cast<char>(m_targetAddr));
         // 数据块编号 (2字节) 大端
-        blockVal.append(static_cast<char>((nextBlock >> 8) & 0xFF));
-        blockVal.append(static_cast<char>(nextBlock & 0xFF));
+        blockVal.append(static_cast<char>((sentBlock >> 8) & 0xFF));
+        blockVal.append(static_cast<char>(sentBlock & 0xFF));
         // 完整数据块数 (2字节) 大端
         blockVal.append(static_cast<char>((totalBlocks >> 8) & 0xFF));
         blockVal.append(static_cast<char>(totalBlocks & 0xFF));
@@ -277,50 +316,65 @@ void QingjuOtaWorker::run()
         // 固件数据
         blockVal.append(chunk);
 
-        QByteArray blockReq;
-        blockReq.append(static_cast<char>(0x15));
-        blockReq.append(blockVal);
+        const QByteArray blockReq = buildOtaPayload(0x15, blockVal);
 
         // 发送数据块
         emit transmitModbusRequest(m_targetAddr, 0x45, blockReq, 7);
 
         // 异常 Case 5: 收到 ECU 重复的数据包
-        if (m_injectConfig.enabled && m_injectConfig.caseMode == 5 && nextBlock == 2 && !dupSent) {
+        if (m_injectConfig.enabled && m_injectConfig.caseMode == 5 && sentBlock == 2 && !dupSent) {
             dupSent = true;
             // 稍等并直接重发一次 Block 2
             QThread::msleep(100);
-            emit statusUpdated(1, "[Case 5 注入] 重发数据块 2 ...", (nextBlock * 90) / totalBlocks + 10);
+            emit statusUpdated(1, "[Case 5 注入] 重发数据块 2 ...", (sentBlock * 90) / totalBlocks + 10);
             emit transmitModbusRequest(m_targetAddr, 0x45, blockReq, 7);
         }
 
         // 等待 0x16 响应 (接收结果)
         if (!waitForResponse(m_targetAddr, 0x45, 0x16, 3000, respPayload)) {
-            emit statusUpdated(5, QString("数据块 [%1] 响应超时: ").arg(nextBlock) + m_lastError, (nextBlock * 90) / totalBlocks + 10);
+            emit statusUpdated(5, QString("数据块 [%1] 响应超时: ").arg(sentBlock) + m_lastError, (sentBlock * 90) / totalBlocks + 10);
             return;
         }
 
-        // 检查 0x16 响应：KEY(0x16) + Result(1Byte) + HwModel(1Byte) + ClientNo(1Byte) + ProtoType(1Byte) + ReqBlockNo(2Bytes)
-        if (respPayload.size() < 7) {
-            emit statusUpdated(5, "数据块接收响应长度错误", (nextBlock * 90) / totalBlocks + 10);
+        // 检查 0x16 响应 Value：Result + HwModel + ClientNo + ProtoType + ReqBlockNo
+        if (respPayload.size() < 6) {
+            emit statusUpdated(5, "数据块接收响应长度错误", (sentBlock * 90) / totalBlocks + 10);
             return;
         }
 
-        quint8 result = static_cast<quint8>(respPayload.at(1));
+        quint8 result = static_cast<quint8>(respPayload.at(0));
         if (result != 0 && result != 3) {
             QString errStr = "未知错误";
             if (result == 1) errStr = "校验失败";
             else if (result == 2) errStr = "烧写失败";
             else if (result == 4) errStr = "长度异常";
             else if (result == 5) errStr = "完整性异常";
-            emit statusUpdated(5, QString("从机报告错误: %1 (代码: 0x%2)").arg(errStr).arg(result, 2, 16, QChar('0')), (nextBlock * 90) / totalBlocks + 10);
+            emit statusUpdated(5, QString("从机报告错误: %1 (代码: 0x%2)").arg(errStr).arg(result, 2, 16, QChar('0')), (sentBlock * 90) / totalBlocks + 10);
             return;
         }
 
         // 从机要求的下一个块号
-        nextBlock = (static_cast<quint8>(respPayload.at(5)) << 8) | static_cast<quint8>(respPayload.at(6));
+        const quint16 requestedNextBlock = (static_cast<quint8>(respPayload.at(4)) << 8) |
+                                           static_cast<quint8>(respPayload.at(5));
+        nextBlock = requestedNextBlock;
 
-        int pct = (nextBlock * 80) / totalBlocks + 10; // 进度在 10% - 90% 之间
-        emit statusUpdated(2, QString("正在传输固件数据: 块 %1/%2").arg(nextBlock).arg(totalBlocks), pct);
+        const int requestedNextBlockInt = static_cast<int>(requestedNextBlock);
+        const int sentBlockCount = static_cast<int>(sentBlock) + 1;
+        const int completedBlocks = qBound(0, qMax(sentBlockCount, requestedNextBlockInt), totalBlocks);
+        const int pct = qBound(10, (completedBlocks * 80) / totalBlocks + 10, 90);
+        QString progressText;
+        if (requestedNextBlock <= sentBlock) {
+            progressText = QString("正在传输固件数据: 从机请求重发块 %1/%2，已发送 %3/%2 块")
+                               .arg(requestedNextBlock)
+                               .arg(totalBlocks)
+                               .arg(completedBlocks);
+        } else {
+            progressText = QString("正在传输固件数据: 已发送 %1/%2 块，下一块 %3")
+                               .arg(completedBlocks)
+                               .arg(totalBlocks)
+                               .arg(requestedNextBlock);
+        }
+        emit statusUpdated(2, progressText, pct);
     }
 
     // 4. 等待校验与重置 (最终确认)
@@ -338,8 +392,8 @@ void QingjuOtaWorker::run()
         emit transmitModbusRequest(m_targetAddr, 0x45, reqPayload, 7);
 
         if (waitForResponse(m_targetAddr, 0x45, 0x14, 1500, respPayload)) {
-            if (respPayload.size() >= 2) {
-                quint8 finalStatus = static_cast<quint8>(respPayload.at(1));
+            if (!respPayload.isEmpty()) {
+                quint8 finalStatus = static_cast<quint8>(respPayload.at(0));
                 if (finalStatus == 0x02) {
                     checkOk = true;
                     break;
@@ -502,9 +556,10 @@ void QingjuOtaService::onWorkerStatusUpdated(int stateVal, const QString &messag
 
 void QingjuOtaService::setState(State state, const QString &message)
 {
-    if (m_currentState != state || m_currentMessage != message) {
-        m_currentState = state;
-        m_currentMessage = message;
+    const bool changed = (m_currentState != state || m_currentMessage != message);
+    m_currentState = state;
+    m_currentMessage = message;
+    if (changed || state == State::SendData) {
         emit otaStateChanged(state, message);
     }
 }

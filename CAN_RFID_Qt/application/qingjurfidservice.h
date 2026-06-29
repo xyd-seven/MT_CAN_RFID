@@ -21,6 +21,7 @@ struct QingjuNpkState
     QString assetModel;
     QString assetSupplier;
     QString assetSerial;
+    QString assetFullText;
     QString alarmText;
     
     QString devSn;
@@ -49,7 +50,9 @@ public:
     bool isAutoWritePassword() const { return m_autoWritePassword; }
     void setTargetAddress(quint8 addr);
     quint8 targetAddress() const { return m_targetAddress; }
-    void queryDeviceInfo();
+    void queryDeviceInfo(bool resumeScanAfterInfo = true);
+    void queryDeviceInfo(quint8 targetAddress, bool resumeScanAfterInfo);
+    void queryDeviceInfo(quint8 targetAddress, bool resumeScanAfterInfo, bool deviceInfoOnly);
     void triggerSingleQuery();
 
 signals:
@@ -83,6 +86,10 @@ private:
     QTimer *m_deviceInfoTimer;
     int m_infoStep;
     int m_readMode;
+    quint8 m_deviceInfoTargetAddress;
+    bool m_resumeScanAfterDeviceInfo;
+    bool m_deviceInfoOnlyMode;
+    qint64 m_ignoreStatusUntilMs;
 };
 
 #endif // QINGJURFIDSERVICE_H

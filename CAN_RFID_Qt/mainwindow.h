@@ -518,6 +518,7 @@ private:
     QLabel *qjRfidModelValue;
     QLabel *qjRfidSupplierValue;
     QLabel *qjRfidSerialValue;
+    QLabel *qjRfidAssetFullValue;
     QLabel *qjRfidVendorValue;
     QLabel *qjRfidModelCodeValue;
     QLabel *qjRfidFwStrValue;

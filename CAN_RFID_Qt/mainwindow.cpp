@@ -350,6 +350,7 @@ MainWindow::MainWindow(QWidget *parent) :
     qjRfidModelValue(nullptr),
     qjRfidSupplierValue(nullptr),
     qjRfidSerialValue(nullptr),
+    qjRfidAssetFullValue(nullptr),
     qjRfidVendorValue(nullptr),
     qjRfidModelCodeValue(nullptr),
     qjRfidFwStrValue(nullptr),
@@ -1751,6 +1752,10 @@ void MainWindow::startStressTest()
     if (stressRemainingLabel != nullptr) {
         stressRemainingLabel->setText(QStringLiteral("正在进行中..."));
     }
+    const quint64 targetSamples = stressTargetSamplesSpin == nullptr
+        ? 0
+        : static_cast<quint64>(stressTargetSamplesSpin->value());
+    stressTestService.setTargetSamples(targetSamples);
 
     if (is485Mode) {
         int intervalMs = 500;
@@ -1770,7 +1775,8 @@ void MainWindow::startStressTest()
         const bool qingjuMode = (protocolMode == 1);
         if (qingjuMode) {
             const int intervalMs = qjRfidPeriodSpin == nullptr ? 100 : qjRfidPeriodSpin->value();
-            qingjuRfidService->startScan(intervalMs);
+            const int hostPollIntervalMs = qjHostPollPeriodSpin == nullptr ? 500 : qjHostPollPeriodSpin->value();
+            qingjuRfidService->startScan(intervalMs, hostPollIntervalMs, 1);
         } else {
             rfidScanning = true; // 开启周期发送以支持持续读卡
             sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
@@ -5038,14 +5044,14 @@ QWidget *MainWindow::createStressTestTab(QWidget *parent)
     qjSummaryLayout->addWidget(new QLabel(QStringLiteral("读卡成功"), qjSummaryGroup), 2, 2);
     qjSummaryLayout->addWidget(qjStressSuccessCountValue, 2, 3);
 
-    QGroupBox *qjUidGroup = new QGroupBox(QStringLiteral("当前 UID"), qjStressPanel);
+    QGroupBox *qjUidGroup = new QGroupBox(QStringLiteral("标签资产信息"), qjStressPanel);
     QGridLayout *qjUidLayout = new QGridLayout(qjUidGroup);
     qjUidLayout->setContentsMargins(8, 8, 8, 8);
-    qjUidLayout->addWidget(new QLabel(QStringLiteral("当前 UID"), qjUidGroup), 0, 0);
+    qjUidLayout->addWidget(new QLabel(QStringLiteral("当前资产信息"), qjUidGroup), 0, 0);
     qjUidLayout->addWidget(qjStressCurrentUidValue, 0, 1, 1, 3);
-    qjUidLayout->addWidget(new QLabel(QStringLiteral("最后成功 UID"), qjUidGroup), 1, 0);
+    qjUidLayout->addWidget(new QLabel(QStringLiteral("最后成功资产信息"), qjUidGroup), 1, 0);
     qjUidLayout->addWidget(qjStressLastSuccessUidValue, 1, 1, 1, 3);
-    qjUidLayout->addWidget(new QLabel(QStringLiteral("唯一 UID 数"), qjUidGroup), 2, 0);
+    qjUidLayout->addWidget(new QLabel(QStringLiteral("唯一资产信息数"), qjUidGroup), 2, 0);
     qjUidLayout->addWidget(qjStressUniqueUidCountValue, 2, 1);
 
     QGroupBox *qjResultGroup = new QGroupBox(QStringLiteral("青桔结果分类"), qjStressPanel);
@@ -5529,6 +5535,7 @@ void MainWindow::clearQingjuRfidPanel()
     setLabelValue(qjRfidAppStatusValue, QString());
     if (qjRfidAppStatusValue != nullptr) {
         qjRfidAppStatusValue->setStyleSheet(QString());
+        qjRfidAppStatusValue->setToolTip(QString());
     }
     setLabelValue(qjRfidAlarmValue, QString());
     if (qjRfidAlarmValue != nullptr) {
@@ -5539,6 +5546,10 @@ void MainWindow::clearQingjuRfidPanel()
     setLabelValue(qjRfidModelValue, QString());
     setLabelValue(qjRfidSupplierValue, QString());
     setLabelValue(qjRfidSerialValue, QString());
+    setLabelValue(qjRfidAssetFullValue, QString());
+    if (qjRfidAssetFullValue != nullptr) {
+        qjRfidAssetFullValue->setToolTip(QString());
+    }
     setLabelValue(qjRfidSnValue, QString());
     setLabelValue(qjRfidFirmwareVerValue, QString());
     setLabelValue(qjRfidHardwareVerValue, QString());
@@ -5642,7 +5653,8 @@ void MainWindow::updateQingjuOnlineStatus(bool clearOfflineData)
     } else {
         isTargetOffline = !npkOnline;
     }
-    if (clearOfflineData && isTargetOffline) {
+    if (clearOfflineData && isTargetOffline &&
+        qingjuRfidService != nullptr && qingjuRfidService->isScanning()) {
         clearQingjuRfidPanel();
     }
 }
@@ -7610,14 +7622,9 @@ void MainWindow::updateQingjuRfidPanel(const QingjuNpkState &state)
         }
     }
     if (qjRfidAppStatusValue != nullptr) {
-        qjRfidAppStatusValue->setText(state.appStatus.isEmpty() ? "-" : state.appStatus);
-        if (state.appStatus.compare(QStringLiteral("app"), Qt::CaseInsensitive) == 0) {
-            qjRfidAppStatusValue->setStyleSheet(QStringLiteral("color: green; font-weight: bold;"));
-        } else if (state.appStatus.compare(QStringLiteral("boot"), Qt::CaseInsensitive) == 0) {
-            qjRfidAppStatusValue->setStyleSheet(QStringLiteral("color: #B26A00; font-weight: bold;"));
-        } else {
-            qjRfidAppStatusValue->setStyleSheet(QString());
-        }
+        qjRfidAppStatusValue->setText(state.assetFullText.isEmpty() ? "-" : state.assetFullText);
+        qjRfidAppStatusValue->setStyleSheet(QString());
+        qjRfidAppStatusValue->setToolTip(state.assetFullText);
     }
     if (qjRfidAlarmValue != nullptr) {
         qjRfidAlarmValue->setText(state.alarmText.isEmpty() ? "-" : state.alarmText);
@@ -7656,29 +7663,37 @@ void MainWindow::updateQingjuRfidPanel(const QingjuNpkState &state)
     if (qjRfidSerialValue != nullptr) {
         qjRfidSerialValue->setText(state.assetSerial.isEmpty() ? "-" : state.assetSerial);
     }
+    if (qjRfidAssetFullValue != nullptr) {
+        qjRfidAssetFullValue->setText(state.assetFullText.isEmpty() ? "-" : state.assetFullText);
+        qjRfidAssetFullValue->setToolTip(state.assetFullText);
+    }
     if (qjRfidSnValue != nullptr) {
-        qjRfidSnValue->setText(state.devSn.isEmpty() ? "-" : state.devSn);
+        if (!state.devSn.isEmpty()) qjRfidSnValue->setText(state.devSn);
     }
     if (qjRfidFirmwareVerValue != nullptr) {
-        qjRfidFirmwareVerValue->setText(state.firmwareVer.isEmpty() ? "-" : state.firmwareVer);
+        if (!state.firmwareVer.isEmpty()) qjRfidFirmwareVerValue->setText(state.firmwareVer);
     }
     if (qjRfidHardwareVerValue != nullptr) {
-        qjRfidHardwareVerValue->setText(state.hardwareVer.isEmpty() ? "-" : state.hardwareVer);
+        if (!state.hardwareVer.isEmpty()) qjRfidHardwareVerValue->setText(state.hardwareVer);
     }
     if (qjRfidVendorValue != nullptr) {
-        qjRfidVendorValue->setText(state.vendorInfo.isEmpty() ? "-" : state.vendorInfo);
+        if (!state.vendorInfo.isEmpty()) qjRfidVendorValue->setText(state.vendorInfo);
     }
     if (qjRfidModelCodeValue != nullptr) {
-        qjRfidModelCodeValue->setText(state.modelCodeText.isEmpty() ? "-" : state.modelCodeText);
+        if (!state.modelCodeText.isEmpty()) qjRfidModelCodeValue->setText(state.modelCodeText);
     }
     if (qjRfidFwStrValue != nullptr) {
-        qjRfidFwStrValue->setText(state.fwVersionStr.isEmpty() ? "-" : state.fwVersionStr);
+        if (!state.fwVersionStr.isEmpty()) qjRfidFwStrValue->setText(state.fwVersionStr);
     }
     if (qjRfidHwStrValue != nullptr) {
-        qjRfidHwStrValue->setText(state.hwVersionStr.isEmpty() ? "-" : state.hwVersionStr);
+        if (!state.hwVersionStr.isEmpty()) qjRfidHwStrValue->setText(state.hwVersionStr);
     }
     if (stressTestService.handleQingjuState(state)) {
         updateStressTestPanel(stressTestService.stats());
+        const int targetSamples = stressTargetSamplesSpin == nullptr ? 0 : stressTargetSamplesSpin->value();
+        if (targetSamples > 0 && stressTestService.stats().totalSamples >= static_cast<quint64>(targetSamples)) {
+            stopStressTest(true);
+        }
     }
 }
 
@@ -7774,6 +7789,22 @@ void MainWindow::onQjCustomReadClicked()
         }
     } else {
         destAddr = static_cast<quint8>(qjDestAddrCombo->currentData().toUInt());
+    }
+
+    if (qjRegisterPresetCombo != nullptr && qjRegisterPresetCombo->currentData().toInt() == 6) {
+        if (qingjuRfidService == nullptr) {
+            QMessageBox::warning(this, "错误", "青桔 RFID 服务未初始化！");
+            return;
+        }
+
+        qingjuRfidService->queryDeviceInfo(destAddr, false, true);
+        qjCustomRequestPending = false;
+
+        const QString timeStr = QDateTime::currentDateTime().toString("HH:mm:ss.zzz");
+        handleQjCustomLog(QString("[%1] Query Device Info from Dest: 0x%2 Sent")
+                          .arg(timeStr)
+                          .arg(QString::number(destAddr, 16).toUpper()));
+        return;
     }
 
     bool ok;
@@ -7929,7 +7960,7 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     qjHostPollPeriodSpin->setSingleStep(100);
     qjHostPollPeriodSpin->setSuffix(" ms");
     qjHostPollPeriodSpin->setMinimumWidth(120);
-    qjHostPollPeriodSpin->setToolTip(QStringLiteral("设置上位机周期性发送读命令（NPK: 0xA904; RFR: 0xA02A）的时间间隔(ms)；这属于上位机软件设置，不修改从机寄存器"));
+    qjHostPollPeriodSpin->setToolTip(QStringLiteral("设置上位机周期性发送读命令（NPK: 0xA904; RFR: 0xA02A）的时间间隔(ms)；NPK 不再高频轮询 0xA02A 程序状态"));
 
     qjDistanceQueryOnceBtn = new QPushButton(QStringLiteral("单次查询"), ctrlGroup);
     qjDistanceQueryOnceBtn->setToolTip(QStringLiteral("当查询方式为单次查询时，手动发送读指令获取从机当前数据（NPK 读取 0xA904，RFR 读取 0xA02A）"));
@@ -8031,12 +8062,14 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     qjRfidAlarmValue = new QLabel("-", statusGroup);
     qjRfidUidValue = new QLabel("-", statusGroup);
     qjRfidPwdValue = new QLabel("-", statusGroup);
+    qjRfidAppStatusValue->setWordWrap(true);
+    qjRfidAppStatusValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
     statusLayout->addWidget(new QLabel(QStringLiteral("读卡器地址"), statusGroup), 0, 0);
     statusLayout->addWidget(qjRfidAddrValue, 0, 1);
     statusLayout->addWidget(new QLabel(QStringLiteral("读取结果 0xA904"), statusGroup), 1, 0);
     statusLayout->addWidget(qjRfidResultValue, 1, 1);
-    statusLayout->addWidget(new QLabel(QStringLiteral("当前程序状态 (0xA02A)"), statusGroup), 2, 0);
+    statusLayout->addWidget(new QLabel(QStringLiteral("完整标签资产信息"), statusGroup), 2, 0);
     statusLayout->addWidget(qjRfidAppStatusValue, 2, 1);
     statusLayout->addWidget(new QLabel(QStringLiteral("芯片异常告警 0xA919"), statusGroup), 3, 0);
     statusLayout->addWidget(qjRfidAlarmValue, 3, 1);
@@ -8055,6 +8088,9 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     qjRfidModelValue = new QLabel("-", assetGroup);
     qjRfidSupplierValue = new QLabel("-", assetGroup);
     qjRfidSerialValue = new QLabel("-", assetGroup);
+    qjRfidAssetFullValue = new QLabel("-", assetGroup);
+    qjRfidAssetFullValue->setWordWrap(true);
+    qjRfidAssetFullValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
 
     assetLayout->addWidget(new QLabel(QStringLiteral("产品型号"), assetGroup), 0, 0);
     assetLayout->addWidget(qjRfidModelValue, 0, 1);
@@ -8062,6 +8098,8 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     assetLayout->addWidget(qjRfidSupplierValue, 1, 1);
     assetLayout->addWidget(new QLabel(QStringLiteral("流水号"), assetGroup), 2, 0);
     assetLayout->addWidget(qjRfidSerialValue, 2, 1);
+    assetLayout->addWidget(new QLabel(QStringLiteral("完整数据"), assetGroup), 3, 0);
+    assetLayout->addWidget(qjRfidAssetFullValue, 3, 1);
 
     QGroupBox *devGroup = new QGroupBox(QStringLiteral("设备基本信息"), panel);
     QGridLayout *devLayout = new QGridLayout(devGroup);
@@ -8105,6 +8143,7 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
     qjRegisterPresetCombo->addItem(QStringLiteral("启动 NPK 检测"), 3);
     qjRegisterPresetCombo->addItem(QStringLiteral("停止 NPK 检测"), 4);
     qjRegisterPresetCombo->addItem(QStringLiteral("写一机一密 0xA902/0xA903"), 5);
+    qjRegisterPresetCombo->addItem(QStringLiteral("读设备基本信息"), 6);
 
     qjDestAddrCombo = new QComboBox(customGroup);
     qjDestAddrCombo->addItem(QStringLiteral("NPK (0x0A)"), 0x0A);
@@ -8198,6 +8237,13 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
             }
             break;
         }
+        case 6:
+            qjDestAddrCombo->setCurrentIndex(0);
+            qjFuncCodeCombo->setCurrentIndex(2);
+            qjRegAddrEdit->setText(QStringLiteral("A002"));
+            qjRegValueEdit->clear();
+            qjRegValueEdit->setPlaceholderText(QStringLiteral("点击寄存器读取后自动读取设备基本信息"));
+            break;
         default:
             break;
         }

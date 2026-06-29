@@ -44,6 +44,11 @@ void StressTestService::reset()
     pendingSampleRows = 0;
 }
 
+void StressTestService::setTargetSamples(quint64 samples)
+{
+    targetSamples = samples;
+}
+
 void StressTestService::setOutputDirectory(const QString &directoryPath)
 {
     outputDirectory = directoryPath;
@@ -125,6 +130,9 @@ bool StressTestService::handleQingjuState(const QingjuNpkState &state)
     if (!currentStats.running || !state.statusSample || state.statusText.isEmpty()) {
         return false;
     }
+    if (!canAcceptSample()) {
+        return false;
+    }
 
     ++currentStats.totalSamples;
     if (elapsedTimer.isValid()) {
@@ -132,15 +140,11 @@ bool StressTestService::handleQingjuState(const QingjuNpkState &state)
         currentStats.elapsedSeconds = currentStats.elapsedMilliseconds / 1000;
     }
 
-    QString tagText = state.uidText.trimmed();
-    if (tagText.isEmpty()) {
-        tagText = QString("%1%2%3")
-            .arg(state.assetModel.trimmed(), state.assetSupplier.trimmed(), state.assetSerial.trimmed());
-    }
+    const QString tagText = state.assetFullText.trimmed();
     currentStats.currentTag = tagText;
 
     bool success = false;
-    bool tagValid = isValidTagText(tagText);
+    bool tagValid = !tagText.isEmpty();
 
     switch (state.result) {
     case 1:
@@ -159,7 +163,7 @@ bool StressTestService::handleQingjuState(const QingjuNpkState &state)
             }
         } else {
             ++currentStats.tagContentErrorCount;
-            currentStats.lastFailureReason = QStringLiteral("识别成功但 UID 内容异常");
+            currentStats.lastFailureReason = QStringLiteral("识别成功但标签资产信息为空");
         }
         break;
     case 2:
@@ -190,6 +194,9 @@ bool StressTestService::handleQingjuState(const QingjuNpkState &state)
 bool StressTestService::handleRs485State(int protocolMode, const QString &tagId, int errCode, bool isCommunicationTimeout, const QString &errorMsg)
 {
     if (!currentStats.running) {
+        return false;
+    }
+    if (!canAcceptSample()) {
         return false;
     }
 
@@ -298,6 +305,9 @@ void StressTestService::handleStatusFrame(const CanFrame &frame)
     if (!status.valid) {
         return;
     }
+    if (!canAcceptSample()) {
+        return;
+    }
 
     ++currentStats.totalSamples;
     if (elapsedTimer.isValid()) {
@@ -334,6 +344,11 @@ void StressTestService::handleStatusFrame(const CanFrame &frame)
 
     updateRates();
     writeSampleCsv(frame, status, status.cardStatus == 0x01, currentTagIsValid());
+}
+
+bool StressTestService::canAcceptSample() const
+{
+    return targetSamples == 0 || currentStats.totalSamples < targetSamples;
 }
 
 void StressTestService::updateTagPart(quint32 frameId, const QByteArray &payload)

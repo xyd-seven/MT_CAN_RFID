@@ -1,5 +1,78 @@
 #include "qingjurfidservice.h"
+#include <QDateTime>
 #include <QDebug>
+#include <QStringList>
+
+namespace {
+
+bool isPrintableAscii(const QByteArray &data)
+{
+    for (char ch : data) {
+        const quint8 value = static_cast<quint8>(ch);
+        if (value == 0) {
+            continue;
+        }
+        if (value < 0x20 || value > 0x7E) {
+            return false;
+        }
+    }
+    return true;
+}
+
+QString asciiOrEmpty(const QByteArray &data)
+{
+    if (!isPrintableAscii(data)) {
+        return QString();
+    }
+    return QString::fromLatin1(data).trimmed();
+}
+
+QString asciiOrHex(const QByteArray &data)
+{
+    const QString asciiText = asciiOrEmpty(data);
+    if (!asciiText.isEmpty()) {
+        return asciiText;
+    }
+    return QString::fromLatin1(data.toHex().toUpper());
+}
+
+bool isAllZero(const QByteArray &data)
+{
+    for (char ch : data) {
+        if (static_cast<quint8>(ch) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+QString hexText(const QByteArray &data)
+{
+    return QString::fromLatin1(data.toHex().toUpper());
+}
+
+QString buildAssetDisplayText(const QByteArray &assetData)
+{
+    const QByteArray usedData = assetData.left(16);
+    const QByteArray reservedData = assetData.mid(16, 16);
+    const QString usedHex = hexText(usedData);
+    const QString assetAscii = asciiOrEmpty(usedData);
+
+    QStringList lines;
+    if (assetAscii.isEmpty()) {
+        lines << QStringLiteral("HEX: %1").arg(usedHex);
+    } else {
+        lines << QStringLiteral("ASCII: %1").arg(assetAscii);
+        lines << QStringLiteral("HEX: %1").arg(usedHex);
+    }
+
+    if (!isAllZero(reservedData)) {
+        lines << QStringLiteral("Reserved: %1").arg(hexText(reservedData));
+    }
+    return lines.join('\n');
+}
+
+}
 
 QingjuRfidService::QingjuRfidService(QingjuCanManager *canManager, QObject *parent)
     : QObject(parent)
@@ -9,6 +82,10 @@ QingjuRfidService::QingjuRfidService(QingjuCanManager *canManager, QObject *pare
     , m_targetAddress(0x0A)
     , m_infoStep(0)
     , m_readMode(1)
+    , m_deviceInfoTargetAddress(0x0A)
+    , m_resumeScanAfterDeviceInfo(true)
+    , m_deviceInfoOnlyMode(false)
+    , m_ignoreStatusUntilMs(0)
 {
     m_pollTimer = new QTimer(this);
     m_pollTimer->setInterval(500);
@@ -38,10 +115,10 @@ void QingjuRfidService::startScan(int intervalMs, int hostPollIntervalMs, int re
     }
 
     // 保存轮询间隔
-    m_pollTimer->setInterval(hostPollIntervalMs);
+    m_pollTimer->setInterval(qBound(100, hostPollIntervalMs, 10000));
 
     // 2. 串行获取设备静态信息（0xA002, 0xA005, 0xA00D, 0xA015, 0xA016, 0xA020）
-    queryDeviceInfo();
+    queryDeviceInfo(m_targetAddress, true, false);
 }
 
 void QingjuRfidService::stopScan()
@@ -57,7 +134,7 @@ void QingjuRfidService::stopScan()
 
     // 仅 NPK (0x0A) 发送停止读卡指令
     if (m_targetAddress == 0x0A) {
-        QVector<quint16> stopVals = { static_cast<quint16>(m_readMode), 0x0000 };
+        QVector<quint16> stopVals = { 0x0000, 0x0001 };
         m_canManager->writeRegisters(0x0A, 0xA900, stopVals);
     }
 }
@@ -76,7 +153,6 @@ void QingjuRfidService::triggerSingleQuery()
 
     if (m_targetAddress == 0x0A) {
         m_canManager->readRegisters(0x0A, 0xA904, 22);
-        m_canManager->readRegisters(0x0A, 0xA02A, 1);
     } else {
         m_canManager->readRegisters(m_targetAddress, 0xA02A, 1);
     }
@@ -101,9 +177,8 @@ void QingjuRfidService::onPollTimeout()
     if (!m_isScanning) return;
 
     if (m_targetAddress == 0x0A) {
-        // NPK 轮询：1. NFC状态 (0xA904), 2. 程序状态 (0xA02A)
+        // NPK 高频轮询只读取读卡状态，避免 0xA02A 程序状态在读卡过程中跳变干扰观察。
         m_canManager->readRegisters(0x0A, 0xA904, 22);
-        m_canManager->readRegisters(0x0A, 0xA02A, 1);
     } else {
         // RFR 轮询：仅轮询程序状态 (0xA02A)
         m_canManager->readRegisters(m_targetAddress, 0xA02A, 1);
@@ -112,8 +187,8 @@ void QingjuRfidService::onPollTimeout()
 
 void QingjuRfidService::onModbusPacketReceived(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload)
 {
-    // 只处理来自当前所选目标设备且发送给中控 (0x01) 的读响应 (0x03)
-    if (srcAddr != m_targetAddress || destAddr != 0x01 || funcCode != 0x03) {
+    // 只处理发送给中控 (0x01) 的读响应 (0x03)。
+    if (destAddr != 0x01 || funcCode != 0x03) {
         return;
     }
 
@@ -128,67 +203,80 @@ void QingjuRfidService::onModbusPacketReceived(quint8 srcAddr, quint8 destAddr, 
         return; // 数据不全
     }
 
-    // 处理周期轮询的响应包
-    if (byteCount == 44) {
+    const bool deviceInfoResponse = (m_infoStep > 0 && srcAddr == m_deviceInfoTargetAddress);
+    const bool targetStatusResponse = (srcAddr == m_targetAddress);
+    if (!deviceInfoResponse && !targetStatusResponse) {
+        return;
+    }
+
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+
+    // 处理周期轮询的响应包。只读设备信息期间忽略状态残留包，避免冲掉设备信息面板。
+    if (targetStatusResponse && byteCount == 44) {
+        if (m_deviceInfoOnlyMode || nowMs < m_ignoreStatusUntilMs) {
+            return;
+        }
         parseStatusData(data);
         return;
     }
 
     // 根据串行请求步骤匹配并解析对应的响应包
     bool stepHandled = false;
-    switch (m_infoStep) {
-    case 1: // 期待读取版本 (0xA002 ~ 0xA004) -> 6 字节
-        if (byteCount == 6) {
-            parseVersionData(data);
-            stepHandled = true;
+    if (deviceInfoResponse) {
+        switch (m_infoStep) {
+        case 1: // 期待读取版本 (0xA002 ~ 0xA004) -> 6 字节
+            if (byteCount == 6) {
+                parseVersionData(data);
+                stepHandled = true;
+            }
+            break;
+        case 2: // 期待读取制造厂信息 (0xA005) -> 16 字节
+            if (byteCount == 16) {
+                parseVendorData(data);
+                stepHandled = true;
+            }
+            break;
+        case 3: // 期待读取设备 SN (0xA00D) -> 16 字节
+            if (byteCount == 16) {
+                parseSnData(data);
+                stepHandled = true;
+            }
+            break;
+        case 4: // 期待读取型号编码 (0xA015) -> 2 字节
+            if (byteCount == 2) {
+                parseModelData(data);
+                stepHandled = true;
+            }
+            break;
+        case 5: // 期待读取固件标识串 (0xA016) -> 20 字节
+            if (byteCount == 20) {
+                parseFwStrData(data);
+                stepHandled = true;
+            }
+            break;
+        case 6: // 期待读取硬件标识串 (0xA020) -> 20 字节
+            if (byteCount == 20) {
+                parseHwStrData(data);
+                stepHandled = true;
+            }
+            break;
+        default:
+            break;
         }
-        break;
-    case 2: // 期待读取制造厂信息 (0xA005) -> 16 字节
-        if (byteCount == 16) {
-            parseVendorData(data);
-            stepHandled = true;
-        }
-        break;
-    case 3: // 期待读取设备 SN (0xA00D) -> 16 字节
-        if (byteCount == 16) {
-            parseSnData(data);
-            stepHandled = true;
-        }
-        break;
-    case 4: // 期待读取型号编码 (0xA015) -> 2 字节
-        if (byteCount == 2) {
-            parseModelData(data);
-            stepHandled = true;
-        }
-        break;
-    case 5: // 期待读取固件标识串 (0xA016) -> 20 字节
-        if (byteCount == 20) {
-            parseFwStrData(data);
-            stepHandled = true;
-        }
-        break;
-    case 6: // 期待读取硬件标识串 (0xA020) -> 20 字节
-        if (byteCount == 20) {
-            parseHwStrData(data);
-            stepHandled = true;
-        }
-        break;
-    default:
-        break;
     }
 
     // 如果是由串行单次查询触发并成功处理的，立即步进到下一步
     if (stepHandled) {
         m_infoStep++;
         sendDeviceInfoRequest();
-        if (m_isScanning && m_deviceInfoTimer != nullptr) {
+        if (m_infoStep > 0 && m_infoStep <= 6 && m_deviceInfoTimer != nullptr) {
             m_deviceInfoTimer->start(200); // 重新启动单次超时定时器
         }
         return;
     }
 
     // 处理其余未被步骤绑定的包 (比如定时器单独周期轮询的 0xA02A 程序状态)
-    if (byteCount == 2) {
+    if (targetStatusResponse && byteCount == 2) {
         parseAppStatusData(data);
     }
 }
@@ -218,16 +306,7 @@ void QingjuRfidService::parseStatusData(const QByteArray &data)
     QByteArray uid = data.mid(2, 8);
     m_state.uid = uid;
 
-    // 检查 UID 是否全 0 或空 (即是否有卡)
-    bool hasCard = false;
-    for (int i = 0; i < 8; ++i) {
-        if (static_cast<quint8>(uid.at(i)) != 0) {
-            hasCard = true;
-            break;
-        }
-    }
-
-    if (hasCard) {
+    if (result == 1) {
         m_state.uidText = uid.toHex().toUpper();
         
         // 0xA909 ~ 0xA918: 32 字节加密数据
@@ -235,9 +314,11 @@ void QingjuRfidService::parseStatusData(const QByteArray &data)
         m_state.assetData = assetData;
 
         // 资产信息 ASCII 解析 (前16字节为产品型号(4字节)+供应商(2字节)+流水号(10字节))
-        m_state.assetModel = QString::fromLatin1(assetData.left(4)).trimmed();
-        m_state.assetSupplier = QString::fromLatin1(assetData.mid(4, 2)).trimmed();
-        m_state.assetSerial = QString::fromLatin1(assetData.mid(6, 10)).trimmed();
+        const QByteArray assetUsedData = assetData.left(16);
+        m_state.assetModel = asciiOrHex(assetUsedData.left(4));
+        m_state.assetSupplier = asciiOrHex(assetUsedData.mid(4, 2));
+        m_state.assetSerial = asciiOrHex(assetUsedData.mid(6, 10));
+        m_state.assetFullText = buildAssetDisplayText(assetData);
 
         // 触发一机一密密钥计算与下发
         calculatePassword(uid);
@@ -246,6 +327,7 @@ void QingjuRfidService::parseStatusData(const QByteArray &data)
         m_state.assetModel.clear();
         m_state.assetSupplier.clear();
         m_state.assetSerial.clear();
+        m_state.assetFullText.clear();
         m_state.password = 0;
         m_lastUid.clear();
     }
@@ -366,9 +448,25 @@ void QingjuRfidService::setTargetAddress(quint8 addr)
     emit stateUpdated(m_state);
 }
 
-void QingjuRfidService::queryDeviceInfo()
+void QingjuRfidService::queryDeviceInfo(bool resumeScanAfterInfo)
 {
-    if (!m_isScanning) return;
+    queryDeviceInfo(m_targetAddress, resumeScanAfterInfo, false);
+}
+
+void QingjuRfidService::queryDeviceInfo(quint8 targetAddress, bool resumeScanAfterInfo)
+{
+    queryDeviceInfo(targetAddress, resumeScanAfterInfo, false);
+}
+
+void QingjuRfidService::queryDeviceInfo(quint8 targetAddress, bool resumeScanAfterInfo, bool deviceInfoOnly)
+{
+    if (m_pollTimer != nullptr && m_pollTimer->isActive()) {
+        m_pollTimer->stop();
+    }
+    m_deviceInfoTargetAddress = targetAddress;
+    m_resumeScanAfterDeviceInfo = resumeScanAfterInfo;
+    m_deviceInfoOnlyMode = deviceInfoOnly;
+    m_ignoreStatusUntilMs = deviceInfoOnly ? QDateTime::currentMSecsSinceEpoch() + 1500 : 0;
     m_infoStep = 1;
     sendDeviceInfoRequest();
     if (m_deviceInfoTimer != nullptr) {
@@ -378,42 +476,41 @@ void QingjuRfidService::queryDeviceInfo()
 
 void QingjuRfidService::sendDeviceInfoRequest()
 {
-    if (!m_isScanning) {
-        if (m_deviceInfoTimer != nullptr) m_deviceInfoTimer->stop();
-        m_infoStep = 0;
-        return;
-    }
-
     switch (m_infoStep) {
     case 1:
-        m_canManager->readRegisters(m_targetAddress, 0xA002, 3);
+        m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA002, 3);
         break;
     case 2:
-        m_canManager->readRegisters(m_targetAddress, 0xA005, 8);
+        m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA005, 8);
         break;
     case 3:
-        m_canManager->readRegisters(m_targetAddress, 0xA00D, 8);
+        m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA00D, 8);
         break;
     case 4:
-        m_canManager->readRegisters(m_targetAddress, 0xA015, 1);
+        m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA015, 1);
         break;
     case 5:
-        m_canManager->readRegisters(m_targetAddress, 0xA016, 10);
+        m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA016, 10);
         break;
     case 6:
-        m_canManager->readRegisters(m_targetAddress, 0xA020, 10);
+        m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA020, 10);
         break;
     default:
         if (m_deviceInfoTimer != nullptr) m_deviceInfoTimer->stop();
         m_infoStep = 0;
-        startPollingOrSingleQuery();
+        if (m_deviceInfoOnlyMode) {
+            m_ignoreStatusUntilMs = QDateTime::currentMSecsSinceEpoch() + 800;
+            m_deviceInfoOnlyMode = false;
+        }
+        if (m_isScanning && m_resumeScanAfterDeviceInfo) {
+            startPollingOrSingleQuery();
+        }
         break;
     }
 }
 
 void QingjuRfidService::onDeviceInfoTimerTimeout()
 {
-    if (!m_isScanning) return;
     m_infoStep++;
     sendDeviceInfoRequest();
     if (m_infoStep > 0 && m_infoStep <= 6) {
