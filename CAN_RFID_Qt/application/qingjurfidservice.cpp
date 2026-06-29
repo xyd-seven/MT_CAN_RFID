@@ -236,8 +236,8 @@ void QingjuRfidService::onModbusPacketReceived(quint8 srcAddr, quint8 destAddr, 
                 stepHandled = true;
             }
             break;
-        case 3: // 期待读取设备 SN (0xA00D) -> 16 字节
-            if (byteCount == 16) {
+        case 3: // 期待读取设备 SN (0xA00D) -> 支持 16 或 26 字节
+            if (byteCount == 16 || byteCount == 26) {
                 parseSnData(data);
                 stepHandled = true;
             }
@@ -368,10 +368,10 @@ void QingjuRfidService::parseVersionData(const QByteArray &data)
 
 void QingjuRfidService::parseSnData(const QByteArray &data)
 {
-    if (data.size() < 16) return;
+    if (data.isEmpty()) return;
     m_state.statusSample = false;
 
-    m_state.devSn = QString::fromLatin1(data.left(16)).trimmed();
+    m_state.devSn = QString::fromLatin1(data).trimmed();
     emit stateUpdated(m_state);
 }
 
@@ -484,7 +484,7 @@ void QingjuRfidService::sendDeviceInfoRequest()
         m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA005, 8);
         break;
     case 3:
-        m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA00D, 8);
+        m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA00D, 13);
         break;
     case 4:
         m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA015, 1);

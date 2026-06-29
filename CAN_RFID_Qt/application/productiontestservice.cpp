@@ -36,7 +36,7 @@ bool ProductionTestService::start(int protocolMode, const QString &sn, const QSt
     }
 
     const QString normalizedSn = sn.trimmed().toUpper();
-    if (!validateSn(normalizedSn, error)) {
+    if (!validateSn(normalizedSn, protocolMode, error)) {
         return false;
     }
 
@@ -293,25 +293,41 @@ ProductionTestState ProductionTestService::state() const
     return m_state;
 }
 
-bool ProductionTestService::validateSn(const QString &sn, QString *error)
+bool ProductionTestService::validateSn(const QString &sn, int protocolMode, QString *error)
 {
     const QString normalizedSn = sn.trimmed().toUpper();
     if (normalizedSn.isEmpty()) {
         if (error != nullptr) *error = QStringLiteral("SN不能为空");
         return false;
     }
-    if (normalizedSn.size() != 16) {
-        if (error != nullptr) *error = QStringLiteral("SN必须为16位");
-        return false;
-    }
-    if (!normalizedSn.startsWith(QStringLiteral("R2A3A0"))) {
-        if (error != nullptr) *error = QStringLiteral("SN前6位必须为R2A3A0");
-        return false;
-    }
-    static const QRegularExpression pattern(QStringLiteral("^[A-Z0-9]{16}$"));
-    if (!pattern.match(normalizedSn).hasMatch()) {
-        if (error != nullptr) *error = QStringLiteral("SN仅支持大写字母和数字");
-        return false;
+    if (protocolMode == 1) { // 青桔协议
+        if (normalizedSn.size() != 25) {
+            if (error != nullptr) *error = QStringLiteral("SN必须为25位");
+            return false;
+        }
+        if (!normalizedSn.startsWith(QStringLiteral("AC020100300202"))) {
+            if (error != nullptr) *error = QStringLiteral("SN前14位必须为AC020100300202");
+            return false;
+        }
+        static const QRegularExpression pattern(QStringLiteral("^[A-Z0-9]{25}$"));
+        if (!pattern.match(normalizedSn).hasMatch()) {
+            if (error != nullptr) *error = QStringLiteral("SN仅支持大写字母和数字");
+            return false;
+        }
+    } else { // 其它（默认美团）
+        if (normalizedSn.size() != 16) {
+            if (error != nullptr) *error = QStringLiteral("SN必须为16位");
+            return false;
+        }
+        if (!normalizedSn.startsWith(QStringLiteral("R2A3A0"))) {
+            if (error != nullptr) *error = QStringLiteral("SN前6位必须为R2A3A0");
+            return false;
+        }
+        static const QRegularExpression pattern(QStringLiteral("^[A-Z0-9]{16}$"));
+        if (!pattern.match(normalizedSn).hasMatch()) {
+            if (error != nullptr) *error = QStringLiteral("SN仅支持大写字母和数字");
+            return false;
+        }
     }
     return true;
 }

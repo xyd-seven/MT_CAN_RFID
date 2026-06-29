@@ -738,14 +738,15 @@ MainWindow::MainWindow(QWidget *parent) :
             productionWritePending = true;
             m_qingjuWritePendingRegister = did;
             bool ok = false;
-            if (did == 0xA00D) { // 写SN (8寄存器/16字节)
-                m_qingjuWritePendingRegCount = 8;
+            if (did == 0xA00D) { // 写SN (动态寄存器个数)
+                const int regCount = (data.size() + 1) / 2;
+                m_qingjuWritePendingRegCount = regCount;
                 QByteArray paddedData = data;
-                if (paddedData.size() < 16) {
-                    paddedData = paddedData.leftJustified(16, ' ');
+                if (paddedData.size() < regCount * 2) {
+                    paddedData = paddedData.leftJustified(regCount * 2, ' ');
                 }
-                QVector<quint16> snRegs(8);
-                for (int i = 0; i < 8; ++i) {
+                QVector<quint16> snRegs(regCount);
+                for (int i = 0; i < regCount; ++i) {
                     snRegs[i] = (static_cast<quint8>(paddedData.at(2 * i)) << 8) | static_cast<quint8>(paddedData.at(2 * i + 1));
                 }
                 ok = qingjuCanManager->writeRegisters(0x0A, 0xA00D, snRegs);
@@ -933,21 +934,21 @@ void MainWindow::setupCompactMainLayout()
     ui->closeDeviceBtn->setText(QStringLiteral("关闭设备"));
 
     layout->addWidget(new QLabel(QStringLiteral("设备类型"), devicePanel), 0, 0);
-    layout->addWidget(ui->deviceTypeCombo, 0, 1, 1, 3);
+    layout->addWidget(ui->deviceTypeCombo, 0, 1);
     layout->addWidget(new QLabel(QStringLiteral("设备索引"), devicePanel), 1, 0);
     layout->addWidget(ui->deviceIndexCombo, 1, 1);
-    layout->addWidget(new QLabel(QStringLiteral("通道"), devicePanel), 1, 2);
-    layout->addWidget(ui->sendPathCombo, 1, 3);
-    layout->addWidget(new QLabel(QStringLiteral("波特率"), devicePanel), 2, 0);
-    layout->addWidget(ui->ABIT1Combo, 2, 1, 1, 3);
-    layout->addWidget(ui->resistanceCheckBox, 3, 0, 1, 4);
-    layout->addWidget(oneClickStartButton, 4, 0, 1, 4);
-    layout->addWidget(canDeviceStatusValue, 5, 0, 1, 4);
-    layout->addWidget(ui->openDeviceBtn, 6, 0, 1, 2);
-    layout->addWidget(ui->initCANBtn, 6, 2, 1, 2);
-    layout->addWidget(ui->StartCANBtn, 7, 0, 1, 2);
-    layout->addWidget(ui->reSetCANBtn, 7, 2);
-    layout->addWidget(ui->closeDeviceBtn, 7, 3);
+    layout->addWidget(new QLabel(QStringLiteral("通道"), devicePanel), 2, 0);
+    layout->addWidget(ui->sendPathCombo, 2, 1);
+    layout->addWidget(new QLabel(QStringLiteral("波特率"), devicePanel), 3, 0);
+    layout->addWidget(ui->ABIT1Combo, 3, 1);
+    layout->addWidget(ui->resistanceCheckBox, 4, 0, 1, 2);
+    layout->addWidget(oneClickStartButton, 5, 0, 1, 2);
+    layout->addWidget(canDeviceStatusValue, 6, 0, 1, 2);
+    layout->addWidget(ui->openDeviceBtn, 7, 0);
+    layout->addWidget(ui->closeDeviceBtn, 7, 1);
+    layout->addWidget(ui->initCANBtn, 8, 0);
+    layout->addWidget(ui->StartCANBtn, 8, 1);
+    layout->addWidget(ui->reSetCANBtn, 9, 0, 1, 2);
 
     // RS485 设备配置面板
     serialDevicePanel = new QWidget(ui->groupBox);
@@ -972,15 +973,15 @@ void MainWindow::setupCompactMainLayout()
     serialStatusLabel->setAlignment(Qt::AlignCenter);
 
     serialLayout->addWidget(new QLabel(QStringLiteral("串口选择"), serialDevicePanel), 0, 0);
-    serialLayout->addWidget(serialPortCombo, 0, 1, 1, 2);
-    serialLayout->addWidget(serialRefreshBtn, 0, 3);
+    serialLayout->addWidget(serialPortCombo, 0, 1);
+    serialLayout->addWidget(serialRefreshBtn, 1, 0);
+    serialLayout->addWidget(serialOpenCloseBtn, 1, 1);
     
-    serialLayout->addWidget(new QLabel(QStringLiteral("波特率"), serialDevicePanel), 1, 0);
-    serialLayout->addWidget(serialBaudRateCombo, 1, 1, 1, 3);
+    serialLayout->addWidget(new QLabel(QStringLiteral("波特率"), serialDevicePanel), 2, 0);
+    serialLayout->addWidget(serialBaudRateCombo, 2, 1);
     
-    serialLayout->addWidget(serialOneClickStartBtn, 2, 0, 1, 4);
-    serialLayout->addWidget(serialStatusLabel, 3, 0, 1, 4);
-    serialLayout->addWidget(serialOpenCloseBtn, 4, 0, 1, 4);
+    serialLayout->addWidget(serialOneClickStartBtn, 3, 0, 1, 2);
+    serialLayout->addWidget(serialStatusLabel, 4, 0, 1, 2);
 
     connect(serialOpenCloseBtn, &QPushButton::clicked, this, &MainWindow::onSerialOpenCloseClicked);
     connect(serialRefreshBtn, &QPushButton::clicked, this, &MainWindow::onSerialRefreshClicked);
@@ -1021,14 +1022,14 @@ void MainWindow::setupCompactMainLayout()
     ui->CANFDaccCheck->setText(QStringLiteral("CANFD加速"));
 
     sendLayout->addWidget(manualSendIdLabel, 0, 0);
-    sendLayout->addWidget(ui->sendIDEdit, 0, 1, 1, 2);
-    sendLayout->addWidget(ui->sendBtn, 0, 3);
+    sendLayout->addWidget(ui->sendIDEdit, 0, 1);
     sendLayout->addWidget(manualSendDataLabel, 1, 0);
-    sendLayout->addWidget(ui->sendDataEdit, 1, 1, 1, 3);
-    sendLayout->addWidget(ui->frameTypeCombo, 2, 0, 1, 2);
-    sendLayout->addWidget(ui->protocolCombo, 2, 2);
-    sendLayout->addWidget(ui->CANFDaccCheck, 2, 3);
-    sendLayout->addWidget(manualSendHintLabel, 3, 0, 1, 4);
+    sendLayout->addWidget(ui->sendDataEdit, 1, 1);
+    sendLayout->addWidget(ui->frameTypeCombo, 2, 0);
+    sendLayout->addWidget(ui->protocolCombo, 2, 1);
+    sendLayout->addWidget(ui->CANFDaccCheck, 3, 0);
+    sendLayout->addWidget(ui->sendBtn, 3, 1);
+    sendLayout->addWidget(manualSendHintLabel, 4, 0, 1, 2);
 
     QVBoxLayout *groupLayout2 = new QVBoxLayout(ui->groupBox_2);
     groupLayout2->setContentsMargins(10, 20, 10, 10);
@@ -1697,7 +1698,18 @@ void MainWindow::updateControlsState()
     if (rfidTabs != nullptr && productionTestTab != nullptr) {
         const int productionIndex = rfidTabs->indexOf(productionTestTab);
         if (productionIndex >= 0) {
-            rfidTabs->setTabEnabled(productionIndex, protocolMode == 0 || productionRunning);
+            const bool enabled = (protocolMode == 0 || protocolMode == 1 || productionRunning);
+            rfidTabs->setTabEnabled(productionIndex, enabled);
+            if (!enabled && rfidTabs->currentIndex() == productionIndex) {
+                rfidTabs->setCurrentIndex(0); // 跳回监控页
+            }
+        }
+    }
+    if (productionSnEdit != nullptr) {
+        if (protocolMode == 1) {
+            productionSnEdit->setPlaceholderText(QStringLiteral("扫码输入25位SN，例如 AC02010030020219022500001"));
+        } else {
+            productionSnEdit->setPlaceholderText(QStringLiteral("扫码输入16位SN，例如 R2A3A02625000001"));
         }
     }
     updateProductionTestPanel(productionTestService.state());
@@ -2611,7 +2623,8 @@ QWidget *MainWindow::createProductionTestTab(QWidget *parent)
             return;
         }
         QString error;
-        if (ProductionTestService::validateSn(text.trimmed().toUpper(), &error)) {
+        const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
+        if (ProductionTestService::validateSn(text.trimmed().toUpper(), protocolMode, &error)) {
             QTimer::singleShot(200, this, [this, text]() {
                 if (!productionTestService.isRunning() &&
                     productionSnEdit != nullptr &&
@@ -6069,8 +6082,10 @@ void MainWindow::processProductionScanText(const QString &text, bool showError)
         return;
     }
     QString error;
-    if (!ProductionTestService::validateSn(sn, &error)) {
-        if (showError || sn.size() >= 16) {
+    const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
+    const int targetSize = (protocolMode == 1) ? 25 : 16;
+    if (!ProductionTestService::validateSn(sn, protocolMode, &error)) {
+        if (showError || sn.size() >= targetSize) {
             appendProductionTestLog(QStringLiteral("扫码SN无效：%1，内容=%2").arg(error, sn));
             if (productionSnEdit != nullptr) {
                 productionSnEdit->setText(sn);

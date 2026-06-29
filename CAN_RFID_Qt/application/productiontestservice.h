@@ -58,7 +58,7 @@ public:
     bool isTestingCard() const;
     ProductionTestState state() const;
 
-    static bool validateSn(const QString &sn, QString *error);
+    static bool validateSn(const QString &sn, int protocolMode, QString *error);
     static bool validateHwVersion(const QString &hwVer, quint16 *versionValue = nullptr, QString *error = nullptr);
     static bool validateMaterialChange(const QString &matChange, quint16 *value = nullptr, QString *error = nullptr);
     static QByteArray snToBytes(const QString &sn);
