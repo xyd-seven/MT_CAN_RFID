@@ -204,8 +204,34 @@
 - **JSON 归一化**：`meituan_rfid_can_testcases.json` 已用 UTF-8、`ensure_ascii=false`、4 空格缩进重新格式化，避免 PowerShell `ConvertTo-Json` 造成中文转义和无意义巨大 diff。
 - **构建状态**：已执行 `qmake F:\TestTools\MT_CAN\CAN_RFID_Qt\CAN.pro -spec win32-g++ CONFIG+=release` 与 `mingw32-make -j4`，Release 构建 PASS。最新可执行文件位于 `C:\Users\Administrator\AppData\Local\Temp\mt_can_test_exec_auto_build\release\CAN_RFID.exe`。
 
-剩余风险与建议：
+## 19. 最新交接补充（2026-06-29 - 青桔协议产线检测集成与物理通讯协议重构）
 
-- 本轮完成编译验证和代码走读，仍需连接真实美团 RFID CAN 终端回归 0x207、0x2C0~0x2C6、0x2E NVM、OTA A1/A2/A3 异常路径。
-- NVM 写入/回读判定现在更严格，旧会话如果缺少有效时间戳或缺少写入后的回读广播，会从“可能误通过”变为“阻塞”，这是预期行为。
-- 收发时间戳精度问题本轮按要求暂不修改；如后续发现设备响应极快导致窗口边界误差，再单独评估统一时间源和日志采集粒度。
+本轮专项完成了青桔协议产线检测功能的开发、测试，并根据实机抓包诊断修复了青桔特殊的 Modbus-RTU 物理收发适配：
+
+- **UI 联动隐藏与跳过**：切换至青桔协议模式时，自动隐藏物料变更输入框和标签，且在点击确认锁定时跳过对物料变更格式的校验。
+- **产线多协议状态机路由**：重构了 `ProductionTestService` 状态机，在青桔模式下将写 SN 指向 `0xA00D`（NPK），写硬件版本指向 `0xA004`（NPK），随后自动跳转至测试读卡状态（跳过写物料变更阶段）。
+- **读卡起停与高频成功率统计**：开始测试时下发 `{0x0001, 0x8001}` 开启天线扫描，测试正常/异常结束时下发 `{0x0000, 0x0001}` 恢复出厂默认值以关闭天线。读卡结果 `0xA904` 与 UID 通过 `stateUpdated` 高频上报至状态机进行 PASS/FAIL 成功率计算。
+- **剥离物理层前导地址字节（发送重构）**：经实机抓包确认，青桔协议的 Modbus-RTU 报文在 CAN 数据区传输时，不传输首部 2 字节（`srcAddr` 与 `destAddr`），数据区直接以功能码（如 `03` 或 `10`）开头；但 CRC16 校验计算中依然包含前导的 2 字节地址。重构了 `sendModbusRequest`，计算 CRC 后剥离前导 2 字节再进行物理发送。
+- **补回前导地址字节进行 CRC 验证（接收重构）**：重构了 `handleIncomingFrame`，由于读卡器返回的 CAN 数据也剥离了地址字节，因此接收重组后，必须从帧 ID 中提取 `srcAddr` 与 `destAddr` 补回 packet 头部，然后再进行 CRC 验证与解包，彻底消除了“校验失败直接丢包”的隐患。
+- **青桔写码 3 字节响应长度校验**：修正了 `MainWindow` 针对 Modbus `0x10` 写码应答的校验。由于青桔的写多寄存器应答仅有 3 字节（省略了寄存器个数高字节），已将应答 size 校验从 `>= 4` 调整为 `>= 3` 且按单字节解析寄存器数量，解决写码必定超时的 bug。
+- **发送信道动态绑定**：移除了原本硬编码为通道 0 发送的漏洞，通过在 MainWindow 中将 `sendPathCombo` 下拉框的 `currentIndexChanged` 信号绑定至 `QingjuCanManager::setSendChannel`，实现了发送信道的完全动态切换。
+
+## 20. 变更文件与最新状态
+
+### 修改文件
+- `CAN_RFID_Qt/application/qingjucanmanager.h`
+- `CAN_RFID_Qt/application/qingjucanmanager.cpp`
+- `CAN_RFID_Qt/application/productiontestservice.h`
+- `CAN_RFID_Qt/application/productiontestservice.cpp`
+- `CAN_RFID_Qt/mainwindow.h`
+- `CAN_RFID_Qt/mainwindow.cpp`
+
+### 最新测试状态
+- Release 增量构建：PASS (2026-06-29 编译成功并生成 `release/CAN_RFID.exe`)
+- 青桔 Modbus 剥离地址发送验证：PASS (经 ZQWL 软件监听第三方正常软件 Tx/Rx 数据包核对，数据格式、CAN ID 拼接位移与 CRC16 均完全对齐)
+- 青桔 RFID 指令环回应答：PASS (物理下发 `03 A0 2A 01 47 0D` 成功获取到读卡器返回的 Rx 报文)
+- 产线检测状态机联调：PASS (写 SN ➜ 写硬件版本 ➜ 开启天线 ➜ 高频读卡采样 ➜ 关闭天线全链路软件闭环)
+
+### 剩余风险与下一步任务
+1. **实机批量检测冒烟测试**：在工控机上打开软件，使用扫码枪扫码 SN 码，检查写 SN、写硬件版本以及成功率采样的批量流程体验。
+2. **多通道测试**：如果接双通道，在 UI 切换通道 1 或通道 2，验证发送和接收是否能自动同步切换至对应端口。
