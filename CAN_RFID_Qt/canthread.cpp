@@ -261,9 +261,15 @@ bool CANThread::reSetCAN()
     if (!isChannelValid(m_channel1) || ZCAN_ResetCAN(m_channel1) != 1) {
         return false;
     }
+    ZCAN_ClearBuffer(m_channel1);
+
     if (m_canNum > 1 && (!isChannelValid(m_channel2) || ZCAN_ResetCAN(m_channel2) != 1)) {
         return false;
     }
+    if (m_canNum > 1) {
+        ZCAN_ClearBuffer(m_channel2);
+    }
+
     resetTimestampBase();
     return true;
 }
@@ -272,6 +278,14 @@ void CANThread::run()
 {
     ZCAN_Receive_Data recvCANData[MaxReceiveFrames];
     ZCAN_ReceiveFD_Data recvCANFDData[MaxReceiveFrames];
+
+    if (isChannelValid(m_channel1)) {
+        ZCAN_ClearBuffer(m_channel1);
+    }
+    if (m_canNum > 1 && isChannelValid(m_channel2)) {
+        ZCAN_ClearBuffer(m_channel2);
+    }
+    resetTimestampBase();
 
     while (!stopped.load()) {
         QVector<CanFrame> parsedFrames;
