@@ -9,6 +9,9 @@
 
 #include "application/rfidservice.h"
 
+struct QingjuNpkState;
+struct RfidState;
+
 struct ProductionTestConfig
 {
     int totalSamples = 100;
@@ -41,12 +44,13 @@ class ProductionTestService : public QObject
 public:
     explicit ProductionTestService(QObject *parent = nullptr);
 
-    bool start(const QString &sn, const QString &hwVer, const QString &matChange, const ProductionTestConfig &config, QString *error);
+    bool start(int protocolMode, const QString &sn, const QString &hwVer, const QString &matChange, const ProductionTestConfig &config, QString *error);
     void stop(const QString &reason);
     void reset();
     void handleWriteFinished(bool success, const QString &message);
     void handleRfidStatus(const RfidState &state);
     void handleRfidTagUpdate(const QString &tag);
+    void handleQingjuStatus(const QingjuNpkState &state);
 
     bool isRunning() const;
     bool isWritingSn() const;
@@ -98,6 +102,7 @@ private:
     bool hasFault(const RfidState &state) const;
 
     Phase m_phase;
+    int m_protocolMode;
     ProductionTestConfig m_config;
     ProductionTestState m_state;
     RfidState m_pendingState;

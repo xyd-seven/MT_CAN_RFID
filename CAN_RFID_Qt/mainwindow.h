@@ -362,8 +362,12 @@ private:
     QLineEdit *productionSnEdit;
     QLineEdit *productionHwVerEdit;
     QLineEdit *productionMatChangeEdit;
+    QLabel *productionMatChangeLabel;
     QPushButton *productionHwVerLockBtn;
     bool productionHwVerLocked;
+    quint16 m_qingjuWritePendingRegister;
+    quint16 m_qingjuWritePendingRegCount;
+    QTimer *productionWriteTimer;
     QLabel *productionResultBanner;
     QLabel *productionStateValue;
     QLabel *productionSnValue;

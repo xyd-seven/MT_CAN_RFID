@@ -1,4 +1,5 @@
 #include "productiontestservice.h"
+#include "application/qingjurfidservice.h"
 
 #include <QRegularExpression>
 
@@ -11,6 +12,7 @@ constexpr int SampleTimeoutMs = 1000;
 ProductionTestService::ProductionTestService(QObject *parent)
     : QObject(parent)
     , m_phase(Phase::Idle)
+    , m_protocolMode(0)
     , m_waitingTagCompletion(false)
     , m_tagWaitTimer(new QTimer(this))
     , m_sampleTimeoutTimer(new QTimer(this))
@@ -24,7 +26,7 @@ ProductionTestService::ProductionTestService(QObject *parent)
     m_state.resultText = QStringLiteral("-");
 }
 
-bool ProductionTestService::start(const QString &sn, const QString &hwVer, const QString &matChange, const ProductionTestConfig &config, QString *error)
+bool ProductionTestService::start(int protocolMode, const QString &sn, const QString &hwVer, const QString &matChange, const ProductionTestConfig &config, QString *error)
 {
     if (isRunning()) {
         if (error != nullptr) {
@@ -43,11 +45,15 @@ bool ProductionTestService::start(const QString &sn, const QString &hwVer, const
         return false;
     }
 
-    const QString trimmedMatChange = matChange.trimmed();
-    if (!validateMaterialChange(trimmedMatChange, nullptr, error)) {
-        return false;
+    QString trimmedMatChange;
+    if (protocolMode == 0) {
+        trimmedMatChange = matChange.trimmed();
+        if (!validateMaterialChange(trimmedMatChange, nullptr, error)) {
+            return false;
+        }
     }
 
+    m_protocolMode = protocolMode;
     m_config = config;
     if (m_config.totalSamples <= 0) {
         m_config.totalSamples = 100;
@@ -73,10 +79,17 @@ bool ProductionTestService::start(const QString &sn, const QString &hwVer, const
     m_waitingTagCompletion = false;
     setPhase(Phase::WritingSn, QStringLiteral("写入SN"));
 
-    emit logMessage(QStringLiteral("产线检测开始 SN=%1 硬件版本=%2 物料变更=%3").arg(normalizedSn).arg(trimmedHwVer).arg(trimmedMatChange));
-    emit scanControlRequested(false);
-    emit logMessage(QStringLiteral("写入SN前停止RFID扫描并清空旧状态"));
-    emit writeSnRequested(SnDid, snToBytes(normalizedSn));
+    if (m_protocolMode == 0) {
+        emit logMessage(QStringLiteral("产线检测开始 SN=%1 硬件版本=%2 物料变更=%3").arg(normalizedSn).arg(trimmedHwVer).arg(trimmedMatChange));
+        emit scanControlRequested(false);
+        emit logMessage(QStringLiteral("写入SN前停止RFID扫描并清空旧状态"));
+        emit writeSnRequested(SnDid, snToBytes(normalizedSn));
+    } else {
+        emit logMessage(QStringLiteral("产线检测开始 SN=%1 硬件版本=%2 (青桔协议)").arg(normalizedSn).arg(trimmedHwVer));
+        emit scanControlRequested(false);
+        emit logMessage(QStringLiteral("写入SN前停止RFID扫描并清空旧状态"));
+        emit writeSnRequested(0xA00D, snToBytes(normalizedSn));
+    }
     emitStateChanged();
     return true;
 }
@@ -128,7 +141,11 @@ void ProductionTestService::handleWriteFinished(bool success, const QString &mes
         data.append(static_cast<char>((hwValue >> 8) & 0xFF));
         data.append(static_cast<char>(hwValue & 0xFF));
         emit logMessage(QStringLiteral("开始写入硬件版本，值=%1").arg(m_state.hwVer));
-        emit writeSnRequested(0xE7E0, data);
+        if (m_protocolMode == 0) {
+            emit writeSnRequested(0xE7E0, data);
+        } else {
+            emit writeSnRequested(0xA004, data);
+        }
     } else if (m_phase == Phase::WritingHwVersion) {
         if (!success) {
             finishTest(false, QStringLiteral("硬件版本写入失败：%1").arg(message));
@@ -136,14 +153,19 @@ void ProductionTestService::handleWriteFinished(bool success, const QString &mes
         }
         emit logMessage(QStringLiteral("硬件版本写入成功：%1").arg(message));
 
-        setPhase(Phase::WritingMaterialChange, QStringLiteral("写入物料变更记录"));
-        quint16 matValue = 0;
-        validateMaterialChange(m_state.matChange, &matValue);
-        QByteArray data;
-        data.append(static_cast<char>((matValue >> 8) & 0xFF));
-        data.append(static_cast<char>(matValue & 0xFF));
-        emit logMessage(QStringLiteral("开始写入物料变更记录，值=%1").arg(m_state.matChange));
-        emit writeSnRequested(0xE7E2, data);
+        if (m_protocolMode == 0) {
+            setPhase(Phase::WritingMaterialChange, QStringLiteral("写入物料变更记录"));
+            quint16 matValue = 0;
+            validateMaterialChange(m_state.matChange, &matValue);
+            QByteArray data;
+            data.append(static_cast<char>((matValue >> 8) & 0xFF));
+            data.append(static_cast<char>(matValue & 0xFF));
+            emit logMessage(QStringLiteral("开始写入物料变更记录，值=%1").arg(m_state.matChange));
+            emit writeSnRequested(0xE7E2, data);
+        } else {
+            // 青桔协议直接进入读卡测试，不写入物料变更记录
+            startTesting();
+        }
     } else if (m_phase == Phase::WritingMaterialChange) {
         if (!success) {
             finishTest(false, QStringLiteral("物料变更记录写入失败：%1").arg(message));
@@ -208,6 +230,41 @@ void ProductionTestService::handleRfidTagUpdate(const QString &tag)
         recordSuccess(tag);
     } else {
         emitStateChanged();
+    }
+}
+
+void ProductionTestService::handleQingjuStatus(const QingjuNpkState &state)
+{
+    if (m_phase != Phase::TestingCard) {
+        return;
+    }
+
+    // 过滤写码开启检测后的首帧/过渡状态（射频寻卡需要物理时间稳定，延迟 150ms 采样）
+    if (QDateTime::currentMSecsSinceEpoch() - m_cardTestStartTime < 150) {
+        return;
+    }
+
+    if (!state.uidText.isEmpty()) {
+        m_lastValidTag = state.uidText;
+        m_state.currentTag = state.uidText;
+    }
+
+    if (state.result == 1) {
+        if (!state.uidText.isEmpty()) {
+            recordSuccess(state.uidText);
+        } else {
+            recordFailure(QStringLiteral("UID为空"));
+        }
+    } else if (state.result == 2) {
+        recordFailure(QStringLiteral("未检测到卡片"));
+    } else if (state.result == 3) {
+        recordFailure(QStringLiteral("读取UID失败"));
+    } else if (state.result == 4) {
+        recordFailure(QStringLiteral("模块锁定(秘钥错误)"));
+    } else if (state.result >= 5 && state.result <= 7) {
+        recordFailure(QStringLiteral("读卡故障码：%1").arg(state.result));
+    } else {
+        recordFailure(state.statusText.isEmpty() ? QStringLiteral("等待检测中") : state.statusText);
     }
 }
 
@@ -382,9 +439,15 @@ void ProductionTestService::startTesting()
     setPhase(Phase::TestingCard, QStringLiteral("读卡测试中"));
     m_cardTestStartTime = QDateTime::currentMSecsSinceEpoch();
     emit scanControlRequested(true);
-    emit logMessage(QStringLiteral("SN写入完成，发送0x207开始检测，开始读卡测试 %1 次，阈值 %2%")
-                        .arg(m_config.totalSamples)
-                        .arg(m_config.passRateThreshold, 0, 'f', 2));
+    if (m_protocolMode == 0) {
+        emit logMessage(QStringLiteral("SN写入完成，发送0x207开始检测，开始读卡测试 %1 次，阈值 %2%")
+                            .arg(m_config.totalSamples)
+                            .arg(m_config.passRateThreshold, 0, 'f', 2));
+    } else {
+        emit logMessage(QStringLiteral("SN写入完成，开始天线扫描，开始读卡测试 %1 次，阈值 %2% (青桔协议)")
+                            .arg(m_config.totalSamples)
+                            .arg(m_config.passRateThreshold, 0, 'f', 2));
+    }
     scheduleSampleTimeout();
 }
 

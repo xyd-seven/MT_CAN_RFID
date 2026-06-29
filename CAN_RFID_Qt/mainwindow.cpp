@@ -252,8 +252,12 @@ MainWindow::MainWindow(QWidget *parent) :
     productionSnEdit(nullptr),
     productionHwVerEdit(nullptr),
     productionMatChangeEdit(nullptr),
+    productionMatChangeLabel(nullptr),
     productionHwVerLockBtn(nullptr),
     productionHwVerLocked(false),
+    m_qingjuWritePendingRegister(0),
+    m_qingjuWritePendingRegCount(0),
+    productionWriteTimer(new QTimer(this)),
     productionResultBanner(nullptr),
     productionStateValue(nullptr),
     productionSnValue(nullptr),
@@ -378,6 +382,13 @@ MainWindow::MainWindow(QWidget *parent) :
     connect(productionScanStableTimer, &QTimer::timeout, this, [this]() {
         processProductionScanText(productionScanBuffer, false);
         productionScanBuffer.clear();
+    });
+    productionWriteTimer->setSingleShot(true);
+    connect(productionWriteTimer, &QTimer::timeout, this, [this]() {
+        productionWritePending = false;
+        productionTestService.handleWriteFinished(false, QStringLiteral("写入设备超时"));
+        appendProductionTestLog(QStringLiteral("超时错误：写入寄存器 0x%1 未收到Modbus 0x10回复")
+            .arg(QString("%1").arg(m_qingjuWritePendingRegister, 4, 16, QChar('0')).toUpper()));
     });
     qApp->installEventFilter(this);
 
@@ -619,6 +630,22 @@ MainWindow::MainWindow(QWidget *parent) :
     connect(qingjuRfidService, &QingjuRfidService::stateUpdated, this, &MainWindow::updateQingjuRfidPanel);
     connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, qingjuOtaService, &QingjuOtaService::handleIncomingModbusPacket);
     connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, this, &MainWindow::handleQjCustomResponse);
+    connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, this, [this](quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload) {
+        if (!productionWritePending || (protocolModeCombo != nullptr && protocolModeCombo->currentIndex() != 1)) {
+            return;
+        }
+        if (srcAddr == 0x0A && destAddr == 0x01 && funcCode == 0x10) {
+            if (payload.size() >= 4) {
+                quint16 startReg = (static_cast<quint8>(payload.at(0)) << 8) | static_cast<quint8>(payload.at(1));
+                quint16 regCount = (static_cast<quint8>(payload.at(2)) << 8) | static_cast<quint8>(payload.at(3));
+                if (startReg == m_qingjuWritePendingRegister && regCount == m_qingjuWritePendingRegCount) {
+                    productionWriteTimer->stop();
+                    productionWritePending = false;
+                    productionTestService.handleWriteFinished(true, QString());
+                }
+            }
+        }
+    });
 
     connect(qingjuOtaService, &QingjuOtaService::otaStateChanged, this, [this](QingjuOtaService::State state, const QString &message) {
         if (appConfig.load().protocolMode == 1) {
@@ -696,10 +723,44 @@ MainWindow::MainWindow(QWidget *parent) :
     });
 
     connect(&productionTestService, &ProductionTestService::writeSnRequested, this, [this](quint16 did, const QByteArray &data) {
-        productionWritePending = true;
-        if (!rfidDiagnosticTransfer.startWriteNonVolatile(did, data)) {
-            productionWritePending = false;
-            productionTestService.handleWriteFinished(false, QStringLiteral("0x2E写入通道忙或请求无效"));
+        const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
+        if (protocolMode == 0) {
+            productionWritePending = true;
+            if (!rfidDiagnosticTransfer.startWriteNonVolatile(did, data)) {
+                productionWritePending = false;
+                productionTestService.handleWriteFinished(false, QStringLiteral("0x2E写入通道忙或请求无效"));
+            }
+        } else {
+            productionWritePending = true;
+            m_qingjuWritePendingRegister = did;
+            bool ok = false;
+            if (did == 0xA00D) { // 写SN (8寄存器/16字节)
+                m_qingjuWritePendingRegCount = 8;
+                QByteArray paddedData = data;
+                if (paddedData.size() < 16) {
+                    paddedData = paddedData.leftJustified(16, ' ');
+                }
+                QVector<quint16> snRegs(8);
+                for (int i = 0; i < 8; ++i) {
+                    snRegs[i] = (static_cast<quint8>(paddedData.at(2 * i)) << 8) | static_cast<quint8>(paddedData.at(2 * i + 1));
+                }
+                ok = qingjuCanManager->writeRegisters(0x0A, 0xA00D, snRegs);
+            } else if (did == 0xA004) { // 写硬件版本 (1寄存器/2字节)
+                m_qingjuWritePendingRegCount = 1;
+                quint16 hwValue = 0;
+                if (data.size() >= 2) {
+                    hwValue = (static_cast<quint8>(data.at(0)) << 8) | static_cast<quint8>(data.at(1));
+                }
+                QVector<quint16> hwRegs = { hwValue };
+                ok = qingjuCanManager->writeRegisters(0x0A, 0xA004, hwRegs);
+            }
+
+            if (ok) {
+                productionWriteTimer->start(1000); // 1000ms 超时
+            } else {
+                productionWritePending = false;
+                productionTestService.handleWriteFinished(false, QStringLiteral("发送写指令失败"));
+            }
         }
     });
     connect(&productionTestService, &ProductionTestService::scanControlRequested, this, &MainWindow::sendProductionScanControl);
@@ -2358,10 +2419,14 @@ QWidget *MainWindow::createProductionTestTab(QWidget *parent)
                 QMessageBox::warning(this, QStringLiteral("格式错误"), error);
                 return;
             }
-            const QString matChange = productionMatChangeEdit->text().trimmed();
-            if (!ProductionTestService::validateMaterialChange(matChange, nullptr, &error)) {
-                QMessageBox::warning(this, QStringLiteral("格式错误"), error);
-                return;
+            const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
+            QString matChange;
+            if (protocolMode == 0) {
+                matChange = productionMatChangeEdit->text().trimmed();
+                if (!ProductionTestService::validateMaterialChange(matChange, nullptr, &error)) {
+                    QMessageBox::warning(this, QStringLiteral("格式错误"), error);
+                    return;
+                }
             }
 
             productionHwVerLocked = true;
@@ -2402,7 +2467,8 @@ QWidget *MainWindow::createProductionTestTab(QWidget *parent)
     inputLayout->addWidget(productionSnEdit, 0, 1, 1, 4);
     inputLayout->addWidget(new QLabel(QStringLiteral("硬件版本"), inputGroup), 1, 0);
     inputLayout->addWidget(productionHwVerEdit, 1, 1);
-    inputLayout->addWidget(new QLabel(QStringLiteral("物料变更"), inputGroup), 1, 2);
+    productionMatChangeLabel = new QLabel(QStringLiteral("物料变更"), inputGroup);
+    inputLayout->addWidget(productionMatChangeLabel, 1, 2);
     inputLayout->addWidget(productionMatChangeEdit, 1, 3);
     inputLayout->addWidget(productionHwVerLockBtn, 1, 4);
     inputLayout->addWidget(new QLabel(QStringLiteral("通过阈值"), inputGroup), 2, 0);
@@ -5764,7 +5830,7 @@ void MainWindow::updateProductionTestPanel(const ProductionTestState &state)
         !stressTestService.stats().running &&
         !isOtaRunning() &&
         protocolModeCombo != nullptr &&
-        protocolModeCombo->currentIndex() == 0;
+        (protocolModeCombo->currentIndex() == 0 || protocolModeCombo->currentIndex() == 1);
     if (productionPassThresholdSpin != nullptr) {
         productionPassThresholdSpin->setEnabled(!running && canStartProduction);
     }
@@ -5832,7 +5898,8 @@ void MainWindow::startProductionTestFromSn(const QString &sn)
     config.passRateThreshold = productionPassThresholdSpin == nullptr ? 95.0 : productionPassThresholdSpin->value();
     const QString hwVer = productionHwVerEdit == nullptr ? QString() : productionHwVerEdit->text().trimmed();
     const QString matChange = productionMatChangeEdit == nullptr ? QString() : productionMatChangeEdit->text().trimmed();
-    if (!productionTestService.start(sn, hwVer, matChange, config, &error)) {
+    const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
+    if (!productionTestService.start(protocolMode, sn, hwVer, matChange, config, &error)) {
         QMessageBox::warning(this, QStringLiteral("格式错误"), error);
         if (productionSnEdit != nullptr) {
             productionSnEdit->setStyleSheet(QStringLiteral("border:1px solid #DC2626;"));
@@ -5928,11 +5995,20 @@ void MainWindow::processProductionScanText(const QString &text, bool showError)
 
 void MainWindow::sendProductionScanControl(bool enabled)
 {
-    rfidScanning = enabled;
-    if (canStarted) {
-        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(enabled));
+    const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
+    if (protocolMode == 0) {
+        rfidScanning = enabled;
+        if (canStarted) {
+            sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(enabled));
+        }
+        updateMeituanTopStatus();
+    } else if (protocolMode == 1) {
+        if (enabled) {
+            qingjuRfidService->startScan(100, 100, 1);
+        } else {
+            qingjuRfidService->stopScan();
+        }
     }
-    updateMeituanTopStatus();
 }
 
 void MainWindow::addCanFrameToList(const CanFrame &frame)
@@ -7360,6 +7436,8 @@ void MainWindow::onProtocolModeChanged(int index)
     }
 
     if (index == 0) { // 美团协议
+        if (productionMatChangeLabel != nullptr) productionMatChangeLabel->show();
+        if (productionMatChangeEdit != nullptr) productionMatChangeEdit->show();
         qingjuRfidService->stopScan();
         updateMeituanTopStatus();
         if (stressStatsStackedWidget != nullptr && mtStressPanel != nullptr) {
@@ -7385,6 +7463,8 @@ void MainWindow::onProtocolModeChanged(int index)
         otaStateValue->setText(otaService.stateText());
         otaMessageValue->setText(otaService.lastMessage().isEmpty() ? QStringLiteral("点击“开始升级”或“查询APP/BOOT”启动") : otaService.lastMessage());
     } else if (index == 1) { // 青桔协议
+        if (productionMatChangeLabel != nullptr) productionMatChangeLabel->hide();
+        if (productionMatChangeEdit != nullptr) productionMatChangeEdit->hide();
         if (rfidStackedWidget != nullptr && qjRfidPanel != nullptr) {
             rfidStackedWidget->setCurrentWidget(qjRfidPanel);
         }
@@ -7511,6 +7591,9 @@ void MainWindow::onProtocolModeChanged(int index)
 
 void MainWindow::updateQingjuRfidPanel(const QingjuNpkState &state)
 {
+    if (productionTestService.isRunning() && protocolModeCombo != nullptr && protocolModeCombo->currentIndex() == 1) {
+        productionTestService.handleQingjuStatus(state);
+    }
     if (qjRfidResultValue != nullptr) {
         qjRfidResultValue->setText(state.statusText.isEmpty() ? "-" : state.statusText);
         if (state.result == 1) {
