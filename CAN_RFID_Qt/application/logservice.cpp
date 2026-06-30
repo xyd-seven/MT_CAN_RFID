@@ -61,15 +61,19 @@ void LogService::setLogDirectory(const QString &directoryPath)
 void LogService::setCanAutoSaveEnabled(bool enabled)
 {
     canAutoSaveEnabled = enabled;
-    if (!canAutoSaveEnabled && canLogFile.isOpen()) {
-        canLogFile.flush();
-        canLogFile.close();
-        pendingCanRows = 0;
-    }
-    if (!canAutoSaveEnabled && serialLogFile.isOpen()) {
-        serialLogFile.flush();
-        serialLogFile.close();
-        pendingSerialRows = 0;
+    if (canAutoSaveEnabled) {
+        autoSaveSessionTime = QDateTime::currentDateTime();
+    } else {
+        if (canLogFile.isOpen()) {
+            canLogFile.flush();
+            canLogFile.close();
+            pendingCanRows = 0;
+        }
+        if (serialLogFile.isOpen()) {
+            serialLogFile.flush();
+            serialLogFile.close();
+            pendingSerialRows = 0;
+        }
     }
 }
 
@@ -188,19 +192,17 @@ void LogService::ensureCanLogOpen()
         return;
     }
 
-    const QDate today = QDate::currentDate();
-    if (canLogFile.isOpen() && canLogDate == today) {
+    if (canLogFile.isOpen()) {
         return;
     }
-    if (canLogFile.isOpen()) {
-        canLogFile.flush();
-        canLogFile.close();
-    }
-    canLogDate = today;
     pendingCanRows = 0;
 
+    if (!autoSaveSessionTime.isValid()) {
+        autoSaveSessionTime = QDateTime::currentDateTime();
+    }
+
     const QString filePath = QDir(logDirectory).filePath(
-        QString("can_%1.txt").arg(today.toString("yyyyMMdd")));
+        QString("can_%1.txt").arg(autoSaveSessionTime.toString("yyyyMMdd_HHmmss")));
     canLogFile.setFileName(filePath);
     const bool existed = QFile::exists(filePath);
     if (!canLogFile.open(QIODevice::Append | QIODevice::Text)) {
@@ -218,19 +220,17 @@ void LogService::ensureSerialLogOpen()
         return;
     }
 
-    const QDate today = QDate::currentDate();
-    if (serialLogFile.isOpen() && serialLogDate == today) {
+    if (serialLogFile.isOpen()) {
         return;
     }
-    if (serialLogFile.isOpen()) {
-        serialLogFile.flush();
-        serialLogFile.close();
-    }
-    serialLogDate = today;
     pendingSerialRows = 0;
 
+    if (!autoSaveSessionTime.isValid()) {
+        autoSaveSessionTime = QDateTime::currentDateTime();
+    }
+
     const QString filePath = QDir(logDirectory).filePath(
-        QString("serial_%1.txt").arg(today.toString("yyyyMMdd")));
+        QString("serial_%1.txt").arg(autoSaveSessionTime.toString("yyyyMMdd_HHmmss")));
     serialLogFile.setFileName(filePath);
     const bool existed = QFile::exists(filePath);
     if (!serialLogFile.open(QIODevice::Append | QIODevice::Text)) {

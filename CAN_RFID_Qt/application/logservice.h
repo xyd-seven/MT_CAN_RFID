@@ -6,6 +6,7 @@
 #include <QByteArray>
 #include <QString>
 #include <QTextStream>
+#include <QDateTime>
 #include "domain/canframe.h"
 
 enum class LogLevel
@@ -40,6 +41,7 @@ private:
 
     QString logDirectory;
     bool canAutoSaveEnabled;
+    QDateTime autoSaveSessionTime;
     QFile runtimeLogFile;
     QFile canLogFile;
     QFile serialLogFile;

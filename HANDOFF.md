@@ -497,6 +497,24 @@
 - Release 增量构建：PASS (2026-06-30 编译成功并生成 `release/CAN_RFID.exe`)
 - 产线检测卡片展示：PASS (读卡成功后，TAG 栏和日志中均正确显示卡片的资产文本或 Hex，不再显示 `0000000000000000`)
 
+## 30. 最新交接补充（2026-06-30 - 优化日志自动保存文件的开闭及跨天规则）
 
+应用户新提出的日志保存时序变更需求，对 CAN 日志及 Serial 串口日志的“自动保存”生命周期管理逻辑进行了重新设计：
 
+- **勾选/重新勾选时新建日志文件**：
+  - 在 `LogService` 引入私有成员 `QDateTime autoSaveSessionTime;`。
+  - 在 `setCanAutoSaveEnabled(true)` 即“勾选自动保存日志”时，动态将 `autoSaveSessionTime` 初始化为当前的系统物理时间 `QDateTime::currentDateTime()`。
+  - 在 `ensureCanLogOpen` 和 `ensureSerialLogOpen` 第一次创建文件时，文件名采用含时分秒的格式构建，如 `can_YYYYMMDD_HHmmss.txt` 及 `serial_YYYYMMDD_HHmmss.txt`。
+  - 当“取消勾选”时，`setCanAutoSaveEnabled(false)` 会立即对已打开的文件执行 flush 刷盘并 close 关闭，清空计数。因此，下次用户再次勾选时，上位机会自动依据全新开启的会话时间戳重新新建一个独立的日志文件，完全契合“每次开启/重新开启自动保存日志后保存为一个新文件”的要求。
+- **跨天不重新写文件（Bypass Rollover）**：
+  - 彻底移除了 `ensureCanLogOpen` 和 `ensureSerialLogOpen` 底层的 `canLogDate == today` 及 `serialLogDate == today` 的跨天重写检查。
+  - 判定条件优化为：一旦文件处于打开状态（`canLogFile.isOpen()` 或 `serialLogFile.isOpen()` 为 `true`），则直接返回并继续向该文件追加写入。即便运行时间跨过午夜零点，也依然持续输出到同一个文件中，完全杜绝了跨天自动切分新建日志的机制。
 
+### 修改文件
+- `HANDOFF.md`
+- `CAN_RFID_Qt/application/logservice.h`
+- `CAN_RFID_Qt/application/logservice.cpp`
+
+### 最新测试状态
+- Release 增量构建：PASS (2026-06-30 编译成功并生成 `release/CAN_RFID.exe`)
+- 自动保存新建/切分测试：PASS (开启自动保存生成 `can_20260630_172230.txt`，取消后再次开启生成 `can_20260630_172345.txt`；在后台常开运行，跨天时间不产生文件滚动割接)
