@@ -244,16 +244,52 @@ void ProductionTestService::handleQingjuStatus(const QingjuNpkState &state)
         return;
     }
 
-    if (!state.uidText.isEmpty()) {
-        m_lastValidTag = state.uidText;
-        m_state.currentTag = state.uidText;
+    // 提取资产数据的前 16 字节
+    QByteArray usedData = state.assetData.left(16);
+    bool isPrintable = true;
+    for (char ch : usedData) {
+        quint8 value = static_cast<quint8>(ch);
+        if (value == 0) {
+            continue;
+        }
+        if (value < 0x20 || value > 0x7E) {
+            isPrintable = false;
+            break;
+        }
+    }
+
+    QString assetText;
+    if (isPrintable && !usedData.isEmpty()) {
+        QString ascii = QString::fromLatin1(usedData).trimmed();
+        for (QChar c : ascii) {
+            if (c != QChar('\0')) {
+                assetText.append(c);
+            }
+        }
+    }
+    if (assetText.isEmpty()) {
+        assetText = QString::fromLatin1(usedData.toHex().toUpper());
+    }
+
+    // 如果资产信息全为 0，视为无效/空白卡片数据
+    bool isAllZeros = true;
+    for (char ch : usedData) {
+        if (static_cast<quint8>(ch) != 0) {
+            isAllZeros = false;
+            break;
+        }
+    }
+
+    if (!isAllZeros) {
+        m_lastValidTag = assetText;
+        m_state.currentTag = assetText;
     }
 
     if (state.result == 1) {
-        if (!state.uidText.isEmpty()) {
-            recordSuccess(state.uidText);
+        if (!isAllZeros) {
+            recordSuccess(assetText);
         } else {
-            recordFailure(QStringLiteral("UID为空"));
+            recordFailure(QStringLiteral("资产信息全为0"));
         }
     } else if (state.result == 2) {
         recordFailure(QStringLiteral("未检测到卡片"));
