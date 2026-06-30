@@ -369,13 +369,17 @@ void QingjuRfidService::parseVersionData(const QByteArray &data)
 void QingjuRfidService::parseSnData(const QByteArray &data)
 {
     m_state.statusSample = false;
-    QString cleanSn;
-    for (char c : data) {
-        if (c != '\0' && c != ' ' && c != '\r' && c != '\n') {
-            cleanSn.append(QChar::fromLatin1(c));
-        }
+    
+    // 遇到 \0 字符时截断，防止读取超长时混入后续寄存器的内容
+    int len = data.indexOf('\0');
+    QByteArray snData = (len >= 0) ? data.left(len) : data;
+    
+    // 限制最大 SN 长度为 16 字节 (8个寄存器)
+    if (snData.size() > 16) {
+        snData = snData.left(16);
     }
-    m_state.devSn = cleanSn;
+
+    m_state.devSn = QString::fromLatin1(snData).trimmed();
     emit stateUpdated(m_state);
 }
 
@@ -488,7 +492,7 @@ void QingjuRfidService::sendDeviceInfoRequest()
         m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA005, 8);
         break;
     case 3:
-        m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA00D, 13);
+        m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA00D, 8);
         break;
     case 4:
         m_canManager->readRegisters(m_deviceInfoTargetAddress, 0xA015, 1);
