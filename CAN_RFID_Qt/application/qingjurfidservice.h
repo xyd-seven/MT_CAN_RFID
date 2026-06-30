@@ -46,6 +46,7 @@ public:
 
     QingjuNpkState state() const { return m_state; }
     bool isScanning() const { return m_isScanning; }
+    int readMode() const { return m_readMode; }
     void setAutoWritePassword(bool enabled);
     bool isAutoWritePassword() const { return m_autoWritePassword; }
     void setTargetAddress(quint8 addr);

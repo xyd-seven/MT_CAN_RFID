@@ -375,3 +375,40 @@
 ### 最新测试状态
 - Release 增量构建：PASS (2026-06-30 编译成功并生成 `release/CAN_RFID.exe`)
 - 10位SN截取与8寄存器对齐：PASS (自动截取最后 10 位并补齐至 16 字节空格对齐，发出 8 寄存器 Modbus 写指令，从机校验接收正常)
+
+## 26. 最新交接补充（2026-06-30 - 4项重点缺陷加固与自适应修复）
+
+本轮针对用户反馈的青桔查询数据显示消失、青桔 OTA 超时中断、青桔发送报文未在 CAN 实时日志显示、以及切换协议后美团 0x207 定时器仍在后台默默发包这 4 项严重影响使用体验的缺陷进行闭环优化：
+
+- **青桔单次查询结果持久留屏（非轮询离线误清理修复）**：
+  - 在 `QingjuRfidService` 中新增公有接口 `readMode()`，向外暴露当前是“自动轮询 (1)”还是“单次查询 (2)”。
+  - 修改 `MainWindow::updateQingjuOnlineStatus` 下的离线定时器清理逻辑：增加 `isPolling` 判定。只有当开启了 `isPolling`（即处于自动周期轮询 `readMode == 1`）并且设备判断离线时，才触发 `clearQingjuRfidPanel` 清空面板；若处于“单次查询（`readMode == 2`）”，则设备不具备高频心跳、不产生高频在线帧，强行保留最后一次点击查出的 UID 和状态数据，彻底解决了数据显示几秒后自动消失的视觉问题。
+- **青桔 OTA 数据传输超时重试保护（抗干扰升级加固）**：
+  - 优化 `QingjuOtaWorker::run` 中的固件数据块（`0x15` 数据包）循环下发段：
+    - 为每个数据块的发送和 `0x16` 响应校验阶段增设了最多 **3 次超时重试重发机制**。
+    - 将数据帧的单次等待响应超时由原来的 3000ms 宽限到 **3500ms**，提供更充足的闪存擦写缓冲。
+    - 每次发生重试时在 UI 及日志区打印高对比度的重试提示信息（如 `数据块 [x/y] 响应超时，正在进行第 z 次重试...`），并在每次重发前留出 200ms 的总线静止消隐延时。
+- **青桔 Modbus 发送报文全量汇入实时 CAN 日志**：
+  - 在 `QingjuCanManager` 中新增信号 `void frameSent(quint32 id, const QByteArray &data, quint8 channel, bool isCanFd)`。
+  - 在底层发送函数 `sendModbusRequest` 成功调用 `sendData` 将分包发送至 ZLG-CAN 驱动后，主动 `emit frameSent(...)` 投递当前发出的完整 CAN 扩展帧信息。
+  - 在 `MainWindow` 的初始化中建立槽连接：当接收到 `qingjuCanManager->frameSent` 时，自动将其转换为 `CanFrame` 实例，并将方向标记为 `Tx`，调用 `addCanFrameToList(frame)`。彻底解决了青桔协议下所有 Modbus 读写指令、分块升级数据、心跳握手包在上位机“CAN 实时日志”界面不显示的问题，实现收发双向透明可见。
+- **协议切换时美团 0x207 心跳包强行静止（多协议串扰预防）**：
+  - 改写 `MainWindow::onProtocolModeChanged(int index)` 的协议切换响应逻辑：
+    - 一旦用户切换到的目标协议不是美团协议（`index != 0`，如切换至青桔或 RS485 协议），立刻检测美团专属的“启用RFID控制 (0x207)”复选框 `rfidControlEnabledCheck` 是否勾选。如果为勾选状态，强制将其 `setChecked(false)` 取消选中。
+    - 显式调用 `rfidControlTimer->stop()` 强行挂起 Meituan RFID 控制定时器。彻底切断了在青桔或其他协议下、由于未手动关闭美团控制导致 0x207 发送定时器一直在后台以 100ms 周期默默发包并污染实时日志文件的逻辑串扰。
+
+### 修改文件
+- `HANDOFF.md`
+- `CAN_RFID_Qt/mainwindow.cpp`
+- `CAN_RFID_Qt/application/qingjurfidservice.h`
+- `CAN_RFID_Qt/application/qingjucanmanager.h`
+- `CAN_RFID_Qt/application/qingjucanmanager.cpp`
+- `CAN_RFID_Qt/application/qingjuotaservice.cpp`
+
+### 最新测试状态
+- Release 增量构建：PASS (2026-06-30 编译成功并生成 `release/CAN_RFID.exe`)
+- 结果持久留屏：PASS (单例查询后数据永久展示，直到下次查询或停止检测，无自动清空)
+- OTA重试机制：PASS (模拟总线高负载丢帧时，超时自动发起重发，且状态栏精确提醒，升级稳定完成)
+- 青桔实时日志：PASS (所有 Tx 扩展帧如进入升级、写数据块、写SN等报文在日志及文本归档中双向显示，完美解析)
+- 0x207定时器挂起：PASS (切换协议后美团控制框自动置空，0x207 彻底停发，日志中再无美团数据干扰)
+

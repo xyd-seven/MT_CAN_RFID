@@ -634,6 +634,18 @@ MainWindow::MainWindow(QWidget *parent) :
     connect(qingjuRfidService, &QingjuRfidService::stateUpdated, this, &MainWindow::updateQingjuRfidPanel);
     connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, qingjuOtaService, &QingjuOtaService::handleIncomingModbusPacket);
     connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, this, &MainWindow::handleQjCustomResponse);
+    connect(qingjuCanManager, &QingjuCanManager::frameSent, this, [this](quint32 id, const QByteArray &data, quint8 channel, bool isCanFd) {
+        CanFrame frame;
+        frame.id = id;
+        frame.channel = channel;
+        frame.data = data;
+        frame.direction = CanFrameDirection::Tx;
+        frame.protocol = isCanFd ? CanFrameProtocol::CanFd : CanFrameProtocol::ClassicCan;
+        frame.extendedFrame = true;
+        frame.remoteFrame = false;
+        frame.hostDateTime = QDateTime::currentDateTime();
+        addCanFrameToList(frame);
+    });
     connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, this, [this](quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload) {
         if (!productionWritePending || (protocolModeCombo != nullptr && protocolModeCombo->currentIndex() != 1)) {
             return;
@@ -5761,7 +5773,8 @@ void MainWindow::updateQingjuOnlineStatus(bool clearOfflineData)
     } else {
         isTargetOffline = !npkOnline;
     }
-    if (clearOfflineData && isTargetOffline &&
+    const bool isPolling = qingjuRfidService != nullptr && qingjuRfidService->readMode() == 1;
+    if (clearOfflineData && isTargetOffline && isPolling &&
         qingjuRfidService != nullptr && qingjuRfidService->isScanning()) {
         clearQingjuRfidPanel();
     }
@@ -7568,6 +7581,15 @@ void MainWindow::onProtocolModeChanged(int index)
     }
     config.protocolMode = index;
     appConfig.save(config);
+
+    if (index != 0) {
+        if (rfidControlEnabledCheck != nullptr && rfidControlEnabledCheck->isChecked()) {
+            rfidControlEnabledCheck->setChecked(false);
+        }
+        if (rfidControlTimer != nullptr) {
+            rfidControlTimer->stop();
+        }
+    }
 
     // 强制关闭所有通道，清理资源，达到物理通道的隔离！
     if (index == 0 || index == 1) { // CAN 模式下，强制停止 485 并关闭串口

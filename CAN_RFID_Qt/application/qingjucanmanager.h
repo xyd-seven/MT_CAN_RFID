@@ -35,6 +35,8 @@ public slots:
 signals:
     // 当收到并重组出完整的 Modbus 包且 CRC 校验通过时触发
     void modbusPacketReceived(quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload);
+    // 当底层发送 CAN 报文时触发，用于实时 CAN 日志的渲染显示
+    void frameSent(quint32 id, const QByteArray &data, quint8 channel, bool isCanFd);
 
 private:
     struct AssemblyBuffer {

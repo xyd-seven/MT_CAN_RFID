@@ -164,6 +164,8 @@ bool QingjuCanManager::sendModbusRequest(quint8 destAddr, quint8 funcCode, const
         quint32 rawId = id.toRawId();
         if (!m_canThread->sendData(rawId, 1, 0, 0, m_channel, frameData.constData(), frameData.size())) {
             success = false;
+        } else {
+            emit frameSent(rawId, frameData, m_channel, false);
         }
 
         // 帧间延时 2ms，防止总线拥堵

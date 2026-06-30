@@ -318,20 +318,38 @@ void QingjuOtaWorker::run()
 
         const QByteArray blockReq = buildOtaPayload(0x15, blockVal);
 
-        // 发送数据块
-        emit transmitModbusRequest(m_targetAddr, 0x45, blockReq, 7);
+        bool blockAcked = false;
+        for (int retry = 0; retry < 3; ++retry) {
+            if (m_abortRequested.load()) {
+                emit statusUpdated(4, "升级已终止", 0);
+                return;
+            }
 
-        // 异常 Case 5: 收到 ECU 重复的数据包
-        if (m_injectConfig.enabled && m_injectConfig.caseMode == 5 && sentBlock == 2 && !dupSent) {
-            dupSent = true;
-            // 稍等并直接重发一次 Block 2
-            QThread::msleep(100);
-            emit statusUpdated(1, "[Case 5 注入] 重发数据块 2 ...", (sentBlock * 90) / totalBlocks + 10);
+            // 发送数据块
             emit transmitModbusRequest(m_targetAddr, 0x45, blockReq, 7);
+
+            // 异常 Case 5: 收到 ECU 重复的数据包
+            if (m_injectConfig.enabled && m_injectConfig.caseMode == 5 && sentBlock == 2 && !dupSent && retry == 0) {
+                dupSent = true;
+                // 稍等并直接重发一次 Block 2
+                QThread::msleep(100);
+                emit statusUpdated(1, "[Case 5 注入] 重发数据块 2 ...", (sentBlock * 90) / totalBlocks + 10);
+                emit transmitModbusRequest(m_targetAddr, 0x45, blockReq, 7);
+            }
+
+            // 等待 0x16 响应 (接收结果)
+            if (waitForResponse(m_targetAddr, 0x45, 0x16, 3500, respPayload)) {
+                blockAcked = true;
+                break;
+            }
+
+            // 超时或应答丢失，触发重试提示
+            QString retryMsg = QString("数据块 [%1/%2] 响应超时，正在进行第 %3 次重试...").arg(sentBlock + 1).arg(totalBlocks).arg(retry + 1);
+            emit statusUpdated(2, retryMsg, (sentBlock * 90) / totalBlocks + 10);
+            QThread::msleep(200); // 间隔 200ms 后进行下一次重试
         }
 
-        // 等待 0x16 响应 (接收结果)
-        if (!waitForResponse(m_targetAddr, 0x45, 0x16, 3000, respPayload)) {
+        if (!blockAcked) {
             emit statusUpdated(5, QString("数据块 [%1] 响应超时: ").arg(sentBlock) + m_lastError, (sentBlock * 90) / totalBlocks + 10);
             return;
         }
