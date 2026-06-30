@@ -125,6 +125,7 @@ private:
     void prepareProductionSnInput();
     void processProductionScanText(const QString &text, bool showError);
     void sendProductionScanControl(bool enabled);
+    bool performQingjuProductionWrite(quint16 did, const QByteArray &data);
     void abortRfidDiagnosticTransferSilently();
     void sendRfidFrame(UINT canId, const QByteArray &payload);
     void logSentRfidFrame(UINT canId, const QByteArray &payload);
@@ -380,6 +381,9 @@ private:
     bool productionHwVerLocked;
     quint16 m_qingjuWritePendingRegister;
     quint16 m_qingjuWritePendingRegCount;
+    int m_productionWriteRetryCount;
+    quint16 m_productionWritePendingDid;
+    QByteArray m_productionWritePendingData;
     QTimer *productionWriteTimer;
     QLabel *productionResultBanner;
     QLabel *productionStateValue;

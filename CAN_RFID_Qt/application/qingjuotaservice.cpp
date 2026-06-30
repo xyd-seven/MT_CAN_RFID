@@ -183,6 +183,10 @@ void QingjuOtaWorker::run()
         return;
     }
 
+    // 指令发送成功后延时 1.5s
+    emit statusUpdated(1, "进入升级模式成功，正在等待从机就绪...", 4);
+    QThread::msleep(1500);
+
     // 异常 Case 4: 升级过程静默超时
     if (m_injectConfig.enabled && m_injectConfig.caseMode == 4) {
         emit statusUpdated(1, "[Case 4 注入] 升级静默开始，等待 6s...", 5);
@@ -238,12 +242,32 @@ void QingjuOtaWorker::run()
 
     const QByteArray reqPayload = buildOtaPayload(0x13, infoVal);
 
-    emit transmitModbusRequest(m_targetAddr, 0x45, reqPayload, 7);
+    bool infoOk = false;
+    for (int retry = 0; retry < 3; ++retry) {
+        if (m_abortRequested.load()) {
+            emit statusUpdated(4, "升级已终止", 0);
+            return;
+        }
 
-    if (!waitForResponse(m_targetAddr, 0x45, 0x14, 2000, respPayload)) {
+        emit transmitModbusRequest(m_targetAddr, 0x45, reqPayload, 7);
+
+        if (waitForResponse(m_targetAddr, 0x45, 0x14, 2000, respPayload)) {
+            infoOk = true;
+            break;
+        }
+
+        // 失败重试时间间隔 500ms
+        emit statusUpdated(1, QString("下发固件基本信息超时，正在进行第 %1 次重试...").arg(retry + 1), 5);
+        QThread::msleep(500);
+    }
+
+    if (!infoOk) {
         emit statusUpdated(5, "固件信息回应超时: " + m_lastError, 5);
         return;
     }
+
+    // 指令发送成功后延时 50ms
+    QThread::msleep(50);
 
     // 检查响应 Value：Status(1Byte) + BlockSize(1Byte) + ReqBlockNo(2Bytes)
     if (respPayload.size() < 4) {
@@ -400,7 +424,7 @@ void QingjuOtaWorker::run()
     QThread::sleep(2); // 延时 2s 等待擦写完成
 
     bool checkOk = false;
-    for (int checkLoop = 0; checkLoop < 20; ++checkLoop) {
+    for (int retry = 0; retry < 3; ++retry) {
         if (m_abortRequested.load()) {
             emit statusUpdated(4, "升级已终止", 0);
             return;
@@ -409,7 +433,12 @@ void QingjuOtaWorker::run()
         // 再次下发 0x13 固件基本信息进行查询
         emit transmitModbusRequest(m_targetAddr, 0x45, reqPayload, 7);
 
-        if (waitForResponse(m_targetAddr, 0x45, 0x14, 1500, respPayload)) {
+        // 第一次响应 50s，后面两次重试 5s 超时
+        int timeoutMs = (retry == 0) ? 50000 : 5000;
+        if (waitForResponse(m_targetAddr, 0x45, 0x14, timeoutMs, respPayload)) {
+            // 指令发送成功后延时 50ms
+            QThread::msleep(50);
+
             if (!respPayload.isEmpty()) {
                 quint8 finalStatus = static_cast<quint8>(respPayload.at(0));
                 if (finalStatus == 0x02) {
@@ -421,7 +450,12 @@ void QingjuOtaWorker::run()
                 }
             }
         }
-        QThread::msleep(500);
+
+        // 失败重试时间间隔为 500ms
+        if (retry < 2) {
+            emit statusUpdated(3, QString("等待最终升级确认超时，正在进行第 %1 次重试...").arg(retry + 1), 93 + retry);
+            QThread::msleep(500);
+        }
     }
 
     if (checkOk) {

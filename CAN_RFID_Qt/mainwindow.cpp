@@ -258,6 +258,9 @@ MainWindow::MainWindow(QWidget *parent) :
     productionHwVerLocked(false),
     m_qingjuWritePendingRegister(0),
     m_qingjuWritePendingRegCount(0),
+    m_productionWriteRetryCount(0),
+    m_productionWritePendingDid(0),
+    m_productionWritePendingData(),
     productionWriteTimer(new QTimer(this)),
     productionResultBanner(nullptr),
     productionStateValue(nullptr),
@@ -387,6 +390,19 @@ MainWindow::MainWindow(QWidget *parent) :
     });
     productionWriteTimer->setSingleShot(true);
     connect(productionWriteTimer, &QTimer::timeout, this, [this]() {
+        const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
+        if (protocolMode == 1 && m_productionWriteRetryCount < 2) {
+            m_productionWriteRetryCount++;
+            appendProductionTestLog(QStringLiteral("写入寄存器 0x%1 超时，进行第 %2 次重试...")
+                .arg(QString("%1").arg(m_qingjuWritePendingRegister, 4, 16, QChar('0')).toUpper())
+                .arg(m_productionWriteRetryCount));
+            bool ok = performQingjuProductionWrite(m_productionWritePendingDid, m_productionWritePendingData);
+            if (ok) {
+                productionWriteTimer->start(1000); // 1000ms 超时
+                return;
+            }
+        }
+
         productionWritePending = false;
         productionTestService.handleWriteFinished(false, QStringLiteral("写入设备超时"));
         appendProductionTestLog(QStringLiteral("超时错误：写入寄存器 0x%1 未收到Modbus 0x10回复")
@@ -748,33 +764,10 @@ MainWindow::MainWindow(QWidget *parent) :
             }
         } else {
             productionWritePending = true;
-            m_qingjuWritePendingRegister = did;
-            bool ok = false;
-            if (did == 0xA00D) { // 写SN (固定8个寄存器，且只写入最后10位)
-                QByteArray actualData = data;
-                if (actualData.size() > 10) {
-                    actualData = actualData.right(10);
-                }
-                const int regCount = 8; // 固定为 8 个寄存器 (16 字节)
-                m_qingjuWritePendingRegCount = regCount;
-                QByteArray paddedData = actualData;
-                if (paddedData.size() < regCount * 2) {
-                    paddedData = paddedData.leftJustified(regCount * 2, ' ');
-                }
-                QVector<quint16> snRegs(regCount);
-                for (int i = 0; i < regCount; ++i) {
-                    snRegs[i] = (static_cast<quint8>(paddedData.at(2 * i)) << 8) | static_cast<quint8>(paddedData.at(2 * i + 1));
-                }
-                ok = qingjuCanManager->writeRegisters(0x0A, 0xA00D, snRegs);
-            } else if (did == 0xA004) { // 写硬件版本 (1寄存器/2字节)
-                m_qingjuWritePendingRegCount = 1;
-                quint16 hwValue = 0;
-                if (data.size() >= 2) {
-                    hwValue = (static_cast<quint8>(data.at(0)) << 8) | static_cast<quint8>(data.at(1));
-                }
-                QVector<quint16> hwRegs = { hwValue };
-                ok = qingjuCanManager->writeRegisters(0x0A, 0xA004, hwRegs);
-            }
+            m_productionWriteRetryCount = 0;
+            m_productionWritePendingDid = did;
+            m_productionWritePendingData = data;
+            bool ok = performQingjuProductionWrite(did, data);
 
             if (ok) {
                 productionWriteTimer->start(1000); // 1000ms 超时
@@ -6152,6 +6145,38 @@ void MainWindow::sendProductionScanControl(bool enabled)
             qingjuRfidService->stopScan();
         }
     }
+}
+
+bool MainWindow::performQingjuProductionWrite(quint16 did, const QByteArray &data)
+{
+    m_qingjuWritePendingRegister = did;
+    bool ok = false;
+    if (did == 0xA00D) { // 写SN (固定8个寄存器，且只写入最后10位)
+        QByteArray actualData = data;
+        if (actualData.size() > 10) {
+            actualData = actualData.right(10);
+        }
+        const int regCount = 8; // 固定为 8 个寄存器 (16 字节)
+        m_qingjuWritePendingRegCount = regCount;
+        QByteArray paddedData = actualData;
+        if (paddedData.size() < regCount * 2) {
+            paddedData = paddedData.leftJustified(regCount * 2, ' ');
+        }
+        QVector<quint16> snRegs(regCount);
+        for (int i = 0; i < regCount; ++i) {
+            snRegs[i] = (static_cast<quint8>(paddedData.at(2 * i)) << 8) | static_cast<quint8>(paddedData.at(2 * i + 1));
+        }
+        ok = qingjuCanManager->writeRegisters(0x0A, 0xA00D, snRegs);
+    } else if (did == 0xA004) { // 写硬件版本 (1寄存器/2字节)
+        m_qingjuWritePendingRegCount = 1;
+        quint16 hwValue = 0;
+        if (data.size() >= 2) {
+            hwValue = (static_cast<quint8>(data.at(0)) << 8) | static_cast<quint8>(data.at(1));
+        }
+        QVector<quint16> hwRegs = { hwValue };
+        ok = qingjuCanManager->writeRegisters(0x0A, 0xA004, hwRegs);
+    }
+    return ok;
 }
 
 void MainWindow::addCanFrameToList(const CanFrame &frame)
