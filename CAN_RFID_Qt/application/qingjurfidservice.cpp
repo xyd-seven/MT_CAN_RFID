@@ -368,10 +368,14 @@ void QingjuRfidService::parseVersionData(const QByteArray &data)
 
 void QingjuRfidService::parseSnData(const QByteArray &data)
 {
-    if (data.isEmpty()) return;
     m_state.statusSample = false;
-
-    m_state.devSn = QString::fromLatin1(data).trimmed();
+    QString cleanSn;
+    for (char c : data) {
+        if (c != '\0' && c != ' ' && c != '\r' && c != '\n') {
+            cleanSn.append(QChar::fromLatin1(c));
+        }
+    }
+    m_state.devSn = cleanSn;
     emit stateUpdated(m_state);
 }
 

@@ -261,6 +261,7 @@ MainWindow::MainWindow(QWidget *parent) :
     m_productionWriteRetryCount(0),
     m_productionWritePendingDid(0),
     m_productionWritePendingData(),
+    m_qingjuVerifySnPending(false),
     productionWriteTimer(new QTimer(this)),
     productionResultBanner(nullptr),
     productionStateValue(nullptr),
@@ -391,21 +392,31 @@ MainWindow::MainWindow(QWidget *parent) :
     productionWriteTimer->setSingleShot(true);
     connect(productionWriteTimer, &QTimer::timeout, this, [this]() {
         const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
-        if (protocolMode == 1 && m_productionWriteRetryCount < 2) {
-            m_productionWriteRetryCount++;
-            appendProductionTestLog(QStringLiteral("写入寄存器 0x%1 超时，进行第 %2 次重试...")
-                .arg(QString("%1").arg(m_qingjuWritePendingRegister, 4, 16, QChar('0')).toUpper())
-                .arg(m_productionWriteRetryCount));
-            bool ok = performQingjuProductionWrite(m_productionWritePendingDid, m_productionWritePendingData);
-            if (ok) {
-                productionWriteTimer->start(1000); // 1000ms 超时
+        if (protocolMode == 1) {
+            if (m_qingjuVerifySnPending) {
+                m_qingjuVerifySnPending = false;
+                productionWritePending = false;
+                productionTestService.handleWriteFinished(false, QStringLiteral("读取校验超时"));
+                appendProductionTestLog(QStringLiteral("超时错误：读取寄存器 0x%1 进行SN校验超时")
+                    .arg(QString("%1").arg(0xA00D, 4, 16, QChar('0')).toUpper()));
                 return;
+            } else if (m_productionWriteRetryCount < 2) {
+                m_productionWriteRetryCount++;
+                appendProductionTestLog(QStringLiteral("写入寄存器 0x%1 超时，进行第 %2 次重试...")
+                    .arg(QString("%1").arg(m_qingjuWritePendingRegister, 4, 16, QChar('0')).toUpper())
+                    .arg(m_productionWriteRetryCount));
+                bool ok = performQingjuProductionWrite(m_productionWritePendingDid, m_productionWritePendingData);
+                if (ok) {
+                    productionWriteTimer->start(1000); // 1000ms 超时
+                    return;
+                }
             }
         }
 
+        m_qingjuVerifySnPending = false;
         productionWritePending = false;
         productionTestService.handleWriteFinished(false, QStringLiteral("写入设备超时"));
-        appendProductionTestLog(QStringLiteral("超时错误：写入寄存器 0x%1 未收到Modbus 0x10回复")
+        appendProductionTestLog(QStringLiteral("超时错误：写入寄存器 0x%1 未收到Modbus 0x10/0x90回复")
             .arg(QString("%1").arg(m_qingjuWritePendingRegister, 4, 16, QChar('0')).toUpper()));
     });
     qApp->installEventFilter(this);
@@ -666,14 +677,72 @@ MainWindow::MainWindow(QWidget *parent) :
         if (!productionWritePending || (protocolModeCombo != nullptr && protocolModeCombo->currentIndex() != 1)) {
             return;
         }
-        if (srcAddr == 0x0A && destAddr == 0x01 && funcCode == 0x10) {
-            if (payload.size() >= 3) {
-                quint16 startReg = (static_cast<quint8>(payload.at(0)) << 8) | static_cast<quint8>(payload.at(1));
-                quint16 regCount = static_cast<quint8>(payload.at(2));
-                if (startReg == m_qingjuWritePendingRegister && regCount == m_qingjuWritePendingRegCount) {
+
+        if (srcAddr == 0x0A && destAddr == 0x01) {
+            if (m_qingjuVerifySnPending) {
+                // 阶段 2：校验从机读回的 SN
+                if (funcCode == 0x03 && payload.size() == 17 && static_cast<quint8>(payload.at(0)) == 16) {
+                    QByteArray rawSn = payload.mid(1);
+                    QString readSn;
+                    for (int i = 0; i < rawSn.size(); ++i) {
+                        char c = rawSn.at(i);
+                        if (c != '\0' && c != ' ' && c != '\r' && c != '\n') {
+                            readSn.append(QChar::fromLatin1(c));
+                         }
+                    }
+
+                    QByteArray expectedBytes = m_productionWritePendingData;
+                    if (expectedBytes.size() > 10) {
+                        expectedBytes = expectedBytes.right(10);
+                    }
+                    if (expectedBytes.size() == 10) {
+                        expectedBytes = expectedBytes.left(5) + "0" + expectedBytes.mid(5);
+                    }
+                    QString expectedSn = QString::fromLatin1(expectedBytes);
+
                     productionWriteTimer->stop();
+                    m_qingjuVerifySnPending = false;
                     productionWritePending = false;
-                    productionTestService.handleWriteFinished(true, QString());
+
+                    if (readSn == expectedSn) {
+                        appendProductionTestLog(QStringLiteral("SN回读校验一致（回读值：%1），SN写入成功！").arg(readSn));
+                        productionTestService.handleWriteFinished(true, QString());
+                    } else {
+                        appendProductionTestLog(QStringLiteral("SN校验失败！期望值=%1，回读值=%2").arg(expectedSn).arg(readSn));
+                        productionTestService.handleWriteFinished(false, QStringLiteral("SN校验不一致"));
+                    }
+                }
+            } else {
+                // 阶段 1：处理写入应答
+                bool isWriteSn = (m_qingjuWritePendingRegister == 0xA00D);
+                bool isSnAckOk = false;
+
+                if (funcCode == 0x10 && payload.size() >= 3) {
+                    quint16 startReg = (static_cast<quint8>(payload.at(0)) << 8) | static_cast<quint8>(payload.at(1));
+                    quint16 regCount = static_cast<quint8>(payload.at(2));
+                    if (startReg == m_qingjuWritePendingRegister && regCount == m_qingjuWritePendingRegCount) {
+                        isSnAckOk = true;
+                    }
+                } else if (funcCode == 0x90 && isWriteSn && payload.size() >= 1 && static_cast<quint8>(payload.at(0)) == 0x02) {
+                    // 兼容设备固件 Bug，即便报错 0x90 0x02 也视为写指令已接收，转入下一步读取校验
+                    isSnAckOk = true;
+                    appendProductionTestLog(QStringLiteral("写入SN收到从机异常码0x02（物理写入已完成），触发回读校验..."));
+                }
+
+                if (isSnAckOk) {
+                    productionWriteTimer->stop();
+                    if (isWriteSn) {
+                        // 写 SN 开始进入回读校验阶段
+                        m_qingjuVerifySnPending = true;
+                        appendProductionTestLog(QStringLiteral("下发读SN指令进行最终写入校验..."));
+                        QThread::msleep(50); // 延时 50ms 避开从机 Flash 物理擦写期
+                        qingjuCanManager->readRegisters(0x0A, 0xA00D, 8);
+                        productionWriteTimer->start(1500); // 读校验超时设为 1.5s
+                    } else {
+                        // 写其它寄存器（如硬件版本 0xA004）直接成功
+                        productionWritePending = false;
+                        productionTestService.handleWriteFinished(true, QString());
+                    }
                 }
             }
         }
@@ -767,6 +836,7 @@ MainWindow::MainWindow(QWidget *parent) :
             m_productionWriteRetryCount = 0;
             m_productionWritePendingDid = did;
             m_productionWritePendingData = data;
+            m_qingjuVerifySnPending = false;
             bool ok = performQingjuProductionWrite(did, data);
 
             if (ok) {
@@ -6151,10 +6221,13 @@ bool MainWindow::performQingjuProductionWrite(quint16 did, const QByteArray &dat
 {
     m_qingjuWritePendingRegister = did;
     bool ok = false;
-    if (did == 0xA00D) { // 写SN (固定8个寄存器，且只写入最后10位)
+    if (did == 0xA00D) { // 写SN (固定8个寄存器，截取后10位并在第5位后添加'0')
         QByteArray actualData = data;
         if (actualData.size() > 10) {
             actualData = actualData.right(10);
+        }
+        if (actualData.size() == 10) {
+            actualData = actualData.left(5) + "0" + actualData.mid(5);
         }
         const int regCount = 8; // 固定为 8 个寄存器 (16 字节)
         m_qingjuWritePendingRegCount = regCount;
@@ -7886,25 +7959,25 @@ void MainWindow::updateQingjuRfidPanel(const QingjuNpkState &state)
         qjRfidAssetFullValue->setToolTip(state.assetFullText);
     }
     if (qjRfidSnValue != nullptr) {
-        if (!state.devSn.isEmpty()) qjRfidSnValue->setText(state.devSn);
+        qjRfidSnValue->setText(state.devSn.isEmpty() ? "-" : state.devSn);
     }
     if (qjRfidFirmwareVerValue != nullptr) {
-        if (!state.firmwareVer.isEmpty()) qjRfidFirmwareVerValue->setText(state.firmwareVer);
+        qjRfidFirmwareVerValue->setText(state.firmwareVer.isEmpty() ? "-" : state.firmwareVer);
     }
     if (qjRfidHardwareVerValue != nullptr) {
-        if (!state.hardwareVer.isEmpty()) qjRfidHardwareVerValue->setText(state.hardwareVer);
+        qjRfidHardwareVerValue->setText(state.hardwareVer.isEmpty() ? "-" : state.hardwareVer);
     }
     if (qjRfidVendorValue != nullptr) {
-        if (!state.vendorInfo.isEmpty()) qjRfidVendorValue->setText(state.vendorInfo);
+        qjRfidVendorValue->setText(state.vendorInfo.isEmpty() ? "-" : state.vendorInfo);
     }
     if (qjRfidModelCodeValue != nullptr) {
-        if (!state.modelCodeText.isEmpty()) qjRfidModelCodeValue->setText(state.modelCodeText);
+        qjRfidModelCodeValue->setText(state.modelCodeText.isEmpty() ? "-" : state.modelCodeText);
     }
     if (qjRfidFwStrValue != nullptr) {
-        if (!state.fwVersionStr.isEmpty()) qjRfidFwStrValue->setText(state.fwVersionStr);
+        qjRfidFwStrValue->setText(state.fwVersionStr.isEmpty() ? "-" : state.fwVersionStr);
     }
     if (qjRfidHwStrValue != nullptr) {
-        if (!state.hwVersionStr.isEmpty()) qjRfidHwStrValue->setText(state.hwVersionStr);
+        qjRfidHwStrValue->setText(state.hwVersionStr.isEmpty() ? "-" : state.hwVersionStr);
     }
     if (stressTestService.handleQingjuState(state)) {
         updateStressTestPanel(stressTestService.stats());

@@ -384,6 +384,7 @@ private:
     int m_productionWriteRetryCount;
     quint16 m_productionWritePendingDid;
     QByteArray m_productionWritePendingData;
+    bool m_qingjuVerifySnPending;
     QTimer *productionWriteTimer;
     QLabel *productionResultBanner;
     QLabel *productionStateValue;
