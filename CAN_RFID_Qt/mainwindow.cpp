@@ -738,10 +738,14 @@ MainWindow::MainWindow(QWidget *parent) :
             productionWritePending = true;
             m_qingjuWritePendingRegister = did;
             bool ok = false;
-            if (did == 0xA00D) { // 写SN (动态寄存器个数)
-                const int regCount = (data.size() + 1) / 2;
+            if (did == 0xA00D) { // 写SN (固定8个寄存器，且只写入最后10位)
+                QByteArray actualData = data;
+                if (actualData.size() > 10) {
+                    actualData = actualData.right(10);
+                }
+                const int regCount = 8; // 固定为 8 个寄存器 (16 字节)
                 m_qingjuWritePendingRegCount = regCount;
-                QByteArray paddedData = data;
+                QByteArray paddedData = actualData;
                 if (paddedData.size() < regCount * 2) {
                     paddedData = paddedData.leftJustified(regCount * 2, ' ');
                 }
