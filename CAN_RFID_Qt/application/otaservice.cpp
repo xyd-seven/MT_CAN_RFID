@@ -532,7 +532,53 @@ void OtaWorker::run()
         }
 
         if (!startOk) {
+            if (injectConfig.enabled && injectConfig.queryLocationAfterA1Reject) {
+                QThread::msleep(500);
+                QByteArray e4Resp;
+                if (sendSingleFrame(0xA4) &&
+                    waitForResponse(0xE4, OtaA4ResponseTimeoutMs, e4Resp) &&
+                    e4Resp.size() >= 2) {
+                    const quint8 location = static_cast<quint8>(e4Resp[1]);
+                    const QString locationText = location == 0x00 ? QStringLiteral("BOOT") : QStringLiteral("APP");
+                    const QString expectedText = injectConfig.expectedProgramLocationAfterA1Reject == 0x00
+                        ? QStringLiteral("BOOT")
+                        : QStringLiteral("APP");
+                    if (location == injectConfig.expectedProgramLocationAfterA1Reject) {
+                        lastError += QStringLiteral("；拒绝后 A4 查询确认停留 %1").arg(locationText);
+                    } else {
+                        lastError += QStringLiteral("；拒绝后 A4 查询为 %1，期望 %2").arg(locationText, expectedText);
+                    }
+                } else {
+                    lastError += QStringLiteral("；拒绝后 A4 查询失败");
+                }
+            }
             updateStatus(static_cast<int>(OtaService::State::Failed), QStringLiteral("升级启动请求失败: ") + lastError, 10);
+            return;
+        }
+        if (injectConfig.enabled && injectConfig.stopAfterA1Accepted) {
+            QThread::msleep(500);
+            QByteArray e4Resp;
+            const quint8 expectedLocation = injectConfig.expectedProgramLocationAfterA1Accepted;
+            if (sendSingleFrame(0xA4) &&
+                waitForResponse(0xE4, OtaA4ResponseTimeoutMs, e4Resp) &&
+                e4Resp.size() >= 2) {
+                const quint8 location = static_cast<quint8>(e4Resp[1]);
+                const QString locationText = location == 0x00 ? QStringLiteral("BOOT") : QStringLiteral("APP");
+                if (expectedLocation == 0xFF || location == expectedLocation) {
+                    updateStatus(static_cast<int>(OtaService::State::Completed),
+                                 QStringLiteral("A1 合法请求已通过，A4 查询确认设备处于 %1。").arg(locationText),
+                                 20);
+                } else {
+                    const QString expectedText = expectedLocation == 0x00 ? QStringLiteral("BOOT") : QStringLiteral("APP");
+                    updateStatus(static_cast<int>(OtaService::State::Failed),
+                                 QStringLiteral("A1 合法请求已通过，但 A4 查询为 %1，期望 %2。").arg(locationText, expectedText),
+                                 20);
+                }
+                return;
+            }
+            updateStatus(static_cast<int>(OtaService::State::Failed),
+                         QStringLiteral("A1 合法请求已通过，但 A4 查询程序位置失败。"),
+                         20);
             return;
         }
         chunkSize = negotiatedChunkSize; // 导出协商包大小到外部变量
@@ -551,8 +597,21 @@ send_data_phase:
             return;
         }
 
-        if (injectConfig.enabled && injectConfig.silentTimeout && i >= totalChunks / 2) {
-            updateStatus(static_cast<int>(OtaService::State::Failed), QStringLiteral("[注入] 中途静默超时已触发"), 50);
+        if (injectConfig.enabled && injectConfig.silentTimeout && i >= 1) {
+            QThread::msleep(500);
+            QByteArray e4Resp;
+            if (sendSingleFrame(0xA4) &&
+                waitForResponse(0xE4, OtaA4ResponseTimeoutMs, e4Resp) &&
+                e4Resp.size() >= 2 &&
+                static_cast<quint8>(e4Resp[1]) == 0x00) {
+                updateStatus(static_cast<int>(OtaService::State::Failed),
+                             QStringLiteral("[注入] 中途静默超时已触发，A4 查询确认设备停留 BOOT。"),
+                             50);
+            } else {
+                updateStatus(static_cast<int>(OtaService::State::Failed),
+                             QStringLiteral("[注入] 中途静默超时已触发，但 A4 查询未确认设备停留 BOOT。"),
+                             50);
+            }
             return;
         }
 
@@ -621,6 +680,53 @@ send_data_phase:
 
         int progressPercent = 15 + ((i + 1) * 80 / totalChunks); // 15% 到 95%
         updateStatus(static_cast<int>(OtaService::State::SendData), QStringLiteral("已写入包 %1/%2").arg(chunkId).arg(totalChunks), progressPercent);
+        if (injectConfig.enabled && injectConfig.abortAfterFirstA2Success && i == 0) {
+            updateStatus(static_cast<int>(OtaService::State::SendData),
+                         QStringLiteral("[测试] A2 首包写入成功，发送 A3 02 中止升级并查询程序位置..."),
+                         progressPercent);
+            sendSingleFrame(0xA3, QByteArray(1, 0x02));
+            QThread::msleep(500);
+            QByteArray e4Resp;
+            if (sendSingleFrame(0xA4) &&
+                waitForResponse(0xE4, OtaA4ResponseTimeoutMs, e4Resp) &&
+                e4Resp.size() >= 2 &&
+                static_cast<quint8>(e4Resp[1]) == 0x00) {
+                updateStatus(static_cast<int>(OtaService::State::Completed),
+                             QStringLiteral("A3 02 中止升级后 A4 查询确认设备保持 BOOT。"),
+                             progressPercent);
+            } else {
+                updateStatus(static_cast<int>(OtaService::State::Failed),
+                             QStringLiteral("A3 02 中止升级后未确认设备保持 BOOT。"),
+                             progressPercent);
+            }
+            return;
+        }
+        if (injectConfig.enabled && injectConfig.stopAfterFirstA2Success && i == 0) {
+            updateStatus(static_cast<int>(OtaService::State::SendData),
+                         QStringLiteral("[测试] A2 首包写入成功，停止继续下发并查询程序位置..."),
+                         progressPercent);
+            QThread::msleep(500);
+            QByteArray e4Resp;
+            if (sendSingleFrame(0xA4) &&
+                waitForResponse(0xE4, OtaA4ResponseTimeoutMs, e4Resp) &&
+                e4Resp.size() >= 2) {
+                const quint8 location = static_cast<quint8>(e4Resp[1]);
+                if (location == 0x00) {
+                    updateStatus(static_cast<int>(OtaService::State::Completed),
+                                 QStringLiteral("A2 首包写入成功，停止升级后设备保持 BOOT。"),
+                                 progressPercent);
+                } else {
+                    updateStatus(static_cast<int>(OtaService::State::Failed),
+                                 QStringLiteral("A2 首包写入成功后停止升级，但设备未保持 BOOT。"),
+                                 progressPercent);
+                }
+                return;
+            }
+            updateStatus(static_cast<int>(OtaService::State::Failed),
+                         QStringLiteral("A2 首包写入成功后查询程序位置失败。"),
+                         progressPercent);
+            return;
+        }
     }
 
     // --- Phase 4: Finish & Verify (结束校验) ---
@@ -649,6 +755,18 @@ send_data_phase:
                         break;
                     } else if (status == 0x01) {
                         lastError = QStringLiteral("固件校验错误 (CRC16 校验失败)");
+                        if (injectConfig.enabled && injectConfig.crcError) {
+                            QThread::msleep(500);
+                            QByteArray e4Resp;
+                            if (sendSingleFrame(0xA4) &&
+                                waitForResponse(0xE4, OtaA4ResponseTimeoutMs, e4Resp) &&
+                                e4Resp.size() >= 2 &&
+                                static_cast<quint8>(e4Resp[1]) == 0x00) {
+                                lastError += QStringLiteral("；A4 查询确认设备停留 BOOT");
+                            } else {
+                                lastError += QStringLiteral("；A4 查询未确认设备停留 BOOT");
+                            }
+                        }
                         break; // 校验失败重试无用
                     } else if (status == 0x02) {
                         lastError = QStringLiteral("设备端升级已中止");
@@ -664,7 +782,28 @@ send_data_phase:
     }
 
     if (finishOk) {
-        updateStatus(static_cast<int>(OtaService::State::Completed), QStringLiteral("固件校验成功，升级完成，设备重启中..."), 100);
+        QByteArray e4Resp;
+        bool locationQueried = false;
+        for (int retry = 0; retry < 2; ++retry) {
+            QThread::msleep(1000);
+            if (sendSingleFrame(0xA4) &&
+                waitForResponse(0xE4, OtaA4ResponseTimeoutMs, e4Resp) &&
+                e4Resp.size() >= 2) {
+                locationQueried = true;
+                break;
+            }
+        }
+        if (locationQueried) {
+            const quint8 location = static_cast<quint8>(e4Resp[1]);
+            const QString locationText = location == 0x00 ? QStringLiteral("BOOT") : QStringLiteral("APP");
+            updateStatus(static_cast<int>(OtaService::State::Completed),
+                         QStringLiteral("固件校验成功，升级完成，A4 查询程序位置：%1。").arg(locationText),
+                         100);
+        } else {
+            updateStatus(static_cast<int>(OtaService::State::Completed),
+                         QStringLiteral("固件校验成功，升级完成，设备重启中；A4 查询暂未收到响应。"),
+                         100);
+        }
     } else {
         updateStatus(static_cast<int>(OtaService::State::Failed), QStringLiteral("升级校验请求失败: ") + lastError, 95);
     }

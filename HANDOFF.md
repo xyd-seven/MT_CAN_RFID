@@ -518,3 +518,226 @@
 ### 最新测试状态
 - Release 增量构建：PASS (2026-06-30 编译成功并生成 `release/CAN_RFID.exe`)
 - 自动保存新建/切分测试：PASS (开启自动保存生成 `can_20260630_172230.txt`，取消后再次开启生成 `can_20260630_172345.txt`；在后台常开运行，跨天时间不产生文件滚动割接)
+
+## 31. 最新交接补充（2026-07-01 - 美团测试执行证据日志与自动化补充）
+
+本轮根据最新软件测试用例审核意见，围绕“测试数据/操作步骤必须有明确输入、证据日志必须能直接佐证用例结论、尽量减少测试人员翻原始帧”的目标，对美团测试执行功能做了收口增强，并完成 Release 编译验证：
+
+- **证据日志结构化增强**：
+  - 用例开始时重新生成正式证据日志，包含用例信息、测试数据、操作步骤、预期结果、人工操作、执行记录、执行步骤摘要、人工事件、发送证据、接收证据、广播证据、判定结论、关键帧和原始日志引用。
+  - 自动执行与半自动执行会把“开始执行、命令是否发送、采集窗口结束、自动/半自动预判完成”等关键节点写入证据日志。
+  - 半自动用例会记录人工确认的前置条件，便于外部晶振异常、OTA 断电等人工参与场景留痕。
+
+- **广播证据简化与可读性优化**：
+  - 广播证据不再只输出“帧数/周期样本/平均/最小/最大”等偏底层统计，而是按“关注 ID、判定说明、周期检查、关键帧、补充采集、说明”的格式输出。
+  - 对 0x2C3~0x2C5 增加前 20 帧和第 20 帧后的周期摘要，便于核对“上电后快发 20 次，之后 10s 周期广播”的协议要求。
+  - 证据完整性判断按用例是否需要发送/接收帧区分，避免纯监听或人工场景被误判为“缺少发送帧”。
+
+- **OTA 证据日志修复**：
+  - `OtaService` 自身发出的 OTA Tx 帧现在也会写入当前用例证据日志，解决 OTA 执行时界面能看到发送帧、证据日志却缺少发送输入的问题。
+  - 新增 `mt.ota_start_upgrade_current_file` 与 `mt.ota_abort_upgrade_command` 通用模板，复用现有 OTA 服务和 `sendRfidFrame` 证据链路，不改 OTA 核心状态机。
+
+- **新增/补充测试用例资源**：
+  - 新增 `MT-RFID-CTRL-006`：外部晶振异常作为独立测试点，半自动采集 0x2C0 故障状态与恢复证据。
+  - 新增 `MT-RFID-OTA-008`：OTA 升级过程中断电，上电后留在 BOOT，再次升级可成功；采用半自动模式启动当前固件升级并记录人工断电/上电过程。
+
+- **实施方案文档**：
+  - 新增 `docs/美团RFID_CAN通信_测试执行自动化与证据日志优化方案_20260701.md`，记录两批修改范围、容错策略、执行模板和风险控制。
+
+- **代码审查与修复补充**：
+  - 新增 `docs/美团RFID_CAN通信_测试执行证据日志代码审查报告_20260701.md`，记录审查范围、发现项、修复项和验证结果。
+  - 统一广播证据中的 CAN ID 展示格式，避免输出 `0X2C0`，改为正式文档常用的 `0x2C0`。
+  - 扩展用例文本检索范围，纳入前置条件、人工提示、半自动提示和关键帧 ID，降低关注广播 ID 漏识别风险。
+  - OTA 半自动辅助用例采集窗口单独放宽，`MT-RFID-OTA-008` 默认等待窗口调整为 120s。
+  - 修正 `MT-RFID-BC-010` 仍使用旧版“只采集 0x2C3 版本帧”的问题，补充 0x2C3 前20帧约200ms和第20帧后约10s周期要求，并将半自动采集窗口调整为 35s。
+  - 同步更新 `MT-RFID-BC-011`：补充 0x2C4/0x2C5 前20帧约100ms和第20帧后约10s周期要求，采集窗口调整为 35s，并在设备 ID 前缀判定通过后继续检查启动周期。
+  - 同步更新 `MT-RFID-DIAG-006`：新增 `mt.sid_0x29_period_config_and_reboot` 自动模板，0x29 配置后自动发送 SID=0x02 重启并采集 0x2C3~0x2C5 启动广播周期；判定服务支持 0x2C3 约200ms、0x2C4/0x2C5 约100ms 的前20帧检查。
+  - 优化【发送证据】摘要：非 0x207 控制类用例中，背景 0x207 周期控制帧只保留数量、数据分布、首帧和末帧摘要；0x207 控制类、半自动 TAG 类和故障控制类用例仍保留相关 0x207 关键发送证据，完整帧统一保留在【原始帧记录】。
+
+### 修改文件
+- `HANDOFF.md`
+- `CAN_RFID_Qt/application/testcaseservice.h`
+- `CAN_RFID_Qt/application/testcaseservice.cpp`
+- `CAN_RFID_Qt/mainwindow.cpp`
+- `CAN_RFID_Qt/resources/testcases/meituan_rfid_can_testcases.json`
+- `docs/美团RFID_CAN通信_测试执行自动化与证据日志优化方案_20260701.md`
+- `docs/美团RFID_CAN通信_测试执行证据日志代码审查报告_20260701.md`
+
+### 最新测试状态
+- JSON 用例资源校验：PASS (`ConvertFrom-Json` 成功，当前内置用例数 81，已包含 `MT-RFID-CTRL-006` 与 `MT-RFID-OTA-008`)
+- Release 构建：PASS (2026-07-01 使用 `D:\QT5.15.2\5.15.2\mingw81_32\bin\qmake.exe` 与 MinGW `mingw32-make -j4` 编译通过)
+- 最新可执行文件：`F:\TestTools\MT_CAN\CAN_RFID_Qt\release\CAN_RFID.exe`
+
+### 剩余风险与建议
+- 证据日志已完成软件侧生成与编译验证，仍需连接真实美团 RFID 模块回归 0x2C3~0x2C5 前 20 帧/10s 周期的实测展示效果。
+- OTA 断电恢复测试涉及人工断电和设备 BOOT 状态确认，日志已支持记录关键输入与人工事件，但最终结论仍需测试人员结合现场过程保存。
+- 当前工作区存在此前遗留的未跟踪文档、协议 PDF 删除和 `testcasejudge.cpp` 修改，本轮未回退这些既有改动；提交/合并前应按实际需求确认纳入范围。
+
+## 32. 最新交接补充（2026-07-01 - 根据测试执行问题总结修正自动化与用例资源）
+
+本轮根据 `docs/测试执行发现问题总结_20260701.md` 和最新正式排版版用例表，对美团测试执行功能做了针对性修正，目标是提升可自动判定用例的覆盖率，同时保持 OTA、外部流控异常等高风险场景的半自动人工确认边界。
+
+- **TAG 与广播类半自动用例可自动通过**：
+  - `MT-RFID-BC-005`、`MT-RFID-BC-007`：半自动 TAG 检测类用例在机器判定采集到 TAG 后，可直接给出通过结论。
+  - `MT-RFID-BC-008`：半自动无 TAG 场景在机器判定 TAG 已清除后，可直接给出通过结论。
+  - `MT-RFID-BC-010`、`MT-RFID-BC-011`：广播启动周期/设备 ID 前缀判定通过后，不再强制降级为人工阻塞。
+
+- **诊断与 NVM 用例修正**：
+  - `MT-RFID-DIAG-006`：0x29 周期配置由默认 100ms 改为非默认 200ms，判定后自动恢复 0x2C0 默认 100ms，避免用默认值验证默认值。
+  - `MT-RFID-DIAG-012`：新增自动执行路径，使用当前 0x2C4/0x2C5 设备 ID 回写 DID=0xE7E1，触发 ISO-TP FF/FC/CF 多帧流控，并新增 `mt.isotp_multiframe_flow` 判定模板。
+  - `MT-RFID-NVM-001`：硬件版本写入改为使用当前 0x2C3 基线值，不再固定期望 `0x0101`；采集窗口放宽到 35s。
+  - `MT-RFID-NVM-002`：设备 ID 写回验证采集窗口放宽到 35s，覆盖 10s 周期广播回读。
+  - `MT-RFID-NVM-003`：连续写入间隔缩短到 10ms，判定从“肯定响应也可通过”改为必须观察忙/拒绝类响应。
+  - `MT-RFID-NVM-007`：保留半自动人工确认，但补充外部 CAN 工具/测试桩注入 FC WAIT、OVERFLOW、无 FC 的正式操作提示和关键帧范围。
+
+- **OTA 用例执行入口同步**：
+  - `MT-RFID-OTA-002` 至 `MT-RFID-OTA-006`：根据最新用例表补充半自动辅助入口、测试数据、操作步骤、预期结果、等待时间和 0x007/0x107 关键帧范围。
+  - 新增 OTA 异常注入执行模板：厂商代码不匹配、硬件版本不匹配、A2 首包数据异常、A3 CRC 错误、A2 静默超时重试。
+  - OTA 异常场景当前仍保留 `mt.manual_review`，由上位机负责触发与留证，最终结论由测试人员结合设备程序状态、断电时刻和恢复结果确认。
+
+- **容错与安全边界**：
+  - 自动 NVM 写入均使用当前已采集设备基线值回写，避免引入新的测试数据破坏风险。
+  - `MT-RFID-DIAG-006` 增加后置恢复命令，减少周期配置对后续用例的串扰。
+  - OTA 自动触发前检查固件路径是否为空、是否为占位符、文件是否存在，条件不满足时直接阻止执行并给出明确提示。
+  - 本轮修正了 `MT-RFID-NVM-007` 提示误落到 `MT-RFID-SVC-001` 的问题，已恢复 SVC-001 原提示。
+
+### 修改文件
+- `HANDOFF.md`
+- `CAN_RFID_Qt/mainwindow.cpp`
+- `CAN_RFID_Qt/application/testcasejudge.cpp`
+- `CAN_RFID_Qt/resources/testcases/meituan_rfid_can_testcases.json`
+
+### 最新测试状态
+- JSON 用例资源校验：PASS（Python `json.load` 成功，当前内置用例数 81）
+- Release 构建：PASS（2026-07-01，在 `F:\TestTools\MT_CAN\CAN_RFID_Qt\release` 使用 qmake 与 `mingw32-make -j4` 编译通过）
+- 最新可执行文件：`F:\TestTools\MT_CAN\CAN_RFID_Qt\release\CAN_RFID.exe`
+
+### 剩余风险与建议
+- OTA 异常注入已具备半自动执行入口，但不同固件包、BOOT/APP 状态和断电时机仍需真实台架回归确认。
+- NVM 忙响应依赖设备对 10ms 连续写入的实际处理，若设备仍串行接受第二笔写入，当前判定会按测试要求判为失败。
+- ISO-TP 多帧自动用例依赖当前设备 ID 已采集；若 0x2C4/0x2C5 尚未出现，执行会被阻止并提示先采集设备 ID。
+
+## 33. 最新交接补充（2026-07-01 - 本轮修改代码走读收口）
+
+根据用户要求对本轮修改再次走读，发现并修正两个低风险但会影响证据可信度的问题：
+
+- **ISO-TP 多帧判定收紧**：
+  - `mt.isotp_multiframe_flow` 原先只按首字节 `0x1x/0x2x/0x3x` 判断 FF/CF/FC，存在被无关 ISO-TP 帧误满足的风险。
+  - 已收紧为：首帧 FF 必须来自 0x007 且包含 `2E E7 E1`，最终响应必须包含 `6E E7 E1` 或 `7F 2E`，从而绑定到 `MT-RFID-DIAG-012` 当前设备 ID 写回场景。
+
+- **OTA 半自动重复启动保护**：
+  - `OtaService::startUpgrade()` 在 worker 运行中会静默返回，原半自动辅助仍可能记录“已启动 OTA”，导致证据日志误导。
+  - 已在测试用例 OTA 辅助入口前检查 `otaService.state()`，当处于查询、启动、发送数据、结束升级阶段时阻止重复启动，并输出明确提示。
+
+### 最新测试状态
+- JSON 用例资源校验：PASS（当前内置用例数 81，无重复 ID）
+- Release 构建：PASS（2026-07-01，`qmake ..\CAN.pro` + `mingw32-make -j4` 编译通过）
+- 最新可执行文件：`F:\TestTools\MT_CAN\CAN_RFID_Qt\release\CAN_RFID.exe`
+
+## 34. 最新交接补充（2026-07-02 - OTA 用例资源按正式排版版同步）
+
+用户反馈测试执行页 OTA 用例仍显示旧版粗粒度列表。经核对 `outputs/美团RFID_CAN通信_软件测试用例_正式排版版_20260701.xlsx`，正式用例已将 OTA 拆分为 `MT-RFID-OTA-001` 至 `MT-RFID-OTA-015`，而内置 JSON 仍只有旧版 `OTA-001` 至 `OTA-008`。本轮已完成同步：
+
+- **OTA 用例列表同步**：
+  - 内置用例总数由 81 条更新为 88 条。
+  - OTA 用例由 8 条更新为 15 条，覆盖：
+    - `OTA-001` 查询当前程序。
+    - `OTA-002` 至 `OTA-007`：A1 升级开始，按 APP/BOOT 状态、厂商代码不匹配、硬件版本号不匹配、合法固件拆分。
+    - `OTA-008` 至 `OTA-009`：A2 首帧数据错误/正确。
+    - `OTA-010` 至 `OTA-011`：A3 CRC 错误/正确。
+    - `OTA-012` 升级中止。
+    - `OTA-013` 超时重试。
+    - `OTA-014` 压力 500 次。
+    - `OTA-015` 升级过程中断电恢复。
+
+- **执行模板补充**：
+  - 新增 APP/BOOT 前置跳转后启动 OTA 的半自动辅助模板：
+    - `mt.semi.ota_app_vendor_mismatch`
+    - `mt.semi.ota_app_hw_mismatch`
+    - `mt.semi.ota_boot_vendor_mismatch`
+    - `mt.semi.ota_boot_hw_mismatch`
+    - `mt.semi.ota_app_start_valid`
+    - `mt.semi.ota_boot_start_valid`
+  - 新增对应自动命令模板，执行时先发送 `SID=0x10` 跳转 APP/BOOT，等待 800ms 后启动 OTA。
+  - 测试用例 OTA 合法流程改为使用确定的空注入配置，不再继承界面 OTA 调试勾选项，避免 UI 残留异常注入污染合法用例。
+
+- **边界处理**：
+  - OTA-014 压力 500 次保留为半自动人工确认，不显示为 auto，避免误导为一键执行 500 次。
+  - OTA 启动前继续检查固件路径是否有效、当前是否已有 OTA 流程运行，异常时阻止执行并提示。
+
+### 最新测试状态
+- JSON 用例资源校验：PASS（当前内置用例数 88，OTA 用例数 15，无重复 ID）
+- Release 构建：PASS（2026-07-02，`qmake ..\CAN.pro` + `mingw32-make -j4` 编译通过）
+- 最新可执行文件：`F:\TestTools\MT_CAN\CAN_RFID_Qt\release\CAN_RFID.exe`
+
+## 35. 最新交接补充（2026-07-02 - NVM-003 连续写入与 OTA 短流程自动判定优化）
+
+根据实测日志和终端 OTA 行为补充，本轮继续优化美团测试执行：
+
+- **MT-RFID-NVM-003 连续写入修正**：
+  - 问题：原实现第一帧通过 `RfidDiagnosticTransfer` 状态机发送，第二帧实际落在第一次 `0x6E` 肯定响应之后，未真正形成“写入未完成时再次写入”的忙窗口。
+  - 修正：该用例改为直接连续发送两帧相同的 `0x2E DID=0xE7E0` 原始单帧请求，不再经过诊断写入状态机。
+  - 预期：证据日志中两次 Tx 应接近同一毫秒或相邻毫秒；若设备返回 `7F 2E 0x21/0x22/0x78` 等忙/拒绝响应则自动判定通过，仅返回肯定响应则判失败。
+
+- **OTA 短流程自动判定**：
+  - `MT-RFID-OTA-002` 至 `MT-RFID-OTA-005`：A1 厂商/硬件不匹配拒绝升级，等待窗口缩短为 8s，并按 `E1 01` 且未进入 A2 自动判定。
+  - `MT-RFID-OTA-008`：A2 首帧数据错误，等待窗口缩短为 10s，并按 `E2 00 01 03` 自动判定。
+  - `MT-RFID-OTA-009`：依据终端逻辑改为“A2 首包正确写入后停止继续升级并查询 BOOT”，等待窗口缩短为 10s，并按 `E2 00 01 00/02` 加 `E4 00` 自动判定。
+  - `MT-RFID-OTA-010`：A3 CRC 错误按 `E3 01` 自动判定；由于仍需完整发送固件到 A3 阶段，等待窗口保持 120s。
+
+- **OTA worker 补充能力**：
+  - 新增 `OtaErrorConfig::stopAfterFirstA2Success`。
+  - 当该标志启用时，A2 第一个分包写入成功后停止继续下发，等待 500ms 后发送 A4 查询程序位置；若返回 BOOT，则流程按测试成功收口。
+
+### 修改文件
+- `CAN_RFID_Qt/mainwindow.cpp`
+- `CAN_RFID_Qt/application/otaservice.h`
+- `CAN_RFID_Qt/application/otaservice.cpp`
+- `CAN_RFID_Qt/application/testcasejudge.cpp`
+- `CAN_RFID_Qt/resources/testcases/meituan_rfid_can_testcases.json`
+- `HANDOFF.md`
+
+### 最新测试状态
+- JSON 用例资源校验：PASS（当前内置用例数 88，无重复 ID）
+- Release 构建：PASS（2026-07-02，`qmake ..\CAN.pro` + `mingw32-make -j4` 编译通过）
+- 最新可执行文件：`F:\TestTools\MT_CAN\CAN_RFID_Qt\release\CAN_RFID.exe`
+
+## 37. 最新交接补充（2026-07-02 - OTA-010/OTA-013 停留 BOOT 查询补齐）
+
+继续补齐需要判断终端停留状态的 OTA 用例：
+
+- **OTA-010：A3 CRC 错误**：
+  - A3 执行升级返回 `E3 01` 固件校验错误后，自动等待 500ms 并发送 `A4` 查询当前程序位置。
+  - `mt.ota_a3_crc_error_rejected` 判定已增强为：必须采集 `A3`、`E3 01`、拒绝后的 `A4` 查询，以及 `E4 00`，确认设备保持 BOOT。
+  - 用例预期和人工提示同步更新为“拒绝异常固件后 A4 查询确认 BOOT”。
+
+- **OTA-013：OTA 超时停止**：
+  - 静默超时注入触发后，自动发送 `A4` 查询当前程序位置。
+  - 新增 `mt.ota_timeout_boot_hold` 判定模板：必须采集 A2 数据阶段证据、A4 查询和 `E4 00` BOOT 响应。
+  - 半自动机器判定通过后允许直接保存为通过。
+
+### 最新测试状态
+- JSON 用例资源校验：PASS（当前内置用例数 88，无重复 ID）
+- Release 构建：PASS（2026-07-02，`qmake ..\CAN.pro` + `mingw32-make -j4` 编译通过）
+- 最新可执行文件：`F:\TestTools\MT_CAN\CAN_RFID_Qt\release\CAN_RFID.exe`
+
+## 36. 最新交接补充（2026-07-02 - OTA-012 中止升级停留 BOOT 修正）
+
+根据终端当前实现逻辑修正 `MT-RFID-OTA-012`：
+
+- **逻辑修正**：
+  - 原理解为“升级过程中中止升级后返回 APP”。
+  - 已修正为“升级过程中中止升级后停留 BOOT，不跳转 APP”。
+
+- **执行与判定修正**：
+  - `mt.ota_abort_upgrade_command` 发送 `A3 02` 中止命令后，等待 500ms 自动发送 `A4` 查询当前程序位置。
+  - 新增 `mt.ota_abort_boot_hold` 判定模板：
+    - 必须采集到 `A3 02` 中止请求。
+    - 必须采集到 `A4` 查询请求。
+    - 必须采集到 `E4 00`，确认设备停留 BOOT。
+  - `MT-RFID-OTA-012` 等待窗口缩短为 8s，并允许半自动机器判定通过后直接保存为通过。
+
+### 最新测试状态
+- JSON 用例资源校验：PASS（当前内置用例数 88，无重复 ID）
+- Release 构建：PASS（2026-07-02，`qmake ..\CAN.pro` + `mingw32-make -j4` 编译通过）
+- 最新可执行文件：`F:\TestTools\MT_CAN\CAN_RFID_Qt\release\CAN_RFID.exe`

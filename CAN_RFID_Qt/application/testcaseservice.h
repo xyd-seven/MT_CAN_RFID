@@ -37,6 +37,9 @@ public:
                         const QString &dataHex,
                         const QString &decodedText,
                         QString *error = nullptr);
+    bool appendExecutionEvent(const QString &eventType,
+                              const QString &description,
+                              QString *error = nullptr);
 
     bool exportResultsCsv(const QString &filePath, QString *error = nullptr) const;
     bool exportResultsExcelHtml(const QString &filePath, QString *error = nullptr) const;
@@ -46,6 +49,12 @@ public:
 
 private:
     bool ensureEvidenceFile(const QString &caseId, QString *error);
+    bool initializeEvidenceFile(const QString &caseId, const TestCaseResult &result, QString *error) const;
+    bool appendResultEvidence(const TestCaseResult &result) const;
+    bool appendExtractedEvidence(const QString &caseId) const;
+    bool appendEvidenceSection(const QString &caseId, const QString &title, const QStringList &lines) const;
+    bool replaceEvidenceSection(const QString &caseId, const QString &title, const QStringList &lines) const;
+    const TestCase *findCase(const QString &caseId) const;
     QString caseEvidencePath(const QString &caseId) const;
     QString resultsCsvPath() const;
     static QString csvEscape(QString value);

@@ -7,6 +7,8 @@
 #include <QSet>
 #include <QtGlobal>
 
+#include <climits>
+
 namespace {
 const int kRfidRequestId = 0x007;
 const int kRfidResponseId = 0x107;
@@ -21,6 +23,13 @@ struct EvidenceFrame
     QString direction;
     int canId = -1;
     QStringList bytes;
+};
+
+struct PeriodWindowCheck
+{
+    bool checked = false;
+    bool passed = false;
+    QString reason;
 };
 
 QStringList parseCsvLine(const QString &line)
@@ -220,11 +229,26 @@ bool evidenceHasFrameByte(const QVector<EvidenceFrame> &frames, int canId, int b
     return false;
 }
 
-QStringList keyFrameLines(const QVector<EvidenceFrame> &frames, const QList<int> &ids, int limit = 8)
+QStringList keyFrameLines(const QVector<EvidenceFrame> &frames, const QList<int> &ids, int limit = 16)
 {
     QStringList lines;
+    for (const int canId : ids) {
+        for (const EvidenceFrame &frame : frames) {
+            if (frame.canId == canId) {
+                lines.append(frame.line);
+                break;
+            }
+        }
+        if (lines.size() >= limit) {
+            return lines;
+        }
+    }
+
     for (const EvidenceFrame &frame : frames) {
         if (ids.contains(frame.canId)) {
+            if (lines.contains(frame.line)) {
+                continue;
+            }
             lines.append(frame.line);
             if (lines.size() >= limit) {
                 break;
@@ -268,6 +292,99 @@ QString asciiFromFrame(const EvidenceFrame &frame)
         }
     }
     return text;
+}
+
+int hexByteValue(const QString &byteText)
+{
+    bool ok = false;
+    const int value = byteText.toInt(&ok, 16);
+    return ok ? value : -1;
+}
+
+QVector<int> frameByteValues(const EvidenceFrame &frame)
+{
+    QVector<int> values;
+    for (const QString &byteText : frame.bytes) {
+        const int value = hexByteValue(byteText);
+        if (value < 0 || value > 0xFF) {
+            return QVector<int>();
+        }
+        values.append(value);
+    }
+    return values;
+}
+
+bool findIsoTpPayload(const QVector<EvidenceFrame> &frames, int canId, int sid, QVector<int> *payload)
+{
+    const QVector<EvidenceFrame> idFrames = framesById(frames, canId, true);
+    for (int index = 0; index < idFrames.size(); ++index) {
+        const QVector<int> bytes = frameByteValues(idFrames.at(index));
+        if (bytes.size() < 2) {
+            continue;
+        }
+
+        const int pciType = (bytes.at(0) >> 4) & 0x0F;
+        if (pciType == 0x0) {
+            const int payloadLength = bytes.at(0) & 0x0F;
+            if (payloadLength <= 0 || bytes.size() < payloadLength + 1 || bytes.at(1) != sid) {
+                continue;
+            }
+            QVector<int> currentPayload;
+            for (int byteIndex = 1; byteIndex <= payloadLength; ++byteIndex) {
+                currentPayload.append(bytes.at(byteIndex));
+            }
+            if (payload != nullptr) {
+                *payload = currentPayload;
+            }
+            return true;
+        }
+
+        if (pciType != 0x1 || bytes.size() < 3 || bytes.at(2) != sid) {
+            continue;
+        }
+
+        const int payloadLength = ((bytes.at(0) & 0x0F) << 8) | bytes.at(1);
+        if (payloadLength <= 0) {
+            continue;
+        }
+        QVector<int> currentPayload;
+        for (int byteIndex = 2; byteIndex < bytes.size() && currentPayload.size() < payloadLength; ++byteIndex) {
+            currentPayload.append(bytes.at(byteIndex));
+        }
+        int expectedSequence = 1;
+        for (int nextIndex = index + 1; nextIndex < idFrames.size() && currentPayload.size() < payloadLength; ++nextIndex) {
+            const QVector<int> cfBytes = frameByteValues(idFrames.at(nextIndex));
+            if (cfBytes.isEmpty() || ((cfBytes.at(0) >> 4) & 0x0F) != 0x2) {
+                continue;
+            }
+            const int sequence = cfBytes.at(0) & 0x0F;
+            if (sequence != (expectedSequence & 0x0F)) {
+                break;
+            }
+            ++expectedSequence;
+            for (int byteIndex = 1; byteIndex < cfBytes.size() && currentPayload.size() < payloadLength; ++byteIndex) {
+                currentPayload.append(cfBytes.at(byteIndex));
+            }
+        }
+        if (currentPayload.size() >= payloadLength) {
+            if (payload != nullptr) {
+                *payload = currentPayload;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+QString otaSystemStatusText(int status)
+{
+    if (status == 0x01) {
+        return QStringLiteral("APP");
+    }
+    if (status == 0x02) {
+        return QStringLiteral("BOOT");
+    }
+    return QStringLiteral("未知(0x%1)").arg(status, 2, 16, QChar('0')).toUpper();
 }
 
 QString firstAsciiFromId(const QVector<EvidenceFrame> &frames, int canId)
@@ -541,6 +658,181 @@ bool hasClassicDlcMismatch(const QVector<EvidenceFrame> &frames, int firstId, in
         }
     }
     return false;
+}
+
+QList<int> startupPeriodTargetIds(const QString &caseText)
+{
+    QList<int> ids;
+    for (int canId = 0x2C3; canId <= 0x2C6; ++canId) {
+        if (caseText.contains(idText(canId), Qt::CaseInsensitive) && !ids.contains(canId)) {
+            ids.append(canId);
+        }
+    }
+    QRegularExpression rangeRegex(QStringLiteral("0x(2C[3-6])\\s*[~\\-～至到]\\s*(?:0x)?(2C[3-6])"),
+                                  QRegularExpression::CaseInsensitiveOption);
+    QRegularExpressionMatchIterator ranges = rangeRegex.globalMatch(caseText);
+    while (ranges.hasNext()) {
+        const QRegularExpressionMatch match = ranges.next();
+        bool startOk = false;
+        bool endOk = false;
+        const int startId = match.captured(1).toInt(&startOk, 16);
+        const int endId = match.captured(2).toInt(&endOk, 16);
+        if (!startOk || !endOk) {
+            continue;
+        }
+        for (int canId = qMin(startId, endId); canId <= qMax(startId, endId); ++canId) {
+            if (canId >= 0x2C3 && canId <= 0x2C6 && !ids.contains(canId)) {
+                ids.append(canId);
+            }
+        }
+    }
+    if (ids.isEmpty()) {
+        ids << 0x2C3 << 0x2C4 << 0x2C5;
+    }
+    return ids;
+}
+
+QString startupCheckText(const TestCase &testCase)
+{
+    return QStringList{
+        testCase.id,
+        testCase.module,
+        testCase.basis,
+        testCase.precondition,
+        testCase.testData,
+        testCase.steps,
+        testCase.expectedResult,
+        testCase.commandTemplate,
+        testCase.judgeTemplate,
+        testCase.semiJudgeTemplate,
+        testCase.keyFrameIds.join(QLatin1Char(' '))
+    }.join(QLatin1Char(' '));
+}
+
+int startupBurstExpectedMs(const QString &caseText, int canId)
+{
+    QString compact = caseText.toUpper();
+    compact.remove(QRegularExpression(QStringLiteral("\\s+")));
+    if (canId == 0x2C3) {
+        return compact.contains(QStringLiteral("100MS")) && !compact.contains(QStringLiteral("200MS")) ? 100 : 200;
+    }
+    if (canId == 0x2C4 || canId == 0x2C5 || canId == 0x2C6) {
+        return compact.contains(QStringLiteral("200MS")) && !compact.contains(QStringLiteral("100MS")) ? 200 : 100;
+    }
+    return compact.contains(QStringLiteral("100MS")) ? 100 : 200;
+}
+
+bool requiresStartupBroadcastPeriodCheck(const QString &caseText)
+{
+    QString compact = caseText.toUpper();
+    compact.remove(QRegularExpression(QStringLiteral("\\s+")));
+    return (compact.contains(QStringLiteral("200MS")) || compact.contains(QStringLiteral("100MS"))) &&
+           (caseText.contains(QStringLiteral("20次")) ||
+            caseText.contains(QStringLiteral("20 次")) ||
+            caseText.contains(QStringLiteral("20帧")) ||
+            caseText.contains(QStringLiteral("20 帧"))) &&
+           (compact.contains(QStringLiteral("10S")) || compact.contains(QStringLiteral("10000MS")));
+}
+
+bool intervalsMatchExpected(const QVector<EvidenceFrame> &frames,
+                            int startIndex,
+                            int endIndex,
+                            int expectedMs,
+                            int toleranceMs,
+                            QString *summary)
+{
+    if (startIndex < 0 || endIndex >= frames.size() || endIndex - startIndex < 1) {
+        return false;
+    }
+
+    qint64 totalMs = 0;
+    qint64 minMs = LLONG_MAX;
+    qint64 maxMs = 0;
+    int count = 0;
+    for (int index = startIndex + 1; index <= endIndex; ++index) {
+        if (!frames.at(index - 1).timestamp.isValid() || !frames.at(index).timestamp.isValid()) {
+            if (summary != nullptr) {
+                *summary = QStringLiteral("存在无效时间戳");
+            }
+            return false;
+        }
+        const qint64 interval = frames.at(index - 1).timestamp.msecsTo(frames.at(index).timestamp);
+        if (interval <= 0) {
+            if (summary != nullptr) {
+                *summary = QStringLiteral("存在无效时间间隔");
+            }
+            return false;
+        }
+        minMs = qMin(minMs, interval);
+        maxMs = qMax(maxMs, interval);
+        totalMs += interval;
+        ++count;
+    }
+
+    const double averageMs = count > 0 ? static_cast<double>(totalMs) / count : 0.0;
+    const bool passed = qAbs(averageMs - expectedMs) <= toleranceMs &&
+                        qAbs(static_cast<double>(minMs) - expectedMs) <= toleranceMs &&
+                        qAbs(static_cast<double>(maxMs) - expectedMs) <= toleranceMs;
+    if (summary != nullptr) {
+        *summary = QStringLiteral("样本=%1，平均=%2 ms，最小=%3 ms，最大=%4 ms，期望=%5 ms，容差=±%6 ms")
+            .arg(count)
+            .arg(averageMs, 0, 'f', 1)
+            .arg(minMs)
+            .arg(maxMs)
+            .arg(expectedMs)
+            .arg(toleranceMs);
+    }
+    return passed;
+}
+
+PeriodWindowCheck checkStartupBroadcastPeriod(const QVector<EvidenceFrame> &frames,
+                                              const QList<int> &targetIds,
+                                              const QString &caseText)
+{
+    PeriodWindowCheck result;
+    result.checked = true;
+
+    QStringList details;
+    for (const int canId : targetIds) {
+        const QVector<EvidenceFrame> idFrames = framesById(frames, canId, true);
+        if (idFrames.size() < 20) {
+            result.reason = QStringLiteral("%1 快发阶段样本不足：需要至少 20 帧，当前 %2 帧。")
+                .arg(idText(canId))
+                .arg(idFrames.size());
+            return result;
+        }
+
+        QString burstSummary;
+        const int burstExpectedMs = startupBurstExpectedMs(caseText, canId);
+        const int burstToleranceMs = burstExpectedMs <= 100 ? 50 : 80;
+        if (!intervalsMatchExpected(idFrames, 0, 19, burstExpectedMs, burstToleranceMs, &burstSummary)) {
+            result.reason = QStringLiteral("%1 上电前 20 帧 %2ms 周期不满足要求：%3。")
+                .arg(idText(canId))
+                .arg(burstExpectedMs)
+                .arg(burstSummary);
+            return result;
+        }
+        details << QStringLiteral("%1 前20帧快发周期通过：%2").arg(idText(canId), burstSummary);
+
+        if (idFrames.size() < 22) {
+            result.reason = QStringLiteral("%1 前20帧快发周期通过，但第20帧后 10s 周期样本不足：需要至少 2 帧，当前 %2 帧。")
+                .arg(idText(canId))
+                .arg(qMax(0, idFrames.size() - 20));
+            return result;
+        }
+
+        QString normalSummary;
+        if (!intervalsMatchExpected(idFrames, 20, idFrames.size() - 1, 10000, 2500, &normalSummary)) {
+            result.reason = QStringLiteral("%1 第20帧后 10s 周期不满足要求：%2。")
+                .arg(idText(canId), normalSummary);
+            return result;
+        }
+        details << QStringLiteral("%1 第20帧后 10s 周期通过：%2").arg(idText(canId), normalSummary);
+    }
+
+    result.passed = true;
+    result.reason = details.join(QStringLiteral("；"));
+    return result;
 }
 
 QStringList appearedBroadcastIds(const QVector<EvidenceFrame> &frames)
@@ -854,6 +1146,43 @@ TestJudgeResult judgePeriodConfig(const TestCase &testCase, const QVector<Eviden
                           QStringLiteral("period_mismatch"),
                           keyFrames);
     }
+
+    const QString caseText = QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8")
+        .arg(testCase.id,
+             testCase.module,
+             testCase.basis,
+             testCase.testData,
+             testCase.steps,
+             testCase.expectedResult,
+             testCase.commandTemplate,
+             testCase.judgeTemplate);
+    if (requiresStartupBroadcastPeriodCheck(caseText)) {
+        const QList<int> startupIds = startupPeriodTargetIds(caseText);
+        QList<int> periodFrameIds;
+        periodFrameIds << kRfidRequestId << kRfidResponseId << targetId;
+        for (const int canId : startupIds) {
+            if (!periodFrameIds.contains(canId)) {
+                periodFrameIds.append(canId);
+            }
+        }
+        const QStringList periodKeyFrames = keyFrameLinesForCase(testCase,
+            frames,
+            periodFrameIds,
+            24);
+        const PeriodWindowCheck startupCheck = checkStartupBroadcastPeriod(frames, startupIds, caseText);
+        if (!startupCheck.passed) {
+            return makeBlocked(startupCheck.reason,
+                               QStringLiteral("insufficient_period_evidence"),
+                               periodKeyFrames);
+        }
+        return makePassed(QStringLiteral("收到 0x29 肯定响应，目标 %1 响应后平均周期 %2 ms 符合期望 %3 ms；%4")
+                              .arg(idText(targetId))
+                              .arg(averageMs, 0, 'f', 1)
+                              .arg(periodMs)
+                              .arg(startupCheck.reason),
+                          periodKeyFrames);
+    }
+
     return makePassed(QStringLiteral("收到 0x29 肯定响应，目标 %1 响应后平均周期 %2 ms，符合期望 %3 ms。")
                           .arg(idText(targetId))
                           .arg(averageMs, 0, 'f', 1)
@@ -1120,6 +1449,19 @@ TestJudgeResult judgeDeviceIdPrefix(const TestCase &testCase, const QVector<Evid
                           QStringLiteral("expected_mismatch"),
                           keyFrames);
     }
+    const QString caseText = startupCheckText(testCase);
+    if (requiresStartupBroadcastPeriodCheck(caseText)) {
+        const QList<int> startupIds = startupPeriodTargetIds(caseText);
+        const PeriodWindowCheck startupCheck = checkStartupBroadcastPeriod(frames, startupIds, caseText);
+        if (!startupCheck.passed) {
+            return makeBlocked(startupCheck.reason,
+                               QStringLiteral("insufficient_period_evidence"),
+                               keyFrameLinesForCase(testCase, frames, startupIds, 24));
+        }
+        return makePassed(QStringLiteral("已采集设备 ID=%1，内容非空且满足前缀要求；%2")
+                              .arg(deviceId, startupCheck.reason),
+                          keyFrameLinesForCase(testCase, frames, startupIds, 24));
+    }
     return makePassed(QStringLiteral("已采集设备 ID=%1，内容非空且满足前缀要求。").arg(deviceId),
                       keyFrames);
 }
@@ -1141,6 +1483,49 @@ TestJudgeResult judgeControl207TimeoutFault(const TestCase &testCase, const QVec
     return makeBlocked(QStringLiteral("暂停 0x207 后未采集到 0x2C0 状态帧，请确认广播是否开启。"),
                        QStringLiteral("evidence_missing"),
                        keyFrames);
+}
+
+TestJudgeResult judgeIsoTpMultiframeFlow(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, QList<int>() << kRfidRequestId << kRfidResponseId);
+    bool hasFirstFrame = false;
+    bool hasFlowControl = false;
+    bool hasConsecutiveFrame = false;
+    bool hasFinalResponse = false;
+
+    for (const EvidenceFrame &frame : frames) {
+        if (frame.bytes.isEmpty()) {
+            continue;
+        }
+        const QString firstByte = frame.bytes.first().toUpper();
+        if (frame.canId == kRfidRequestId &&
+            firstByte.startsWith(QStringLiteral("1")) &&
+            frameHasData(frame, QStringLiteral("2EE7E1"))) {
+            hasFirstFrame = true;
+        } else if (frame.canId == kRfidResponseId && firstByte.startsWith(QStringLiteral("3"))) {
+            hasFlowControl = true;
+        } else if (frame.canId == kRfidRequestId && firstByte.startsWith(QStringLiteral("2"))) {
+            hasConsecutiveFrame = true;
+        }
+        if (frame.canId == kRfidResponseId &&
+            (frameHasData(frame, QStringLiteral("6EE7E1")) || frameHasData(frame, QStringLiteral("7F2E")))) {
+            hasFinalResponse = true;
+        }
+    }
+
+    QStringList missing;
+    if (!hasFirstFrame) missing << QStringLiteral("首帧FF");
+    if (!hasFlowControl) missing << QStringLiteral("流控FC");
+    if (!hasConsecutiveFrame) missing << QStringLiteral("连续帧CF");
+    if (!hasFinalResponse) missing << QStringLiteral("最终响应");
+    if (!missing.isEmpty()) {
+        return makeBlocked(QStringLiteral("ISO-TP 多帧证据不足，缺少：%1。").arg(missing.join(QStringLiteral("、"))),
+                           QStringLiteral("isotp_evidence_missing"),
+                           keyFrames);
+    }
+
+    return makePassed(QStringLiteral("已采集 ISO-TP 首帧FF、流控FC、连续帧CF及最终响应，流控过程证据完整。"),
+                      keyFrames);
 }
 
 TestJudgeResult judgeDiag10JumpAndQuery(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
@@ -1247,11 +1632,6 @@ TestJudgeResult judgeNvmBusyOrSerializedWrite(const TestCase &testCase, const QV
                            keyFrames);
     }
 
-    if (evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("036EE7"), true)) {
-        return makePassed(QStringLiteral("已采集连续写入请求及 0x2E 写入肯定响应，设备按串行/接受方式处理。"),
-                          keyFrames);
-    }
-
     const QStringList allowedNrc = QStringList()
         << QStringLiteral("21") << QStringLiteral("22") << QStringLiteral("31")
         << QStringLiteral("78") << QStringLiteral("13");
@@ -1268,7 +1648,13 @@ TestJudgeResult judgeNvmBusyOrSerializedWrite(const TestCase &testCase, const QV
                           keyFrames);
     }
 
-    return makeBlocked(QStringLiteral("已发送连续写入请求，但未采集到 03 6E E7 xx 或 03 7F 2E NRC 响应证据。"),
+    if (evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("036EE7"), true)) {
+        return makeFailed(QStringLiteral("连续写入过程中未观察到忙/拒绝响应，仅采集到 0x2E 肯定响应，不满足忙响应测试要求。"),
+                          QStringLiteral("expected_busy_missing"),
+                          keyFrames);
+    }
+
+    return makeBlocked(QStringLiteral("已发送连续写入请求，但未采集到 7F 2E 忙/拒绝响应证据。"),
                        QStringLiteral("response_missing"),
                        keyFrames);
 }
@@ -1288,6 +1674,305 @@ TestJudgeResult judgeOtaProgramStatusResponse(const TestCase &testCase, const QV
     return makeBlocked(QStringLiteral("未采集到 OTA 程序位置响应 E4。"),
                        QStringLiteral("response_missing"),
                        keyFrames);
+}
+
+TestJudgeResult judgeOtaA1AcceptedBoot(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, QList<int>() << kRfidRequestId << kRfidResponseId);
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A1"))) {
+        return makeBlocked(QStringLiteral("未采集到 OTA A1 升级开始请求。"),
+                           QStringLiteral("request_missing"),
+                           keyFrames);
+    }
+    QVector<int> e1Payload;
+    if (!findIsoTpPayload(frames, kRfidResponseId, 0xE1, &e1Payload) ||
+        e1Payload.size() < 2 ||
+        e1Payload.at(1) != 0x00) {
+        return makeBlocked(QStringLiteral("未采集到 A1 合法请求期望的 E1 00 接受响应。"),
+                           QStringLiteral("response_missing"),
+                           keyFrames);
+    }
+    if (e1Payload.size() < 7) {
+        return makeBlocked(QStringLiteral("A1 接受响应 E1 00 字段不完整，无法确认分包大小、分包数和系统状态。"),
+                           QStringLiteral("response_incomplete"),
+                           keyFrames);
+    }
+
+    const int packetSize = (e1Payload.at(2) << 8) | e1Payload.at(3);
+    const int packetCount = (e1Payload.at(4) << 8) | e1Payload.at(5);
+    const int systemStatus = e1Payload.at(6);
+    if (packetSize <= 0) {
+        return makeBlocked(QStringLiteral("A1 接受响应中的分包大小无效：%1。").arg(packetSize),
+                           QStringLiteral("invalid_packet_size"),
+                           keyFrames);
+    }
+    if (packetCount <= 0) {
+        return makeBlocked(QStringLiteral("A1 接受响应中的分包数无效：%1。").arg(packetCount),
+                           QStringLiteral("invalid_packet_count"),
+                           keyFrames);
+    }
+    if (systemStatus != 0x02) {
+        return makeBlocked(QStringLiteral("A1 接受响应中的系统状态不是 BOOT：%1。")
+                               .arg(otaSystemStatusText(systemStatus)),
+                           QStringLiteral("system_status_mismatch"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A4"))) {
+        return makeBlocked(QStringLiteral("A1 接受后未采集到 A4 程序位置查询请求。"),
+                           QStringLiteral("query_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E400"), true)) {
+        return makeBlocked(QStringLiteral("A1 接受后未采集到 E4 00 BOOT 程序位置响应。"),
+                           QStringLiteral("boot_evidence_missing"),
+                           keyFrames);
+    }
+    if (evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A2"))) {
+        return makeFailed(QStringLiteral("A1 合法请求短流程中出现 A2 数据下发，不符合仅验证 A1 的执行要求。"),
+                          QStringLiteral("unexpected_a2"),
+                          keyFrames);
+    }
+    return makePassed(QStringLiteral("已采集 A1 请求和 E1 00 接受响应：分包大小=%1 字节，分包数=%2，系统状态=%3；A4 查询确认设备处于 BOOT。")
+                          .arg(packetSize)
+                          .arg(packetCount)
+                          .arg(otaSystemStatusText(systemStatus)),
+                      keyFrames);
+}
+
+TestJudgeResult judgeOtaA1Rejected(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, QList<int>() << kRfidRequestId << kRfidResponseId);
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A1"))) {
+        return makeBlocked(QStringLiteral("未采集到 OTA A1 升级开始请求。"),
+                           QStringLiteral("request_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E101"), true)) {
+        return makeBlocked(QStringLiteral("未采集到 A1 不匹配场景期望的 E1 01 拒绝响应。"),
+                           QStringLiteral("response_missing"),
+                           keyFrames);
+    }
+    if (evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A2"))) {
+        return makeFailed(QStringLiteral("已收到 E1 01 拒绝响应，但证据中仍出现 A2 数据下发，不符合拒绝升级要求。"),
+                          QStringLiteral("unexpected_a2_after_reject"),
+                          keyFrames);
+    }
+
+    EvidenceFrame rejectFrame;
+    if (!findFirstFrameData(framesById(frames, kRfidResponseId, true), kRfidResponseId, QStringLiteral("E101"), &rejectFrame) ||
+        !rejectFrame.timestamp.isValid()) {
+        return makeBlocked(QStringLiteral("已采集 E1 01 拒绝响应，但无法定位响应时间，不能确认拒绝后的程序位置查询。"),
+                           QStringLiteral("timestamp_missing"),
+                           keyFrames);
+    }
+
+    const QString locationSource = QStringLiteral("%1 %2").arg(testCase.module, testCase.precondition).toUpper();
+    const bool expectBoot = locationSource.contains(QStringLiteral("BOOT"));
+    const bool expectApp = locationSource.contains(QStringLiteral("APP"));
+    const QString expectedLocation = expectBoot ? QStringLiteral("BOOT") : QStringLiteral("APP");
+    const QString expectedE4 = expectBoot ? QStringLiteral("E400") : QStringLiteral("E401");
+    bool hasPostRejectA4 = false;
+    bool hasExpectedLocation = false;
+    for (const EvidenceFrame &frame : frames) {
+        if (!frame.timestamp.isValid() || rejectFrame.timestamp.msecsTo(frame.timestamp) <= 0) {
+            continue;
+        }
+        if (frame.canId == kRfidRequestId && frameHasData(frame, QStringLiteral("A4"))) {
+            hasPostRejectA4 = true;
+        }
+        if (frame.canId == kRfidResponseId && isReceiveFrame(frame) && frameHasData(frame, expectedE4)) {
+            hasExpectedLocation = true;
+        }
+    }
+    if (expectApp || expectBoot) {
+        if (!hasPostRejectA4) {
+            return makeBlocked(QStringLiteral("已采集 A1 拒绝响应，但拒绝后未采集到 A4 程序位置查询请求。"),
+                               QStringLiteral("query_missing"),
+                               keyFrames);
+        }
+        if (!hasExpectedLocation) {
+            return makeBlocked(QStringLiteral("已采集 A1 拒绝响应和拒绝后 A4 查询，但未确认设备停留 %1。").arg(expectedLocation),
+                               QStringLiteral("location_mismatch"),
+                               keyFrames);
+        }
+    }
+
+    return makePassed(QStringLiteral("已采集 A1 请求和 E1 01 拒绝响应，未进入 A2 数据下发，并通过 A4 确认设备停留 %1。").arg(expectedLocation),
+                      keyFrames);
+}
+
+TestJudgeResult judgeOtaA2FirstFrameError(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, QList<int>() << kRfidRequestId << kRfidResponseId);
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A2"))) {
+        if (evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E101"), true)) {
+            return makeBlocked(QStringLiteral("A1 升级开始请求被设备拒绝，流程未进入 A2；请检查固件厂商、硬件版本和设备状态。"),
+                               QStringLiteral("a1_rejected"),
+                               keyFrames);
+        }
+        return makeBlocked(QStringLiteral("未采集到 OTA A2 数据请求。"),
+                           QStringLiteral("request_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E2000103"), true)) {
+        return makeBlocked(QStringLiteral("未采集到 A2 首包数据错误期望的 E2 00 01 03 响应。"),
+                           QStringLiteral("response_missing"),
+                           keyFrames);
+    }
+    return makePassed(QStringLiteral("已采集 A2 首包请求及 E2 00 01 03 首帧数据错误响应。"),
+                      keyFrames);
+}
+
+TestJudgeResult judgeOtaA2FirstFrameBootHold(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, QList<int>() << kRfidRequestId << kRfidResponseId);
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A2"))) {
+        if (evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E101"), true)) {
+            return makeBlocked(QStringLiteral("A1 升级开始请求被设备拒绝，流程未进入 A2；请检查固件厂商、硬件版本和设备状态。"),
+                               QStringLiteral("a1_rejected"),
+                               keyFrames);
+        }
+        return makeBlocked(QStringLiteral("未采集到 OTA A2 首包请求。"),
+                           QStringLiteral("request_missing"),
+                           keyFrames);
+    }
+    const bool firstChunkOk = evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E2000100"), true) ||
+                              evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E2000102"), true);
+    if (!firstChunkOk) {
+        return makeBlocked(QStringLiteral("未采集到 A2 首包写入成功响应 E2 00 01 00/02。"),
+                           QStringLiteral("response_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A4"))) {
+        return makeBlocked(QStringLiteral("A2 首包写入成功后未采集到 A4 程序位置查询请求。"),
+                           QStringLiteral("query_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E400"), true)) {
+        return makeBlocked(QStringLiteral("A2 首包写入成功并停止后，未采集到 E4 00 BOOT 程序位置响应。"),
+                           QStringLiteral("boot_evidence_missing"),
+                           keyFrames);
+    }
+    if (evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A3"))) {
+        return makeFailed(QStringLiteral("A2 首包验证用例中出现 A3 执行/中止请求，不符合仅验证首包后停止的执行要求。"),
+                          QStringLiteral("unexpected_a3"),
+                          keyFrames);
+    }
+    return makePassed(QStringLiteral("已采集 A2 首包写入成功响应，停止继续升级后 A4 查询确认设备保持 BOOT。"),
+                      keyFrames);
+}
+
+TestJudgeResult judgeOtaA3CrcErrorRejected(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, QList<int>() << kRfidRequestId << kRfidResponseId);
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A3"))) {
+        if (evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E101"), true)) {
+            return makeBlocked(QStringLiteral("A1 升级开始请求被设备拒绝，流程未进入 A3；请检查固件厂商、硬件版本和设备状态。"),
+                               QStringLiteral("a1_rejected"),
+                               keyFrames);
+        }
+        if (evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A2"))) {
+            return makeBlocked(QStringLiteral("已进入 A2 数据阶段，但未采集到 A3 执行升级请求；请检查固件分包是否在等待窗口内完成。"),
+                               QStringLiteral("a3_missing_after_a2"),
+                               keyFrames);
+        }
+        return makeBlocked(QStringLiteral("未采集到 OTA A3 执行升级请求。"),
+                           QStringLiteral("request_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E301"), true)) {
+        return makeBlocked(QStringLiteral("未采集到 A3 CRC 错误期望的 E3 01 固件校验错误响应。"),
+                           QStringLiteral("response_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A4"))) {
+        return makeBlocked(QStringLiteral("A3 CRC 错误响应后未采集到 A4 程序位置查询请求。"),
+                           QStringLiteral("query_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E400"), true)) {
+        return makeBlocked(QStringLiteral("A3 CRC 错误响应后未采集到 E4 00 BOOT 程序位置响应。"),
+                           QStringLiteral("boot_evidence_missing"),
+                           keyFrames);
+    }
+    return makePassed(QStringLiteral("已采集 A3 执行请求及 E3 01 固件校验错误响应，并通过 A4 查询确认设备停留 BOOT。"),
+                      keyFrames);
+}
+
+TestJudgeResult judgeOtaSuccessAppRunning(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, QList<int>() << kRfidRequestId << kRfidResponseId);
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A3"))) {
+        return makeBlocked(QStringLiteral("未采集到 OTA A3 执行升级请求。"),
+                           QStringLiteral("request_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E300"), true)) {
+        return makeBlocked(QStringLiteral("未采集到 A3 执行升级成功响应 E3 00。"),
+                           QStringLiteral("response_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A4"))) {
+        return makeBlocked(QStringLiteral("升级成功后未采集到 A4 程序位置查询请求。"),
+                           QStringLiteral("query_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E401"), true)) {
+        return makeBlocked(QStringLiteral("升级成功后未采集到 E4 01 APP 程序位置响应。"),
+                           QStringLiteral("app_evidence_missing"),
+                           keyFrames);
+    }
+    return makePassed(QStringLiteral("已采集 A3 执行成功响应，并通过 A4 查询确认设备运行 APP。"),
+                      keyFrames);
+}
+
+TestJudgeResult judgeOtaTimeoutBootHold(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, QList<int>() << kRfidRequestId << kRfidResponseId);
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A2"))) {
+        if (evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E101"), true)) {
+            return makeBlocked(QStringLiteral("A1 升级开始请求被设备拒绝，流程未进入 A2；请检查固件厂商、硬件版本和设备状态。"),
+                               QStringLiteral("a1_rejected"),
+                               keyFrames);
+        }
+        return makeBlocked(QStringLiteral("未采集到 OTA A2 数据请求，无法确认超时发生在升级数据阶段。"),
+                           QStringLiteral("request_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A4"))) {
+        return makeBlocked(QStringLiteral("OTA 超时停止后未采集到 A4 程序位置查询请求。"),
+                           QStringLiteral("query_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E400"), true)) {
+        return makeBlocked(QStringLiteral("OTA 超时停止后未采集到 E4 00 BOOT 程序位置响应。"),
+                           QStringLiteral("boot_evidence_missing"),
+                           keyFrames);
+    }
+    return makePassed(QStringLiteral("已采集 A2 数据阶段证据，超时停止后通过 A4 查询确认设备停留 BOOT。"),
+                      keyFrames);
+}
+
+TestJudgeResult judgeOtaAbortBootHold(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, QList<int>() << kRfidRequestId << kRfidResponseId);
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A302"))) {
+        return makeBlocked(QStringLiteral("未采集到 OTA A3 02 中止升级请求。"),
+                           QStringLiteral("request_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidRequestId, QStringLiteral("A4"))) {
+        return makeBlocked(QStringLiteral("中止升级后未采集到 A4 程序位置查询请求。"),
+                           QStringLiteral("query_missing"),
+                           keyFrames);
+    }
+    if (!evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("E400"), true)) {
+        return makeBlocked(QStringLiteral("中止升级后未采集到 E4 00 BOOT 程序位置响应。"),
+                           QStringLiteral("boot_evidence_missing"),
+                           keyFrames);
+    }
+    return makePassed(QStringLiteral("已发送 A3 02 中止升级，并通过 A4 查询确认设备停留 BOOT。"),
+                      keyFrames);
 }
 
 TestJudgeResult judgeSemiAssist(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
@@ -1481,8 +2166,24 @@ TestJudgeResult TestCaseJudge::judge(const TestCase &testCase, const QString &ev
     if (judgeTemplate == QStringLiteral("mt.device_id_prefix_check")) {
         return judgeDeviceIdPrefix(testCase, frames);
     }
+    if (judgeTemplate == QStringLiteral("mt.startup_broadcast_period")) {
+        const QString caseText = startupCheckText(testCase);
+        const QList<int> startupIds = startupPeriodTargetIds(caseText);
+        const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, startupIds, 24);
+        const PeriodWindowCheck startupCheck = checkStartupBroadcastPeriod(frames, startupIds, caseText);
+        if (startupCheck.passed) {
+            return makePassed(QStringLiteral("上电广播周期满足要求：%1").arg(startupCheck.reason),
+                              keyFrames);
+        }
+        return makeBlocked(startupCheck.reason,
+                           QStringLiteral("insufficient_period_evidence"),
+                           keyFrames);
+    }
     if (judgeTemplate == QStringLiteral("mt.control_0x207_timeout_fault")) {
         return judgeControl207TimeoutFault(testCase, frames);
+    }
+    if (judgeTemplate == QStringLiteral("mt.isotp_multiframe_flow")) {
+        return judgeIsoTpMultiframeFlow(testCase, frames);
     }
     if (judgeTemplate == QStringLiteral("mt.diag_0x10_jump_and_query")) {
         return judgeDiag10JumpAndQuery(testCase, frames);
@@ -1497,6 +2198,30 @@ TestJudgeResult TestCaseJudge::judge(const TestCase &testCase, const QString &ev
     }
     if (judgeTemplate == QStringLiteral("mt.ota_program_status_response")) {
         return judgeOtaProgramStatusResponse(testCase, frames);
+    }
+    if (judgeTemplate == QStringLiteral("mt.ota_a1_accepted_boot")) {
+        return judgeOtaA1AcceptedBoot(testCase, frames);
+    }
+    if (judgeTemplate == QStringLiteral("mt.ota_a1_rejected")) {
+        return judgeOtaA1Rejected(testCase, frames);
+    }
+    if (judgeTemplate == QStringLiteral("mt.ota_a2_first_frame_error")) {
+        return judgeOtaA2FirstFrameError(testCase, frames);
+    }
+    if (judgeTemplate == QStringLiteral("mt.ota_a2_first_frame_boot_hold")) {
+        return judgeOtaA2FirstFrameBootHold(testCase, frames);
+    }
+    if (judgeTemplate == QStringLiteral("mt.ota_a3_crc_error_rejected")) {
+        return judgeOtaA3CrcErrorRejected(testCase, frames);
+    }
+    if (judgeTemplate == QStringLiteral("mt.ota_success_app_running")) {
+        return judgeOtaSuccessAppRunning(testCase, frames);
+    }
+    if (judgeTemplate == QStringLiteral("mt.ota_timeout_boot_hold")) {
+        return judgeOtaTimeoutBootHold(testCase, frames);
+    }
+    if (judgeTemplate == QStringLiteral("mt.ota_abort_boot_hold")) {
+        return judgeOtaAbortBootHold(testCase, frames);
     }
     if (judgeTemplate == QStringLiteral("mt.status_2c0_work_mode") ||
         judgeTemplate == QStringLiteral("mt.status_2c0_no_tag")) {
@@ -1582,9 +2307,22 @@ TestJudgeResult TestCaseJudge::judge(const TestCase &testCase, const QString &ev
         caseText.contains(QStringLiteral("0x29"))) {
         return judgePeriodConfig(testCase, frames);
     }
+    if (requiresStartupBroadcastPeriodCheck(caseText)) {
+        const QList<int> startupIds = startupPeriodTargetIds(caseText);
+        const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, startupIds, 24);
+        const PeriodWindowCheck startupCheck = checkStartupBroadcastPeriod(frames, startupIds, caseText);
+        if (startupCheck.passed) {
+            return makePassed(QStringLiteral("上电广播周期满足要求：%1").arg(startupCheck.reason),
+                              keyFrames);
+        }
+        return makeBlocked(startupCheck.reason,
+                           QStringLiteral("insufficient_period_evidence"),
+                           keyFrames);
+    }
     if (caseText.contains(QStringLiteral("0x2C0")) || caseText.contains(QStringLiteral("0x2C6")) ||
         caseText.contains(QStringLiteral("广播"))) {
-        const QStringList keyFrames = keyFrameLines(frames, QList<int>() << 0x2C0 << 0x2C1 << 0x2C2 << 0x2C6);
+        const QStringList keyFrames = keyFrameLines(frames, QList<int>() << 0x2C0 << 0x2C1 << 0x2C2
+            << 0x2C3 << 0x2C4 << 0x2C5 << 0x2C6);
         const QVector<QPair<int, QString>> expectedBytes = expectedBroadcastBytes(caseText);
         for (const QPair<int, QString> &expectedByte : expectedBytes) {
             if (!evidenceHasFrameByte(frames, 0x2C0, expectedByte.first, expectedByte.second)) {
