@@ -184,6 +184,33 @@ QString RfidProtocol::parseAsciiPayload(const QByteArray &payload)
     return QString::fromLatin1(ascii);
 }
 
+bool RfidProtocol::isUnrecognizedTagPlaceholderPayload(const QByteArray &payload)
+{
+    if (!isClassicCanPayload(payload)) {
+        return false;
+    }
+    for (const char value : payload) {
+        if (static_cast<quint8>(value) != 0x30) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool RfidProtocol::isUnrecognizedTagPlaceholderText(const QString &text)
+{
+    const QString trimmed = text.trimmed();
+    if (trimmed.length() != 8 && trimmed.length() != 16 && trimmed.length() != 24) {
+        return false;
+    }
+    for (const QChar ch : trimmed) {
+        if (ch != QLatin1Char('0')) {
+            return false;
+        }
+    }
+    return true;
+}
+
 QString RfidProtocol::workModeText(quint8 value)
 {
     switch (value) {

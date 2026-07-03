@@ -12,19 +12,9 @@ bool RfidService::handleFrame(const CanFrame &frame)
         handleStatusFrame(frame.data);
         return true;
     case RfidProtocol::TagPart1FrameId:
-        tagPart1 = RfidProtocol::parseAsciiPayload(frame.data);
-        currentState.tagPart1 = tagPart1;
-        updateTagText();
-        return true;
     case RfidProtocol::TagPart2FrameId:
-        tagPart2 = RfidProtocol::parseAsciiPayload(frame.data);
-        currentState.tagPart2 = tagPart2;
-        updateTagText();
-        return true;
     case RfidProtocol::TagPart3FrameId:
-        tagPart3 = RfidProtocol::parseAsciiPayload(frame.data);
-        currentState.tagPart3 = tagPart3;
-        updateTagText();
+        handleTagPartFrame(frame.id, frame.data);
         return true;
     case RfidProtocol::VersionFrameId:
         handleVersionFrame(frame.data);
@@ -43,6 +33,38 @@ bool RfidService::handleFrame(const CanFrame &frame)
     default:
         return false;
     }
+}
+
+void RfidService::handleTagPartFrame(quint32 frameId, const QByteArray &payload)
+{
+    if (RfidProtocol::isUnrecognizedTagPlaceholderPayload(payload)) {
+        if (frameId == RfidProtocol::TagPart3FrameId) {
+            tagPart3.clear();
+            currentState.tagPart3.clear();
+        } else {
+            tagPart1.clear();
+            tagPart2.clear();
+            tagPart3.clear();
+            currentState.tagPart1.clear();
+            currentState.tagPart2.clear();
+            currentState.tagPart3.clear();
+        }
+        updateTagText();
+        return;
+    }
+
+    const QString payloadText = RfidProtocol::parseAsciiPayload(payload);
+    if (frameId == RfidProtocol::TagPart1FrameId) {
+        tagPart1 = payloadText;
+        currentState.tagPart1 = tagPart1;
+    } else if (frameId == RfidProtocol::TagPart2FrameId) {
+        tagPart2 = payloadText;
+        currentState.tagPart2 = tagPart2;
+    } else if (frameId == RfidProtocol::TagPart3FrameId) {
+        tagPart3 = payloadText;
+        currentState.tagPart3 = tagPart3;
+    }
+    updateTagText();
 }
 
 RfidState RfidService::state() const
@@ -138,7 +160,8 @@ void RfidService::handleResponseFrame(const QByteArray &payload)
 
 void RfidService::updateTagText()
 {
-    currentState.tag = tagPart1 + tagPart2 + tagPart3;
+    const QString tagText = tagPart1 + tagPart2 + tagPart3;
+    currentState.tag = RfidProtocol::isUnrecognizedTagPlaceholderText(tagText) ? QString() : tagText;
 }
 
 void RfidService::updateDeviceIdText()

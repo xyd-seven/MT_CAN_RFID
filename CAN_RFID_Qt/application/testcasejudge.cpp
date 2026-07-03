@@ -376,6 +376,82 @@ bool findIsoTpPayload(const QVector<EvidenceFrame> &frames, int canId, int sid, 
     return false;
 }
 
+QVector<QVector<int>> collectIsoTpPayloads(const QVector<EvidenceFrame> &frames, int canId, int sid)
+{
+    QVector<QVector<int>> payloads;
+    const QVector<EvidenceFrame> idFrames = framesById(frames, canId, canId == kRfidResponseId);
+    for (int index = 0; index < idFrames.size(); ++index) {
+        const QVector<int> bytes = frameByteValues(idFrames.at(index));
+        if (bytes.size() < 2) {
+            continue;
+        }
+
+        const int pciType = (bytes.at(0) >> 4) & 0x0F;
+        if (pciType == 0x0) {
+            const int payloadLength = bytes.at(0) & 0x0F;
+            if (payloadLength <= 0 || bytes.size() < payloadLength + 1 || bytes.at(1) != sid) {
+                continue;
+            }
+            QVector<int> payload;
+            for (int byteIndex = 1; byteIndex <= payloadLength; ++byteIndex) {
+                payload.append(bytes.at(byteIndex));
+            }
+            payloads.append(payload);
+            continue;
+        }
+
+        if (pciType != 0x1 || bytes.size() < 3 || bytes.at(2) != sid) {
+            continue;
+        }
+
+        const int payloadLength = ((bytes.at(0) & 0x0F) << 8) | bytes.at(1);
+        if (payloadLength <= 0) {
+            continue;
+        }
+        QVector<int> payload;
+        for (int byteIndex = 2; byteIndex < bytes.size() && payload.size() < payloadLength; ++byteIndex) {
+            payload.append(bytes.at(byteIndex));
+        }
+
+        int expectedSequence = 1;
+        for (int nextIndex = index + 1; nextIndex < idFrames.size() && payload.size() < payloadLength; ++nextIndex) {
+            const QVector<int> cfBytes = frameByteValues(idFrames.at(nextIndex));
+            if (cfBytes.isEmpty() || ((cfBytes.at(0) >> 4) & 0x0F) != 0x2) {
+                continue;
+            }
+            const int sequence = cfBytes.at(0) & 0x0F;
+            if (sequence != (expectedSequence & 0x0F)) {
+                break;
+            }
+            ++expectedSequence;
+            for (int byteIndex = 1; byteIndex < cfBytes.size() && payload.size() < payloadLength; ++byteIndex) {
+                payload.append(cfBytes.at(byteIndex));
+            }
+        }
+
+        if (payload.size() >= payloadLength) {
+            payloads.append(payload);
+        }
+    }
+    return payloads;
+}
+
+bool payloadContainsDidAndData(const QVector<int> &payload, quint16 did, const QByteArray &data)
+{
+    if (payload.size() < 3 + data.size() ||
+        payload.at(0) != 0x2E ||
+        payload.at(1) != ((did >> 8) & 0xFF) ||
+        payload.at(2) != (did & 0xFF)) {
+        return false;
+    }
+    for (int index = 0; index < data.size(); ++index) {
+        if (payload.at(index + 3) != static_cast<quint8>(data.at(index))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 QString otaSystemStatusText(int status)
 {
     if (status == 0x01) {
@@ -612,20 +688,50 @@ bool hasFrameFirstByte(const QVector<EvidenceFrame> &frames, int canId, const QS
     return countFrameFirstByte(frames, canId, firstByte) > 0;
 }
 
-bool frameBytesAllZero(const EvidenceFrame &frame)
+bool frameBytesAllValue(const EvidenceFrame &frame, const QString &expected)
 {
     for (const QString &byte : frame.bytes) {
-        if (byte.compare(QStringLiteral("00"), Qt::CaseInsensitive) != 0) {
+        if (byte.compare(expected, Qt::CaseInsensitive) != 0) {
             return false;
         }
     }
     return !frame.bytes.isEmpty();
 }
 
-bool hasAllZeroFrame(const QVector<EvidenceFrame> &frames, int canId)
+bool hasUnrecognizedTagPlaceholderFrame(const QVector<EvidenceFrame> &frames, int canId)
 {
     for (const EvidenceFrame &frame : framesById(frames, canId, true)) {
-        if (frameBytesAllZero(frame)) {
+        if (frame.bytes.size() == kClassicCanDlc &&
+            frameBytesAllValue(frame, QStringLiteral("30"))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool frameBytesAreValidTagSegment(const EvidenceFrame &frame)
+{
+    if (frame.bytes.size() != kClassicCanDlc ||
+        frameBytesAllValue(frame, QStringLiteral("30"))) {
+        return false;
+    }
+    for (const QString &byteText : frame.bytes) {
+        bool ok = false;
+        const int value = byteText.toInt(&ok, 16);
+        if (!ok) {
+            return false;
+        }
+        if (value < 0x20 || value > 0x7E) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool hasValidTagSegmentFrame(const QVector<EvidenceFrame> &frames, int canId)
+{
+    for (const EvidenceFrame &frame : framesById(frames, canId, true)) {
+        if (frameBytesAreValidTagSegment(frame)) {
             return true;
         }
     }
@@ -1295,6 +1401,109 @@ TestJudgeResult judgeControlToggleFollowed(const QVector<EvidenceFrame> &frames)
                       keyFrames);
 }
 
+TestJudgeResult judgeFaultControlToggleRepeated(const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLines(frames, QList<int>() << 0x207 << 0x2C0);
+    QVector<EvidenceFrame> commands;
+    for (const EvidenceFrame &frame : frames) {
+        if (frame.canId == 0x207 && !frame.bytes.isEmpty() &&
+            (frame.bytes.at(0) == QStringLiteral("01") || frame.bytes.at(0) == QStringLiteral("00"))) {
+            commands.append(frame);
+        }
+    }
+
+    const int startCommands = countFrameFirstByte(commands, 0x207, QStringLiteral("01"));
+    const int stopCommands = countFrameFirstByte(commands, 0x207, QStringLiteral("00"));
+    if (startCommands < 3 || stopCommands < 3) {
+        return makeBlocked(QStringLiteral("故障保持测试命令不完整：开始 %1 条，停止 %2 条；至少需要开始/停止各 3 条。")
+                               .arg(startCommands)
+                               .arg(stopCommands),
+                           QStringLiteral("request_missing"),
+                           keyFrames);
+    }
+
+    const QStringList expectedSequence = QStringList()
+        << QStringLiteral("01") << QStringLiteral("00")
+        << QStringLiteral("01") << QStringLiteral("00")
+        << QStringLiteral("01") << QStringLiteral("00");
+    QVector<EvidenceFrame> testCommands;
+    for (int start = 0; start + expectedSequence.size() <= commands.size(); ++start) {
+        bool sequenceMatched = true;
+        for (int offset = 0; offset < expectedSequence.size(); ++offset) {
+            if (commands.at(start + offset).bytes.at(0) != expectedSequence.at(offset)) {
+                sequenceMatched = false;
+                break;
+            }
+        }
+        if (sequenceMatched) {
+            for (int offset = 0; offset < expectedSequence.size(); ++offset) {
+                testCommands.append(commands.at(start + offset));
+            }
+            break;
+        }
+    }
+    if (testCommands.size() != expectedSequence.size()) {
+        return makeBlocked(QStringLiteral("未找到完整的 3 轮 0x207 开始/停止交替序列。"),
+                           QStringLiteral("request_sequence_missing"),
+                           keyFrames);
+    }
+
+    QStringList failedCommands;
+    int checkedCommands = 0;
+    bool hasFaultStatus = false;
+    for (int index = 0; index < testCommands.size(); ++index) {
+        const EvidenceFrame command = testCommands.at(index);
+        const QString expectedMode = command.bytes.at(0);
+        ++checkedCommands;
+        QDateTime nextCommandTime;
+        if (index + 1 < testCommands.size() && testCommands.at(index + 1).timestamp.isValid()) {
+            nextCommandTime = testCommands.at(index + 1).timestamp;
+        } else if (command.timestamp.isValid()) {
+            nextCommandTime = command.timestamp.addMSecs(800);
+        }
+
+        bool matchedState = false;
+        for (const EvidenceFrame &status : framesBetween(frames, command.timestamp, nextCommandTime, 0x2C0, 0)) {
+            if (status.bytes.size() < 3) {
+                continue;
+            }
+            if (status.bytes.at(2).compare(QStringLiteral("00"), Qt::CaseInsensitive) != 0) {
+                hasFaultStatus = true;
+            }
+            if (status.bytes.at(0) == expectedMode &&
+                status.bytes.at(1) == QStringLiteral("00")) {
+                matchedState = true;
+                break;
+            }
+        }
+        if (!matchedState) {
+            failedCommands.append(QStringLiteral("第%1条0x207=%2后未采集到 Byte1=%2/Byte2=00")
+                                      .arg(checkedCommands)
+                                      .arg(expectedMode));
+        }
+    }
+
+    if (checkedCommands < 6) {
+        return makeBlocked(QStringLiteral("开始/停止交替命令采样不足：仅检查到 %1 条有效命令。").arg(checkedCommands),
+                           QStringLiteral("request_missing"),
+                           keyFrames);
+    }
+    if (!failedCommands.isEmpty()) {
+        return makeFailed(QStringLiteral("故障期间 0x207 开始/停止切换后 0x2C0 未逐次跟随：%1。")
+                              .arg(failedCommands.join(QStringLiteral("；"))),
+                          QStringLiteral("expected_mismatch"),
+                          keyFrames);
+    }
+
+    const QString faultText = hasFaultStatus
+        ? QStringLiteral("，且采集到 Byte3 非 0 故障状态")
+        : QStringLiteral("；未采集到 Byte3 非 0，故障注入状态请结合现场确认");
+    return makePassed(QStringLiteral("故障期间已采集 %1 条开始/停止交替命令，且每次切换后 0x2C0 Byte1 均跟随 0x207、Byte2=00%2。")
+                          .arg(checkedCommands)
+                          .arg(faultText),
+                      keyFrames);
+}
+
 TestJudgeResult judgeStoppedNoTag(const QVector<EvidenceFrame> &frames)
 {
     const QStringList keyFrames = keyFrameLines(frames, QList<int>() << 0x207 << 0x2C0);
@@ -1619,16 +1828,39 @@ TestJudgeResult judgeNvmWriteAndVerify(const TestCase &testCase, const QVector<E
 
 TestJudgeResult judgeNvmBusyOrSerializedWrite(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
 {
-    const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, QList<int>() << kRfidRequestId << kRfidResponseId << 0x2C3);
+    const QStringList keyFrames = keyFrameLinesForCase(testCase, frames, QList<int>() << kRfidRequestId << kRfidResponseId << 0x2C4 << 0x2C5);
     int writeRequests = 0;
     for (const EvidenceFrame &frame : framesById(frames, kRfidRequestId, false)) {
-        if (frameHasData(frame, QStringLiteral("2EE7"))) {
+        if (frameHasData(frame, QStringLiteral("2EE7E1"))) {
             ++writeRequests;
         }
     }
+    const QByteArray snA("NVM003SNTESTA001");
+    const QByteArray snB("NVM003SNTESTB001");
+    bool hasSnARequest = false;
+    bool hasSnBRequest = false;
+    int e7e1WriteRequests = 0;
+    const QVector<QVector<int>> requestPayloads = collectIsoTpPayloads(frames, kRfidRequestId, 0x2E);
+    for (const QVector<int> &payload : requestPayloads) {
+        if (payload.size() >= 3 && payload.at(1) == 0xE7 && payload.at(2) == 0xE1) {
+            ++e7e1WriteRequests;
+        }
+        if (payloadContainsDidAndData(payload, 0xE7E1, snA)) {
+            hasSnARequest = true;
+        }
+        if (payloadContainsDidAndData(payload, 0xE7E1, snB)) {
+            hasSnBRequest = true;
+        }
+    }
+    writeRequests = qMax(writeRequests, e7e1WriteRequests);
     if (writeRequests < 2) {
-        return makeBlocked(QStringLiteral("未采集到连续两次 0x2E 写入请求，无法判定忙处理/串行处理。"),
-                           QStringLiteral("request_missing"),
+        return makeBlocked(QStringLiteral("未采集到连续两次 DID=0xE7E1 的 0x2E 写 SN 请求，无法判定忙处理/串行处理。"),
+                            QStringLiteral("request_missing"),
+                            keyFrames);
+    }
+    if (!hasSnARequest || !hasSnBRequest) {
+        return makeBlocked(QStringLiteral("连续写入请求未同时包含两组不同测试 SN，无法区分两次写入值。"),
+                           QStringLiteral("request_value_missing"),
                            keyFrames);
     }
 
@@ -1644,19 +1876,29 @@ TestJudgeResult judgeNvmBusyOrSerializedWrite(const TestCase &testCase, const QV
                           keyFrames);
     }
     if (negativeCount > 0) {
-        return makePassed(QStringLiteral("已采集连续写入请求及 7F 2E 否定响应，设备按忙/拒绝方式处理。"),
+        return makePassed(QStringLiteral("已采集两组不同 SN 连续写入请求及 7F 2E 否定响应，设备按忙/拒绝方式处理。"),
+                           keyFrames);
+    }
+
+    int positiveE7E1Count = 0;
+    for (const EvidenceFrame &frame : framesById(frames, kRfidResponseId, true)) {
+        if (frameHasData(frame, QStringLiteral("6EE7E1"))) {
+            ++positiveE7E1Count;
+        }
+    }
+    if (positiveE7E1Count >= 2) {
+        const QString restoreText = writeRequests >= 3 && positiveE7E1Count >= 3
+            ? QStringLiteral("；已采集原 SN 恢复写入响应")
+            : QStringLiteral("；请结合恢复写入/广播回读确认原 SN 已恢复");
+        return makePassed(QStringLiteral("未出现忙/拒绝响应，但已采集两组不同 SN 连续写入请求及 %1 次 6E E7 E1 肯定响应，设备按串行处理方式完成连续写入%2。")
+                              .arg(positiveE7E1Count)
+                              .arg(restoreText),
                           keyFrames);
     }
 
-    if (evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("036EE7"), true)) {
-        return makeFailed(QStringLiteral("连续写入过程中未观察到忙/拒绝响应，仅采集到 0x2E 肯定响应，不满足忙响应测试要求。"),
-                          QStringLiteral("expected_busy_missing"),
-                          keyFrames);
-    }
-
-    return makeBlocked(QStringLiteral("已发送连续写入请求，但未采集到 7F 2E 忙/拒绝响应证据。"),
-                       QStringLiteral("response_missing"),
-                       keyFrames);
+    return makeBlocked(QStringLiteral("已发送两组不同 SN 连续写入请求，但未采集到 7F 2E 忙/拒绝响应，也未采集到足够的 6E E7 E1 串行处理响应。"),
+                        QStringLiteral("response_missing"),
+                        keyFrames);
 }
 TestJudgeResult judgeOtaProgramStatusResponse(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
 {
@@ -1991,34 +2233,49 @@ TestJudgeResult judgeSemiAssist(const TestCase &testCase, const QVector<Evidence
                            keyFrames);
     }
     if (templ == QStringLiteral("mt.semi.tag_16byte_collected")) {
-        if (!framesById(frames, 0x2C1, true).isEmpty() && !framesById(frames, 0x2C2, true).isEmpty()) {
-            return makePassed(QStringLiteral("已采集到 0x2C1 和 0x2C2 TAG 分片，请人工确认拼接内容。"),
+        if (evidenceHasFrameByte(frames, 0x2C0, 1, QStringLiteral("01")) &&
+            hasValidTagSegmentFrame(frames, 0x2C1) &&
+            hasValidTagSegmentFrame(frames, 0x2C2)) {
+            const QString extendedText = hasUnrecognizedTagPlaceholderFrame(frames, 0x2C6)
+                ? QStringLiteral("；已采集到 0x2C6 全 0x30 扩展占位帧")
+                : QString();
+            return makePassed(QStringLiteral("已采集到 0x2C1 和 0x2C2 有效 16 字节 TAG 分片%1，请人工确认拼接内容。")
+                                  .arg(extendedText),
                               keyFrames);
         }
-        return makeBlocked(QStringLiteral("未同时采集到 0x2C1/0x2C2 TAG 分片。"),
+        return makeBlocked(QStringLiteral("未同时采集到 0x2C0 Byte2=0x01、0x2C1/0x2C2 有效可打印 ASCII TAG 分片。"),
                            QStringLiteral("evidence_missing"),
                            keyFrames);
     }
     if (templ == QStringLiteral("mt.semi.tag_absent_cleared") ||
         templ == QStringLiteral("mt.semi.tag_residue_cleared")) {
+        const bool requiresExtendedTagPart = templ == QStringLiteral("mt.semi.tag_residue_cleared");
+        const bool hasRequiredTagPlaceholders =
+            hasUnrecognizedTagPlaceholderFrame(frames, 0x2C1) &&
+            hasUnrecognizedTagPlaceholderFrame(frames, 0x2C2) &&
+            (!requiresExtendedTagPart || hasUnrecognizedTagPlaceholderFrame(frames, 0x2C6));
         if (evidenceHasFrameByte(frames, 0x2C0, 1, QStringLiteral("00")) &&
-            hasAllZeroFrame(frames, 0x2C1) &&
-            hasAllZeroFrame(frames, 0x2C2)) {
-            return makePassed(QStringLiteral("已采集到无 TAG 状态，且 TAG 分片为全 0。"),
+            hasRequiredTagPlaceholders) {
+            return makePassed(requiresExtendedTagPart
+                                  ? QStringLiteral("已采集到无 TAG 状态，且 0x2C1/0x2C2/0x2C6 TAG 分片均为 0x30 未识别占位值。")
+                                  : QStringLiteral("已采集到无 TAG 状态，且 0x2C1/0x2C2 TAG 分片均为 0x30 未识别占位值。"),
                               keyFrames);
         }
-        return makeFailed(QStringLiteral("无 TAG 清零证据不完整，可能仍存在旧 TAG 或非 0 TAG 分片。"),
+        return makeFailed(requiresExtendedTagPart
+                              ? QStringLiteral("无 TAG 状态下未采集到 0x2C1/0x2C2/0x2C6 全 0x30 占位值，可能仍存在旧 TAG 或异常广播。")
+                              : QStringLiteral("无 TAG 状态下未采集到 0x2C1/0x2C2 全 0x30 占位值，可能仍存在旧 TAG 或异常广播。"),
                           QStringLiteral("expected_mismatch"),
                           keyFrames);
     }
     if (templ == QStringLiteral("mt.semi.tag_24byte_collected")) {
-        if (!framesById(frames, 0x2C1, true).isEmpty() &&
-            !framesById(frames, 0x2C2, true).isEmpty() &&
-            !framesById(frames, 0x2C6, true).isEmpty()) {
-            return makePassed(QStringLiteral("已采集到 0x2C1/0x2C2/0x2C6 TAG 分片，请人工确认拼接内容。"),
+        if (evidenceHasFrameByte(frames, 0x2C0, 1, QStringLiteral("01")) &&
+            hasValidTagSegmentFrame(frames, 0x2C1) &&
+            hasValidTagSegmentFrame(frames, 0x2C2) &&
+            hasValidTagSegmentFrame(frames, 0x2C6)) {
+            return makePassed(QStringLiteral("已采集到 0x2C1/0x2C2/0x2C6 有效 24 字节 TAG 分片，请人工确认拼接内容。"),
                               keyFrames);
         }
-        return makeBlocked(QStringLiteral("未完整采集 24 字节 TAG 所需的 0x2C1/0x2C2/0x2C6 分片。"),
+        return makeBlocked(QStringLiteral("未完整采集 0x2C0 Byte2=0x01 以及 0x2C1/0x2C2/0x2C6 有效可打印 ASCII TAG 分片。"),
                            QStringLiteral("evidence_missing"),
                            keyFrames);
     }
@@ -2042,13 +2299,33 @@ TestJudgeResult judgeSemiAssist(const TestCase &testCase, const QVector<Evidence
     }
     if (templ == QStringLiteral("mt.semi.fault_status_collected") ||
         templ == QStringLiteral("mt.semi.fault_control_status_collected")) {
+        bool hasUnexpectedFaultCode = false;
+        QString unexpectedFaultCode;
         for (const EvidenceFrame &frame : framesById(frames, 0x2C0, true)) {
-            if (frame.bytes.size() >= 3 && frame.bytes.at(2) != QStringLiteral("00")) {
-                return makePassed(QStringLiteral("0x2C0 Byte3 上报非 0 故障状态，请人工确认故障场景。"),
+            if (frame.bytes.size() < 3) {
+                continue;
+            }
+            const QString faultCode = frame.bytes.at(2).toUpper();
+            if (faultCode == QStringLiteral("01") || faultCode == QStringLiteral("02")) {
+                const QString faultText = faultCode == QStringLiteral("01")
+                    ? QStringLiteral("模块故障")
+                    : QStringLiteral("通信异常");
+                return makePassed(QStringLiteral("已采集到 0x2C0 Byte3=0x%1（%2），符合故障信息上报预期。")
+                                      .arg(faultCode, faultText),
                                   keyFrames);
             }
+            if (faultCode != QStringLiteral("00")) {
+                hasUnexpectedFaultCode = true;
+                unexpectedFaultCode = faultCode;
+            }
         }
-        return makeBlocked(QStringLiteral("未采集到 0x2C0 Byte3 非 0 故障状态。"),
+        if (hasUnexpectedFaultCode) {
+            return makeFailed(QStringLiteral("已采集到 0x2C0 Byte3=0x%1，但不属于预期的 0x01 模块故障或 0x02 通信异常。")
+                                  .arg(unexpectedFaultCode),
+                              QStringLiteral("unexpected_fault_code"),
+                              keyFrames);
+        }
+        return makeBlocked(QStringLiteral("未采集到 0x2C0 Byte3=0x01/0x02 故障状态。"),
                            QStringLiteral("expected_missing"),
                            keyFrames);
     }
@@ -2232,6 +2509,9 @@ TestJudgeResult TestCaseJudge::judge(const TestCase &testCase, const QString &ev
     }
     if (judgeTemplate == QStringLiteral("mt.control_0x207_toggle_followed")) {
         return judgeControlToggleFollowed(frames);
+    }
+    if (judgeTemplate == QStringLiteral("mt.control_0x207_fault_toggle_repeated")) {
+        return judgeFaultControlToggleRepeated(frames);
     }
     if (judgeTemplate == QStringLiteral("mt.status_2c0_stopped_no_tag")) {
         return judgeStoppedNoTag(frames);

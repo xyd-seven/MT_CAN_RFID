@@ -1,6 +1,7 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "canlogwindow.h"
+#include "domain/isotptransport.h"
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
@@ -4365,20 +4366,79 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         setMessage(QStringLiteral("已按当前 0x2C4/0x2C5 设备 ID 回写 DID=0xE7E1。"));
         return true;
     }
-    if (testCase.commandTemplate == QStringLiteral("mt.nvm_double_write_current_hw_version")) {
-        const QByteArray data = currentHardwareVersionBytes();
-        if (data.isEmpty()) {
-            setMessage(QStringLiteral("当前未采集到有效 0x2C3 硬件版本，已阻止连续写入。"));
+    if (testCase.commandTemplate == QStringLiteral("mt.nvm_double_write_current_hw_version") ||
+        testCase.commandTemplate == QStringLiteral("mt.nvm_double_write_distinct_sn")) {
+        const QByteArray originalSn = currentDeviceIdBytes();
+        if (originalSn.size() != 16) {
+            setMessage(QStringLiteral("当前未采集到有效 16 字节 0x2C4/0x2C5 设备 SN，已阻止连续写入和恢复。"));
             return false;
         }
-        const QByteArray writeFrame = RfidProtocol::buildWriteNonVolatileFrame(0xE7E0, data);
-        if (writeFrame.isEmpty()) {
-            setMessage(QStringLiteral("构建 DID=0xE7E0 硬件版本写入帧失败，已阻止连续写入。"));
+        const QByteArray testSnA("NVM003SNTESTA001");
+        const QByteArray testSnB("NVM003SNTESTB001");
+        if (originalSn == testSnA || originalSn == testSnB) {
+            setMessage(QStringLiteral("当前设备 SN 与 NVM-003 测试 SN 冲突，已阻止写入以避免无法恢复。"));
             return false;
         }
-        sendRfidFrame(RfidProtocol::RequestFrameId, writeFrame);
-        sendRfidFrame(RfidProtocol::RequestFrameId, writeFrame);
-        setMessage(QStringLiteral("已连续直接发送两次 DID=0xE7E0 硬件版本原始单帧写入请求，等待设备返回忙/拒绝响应。"));
+
+        auto buildWritePayload = [](quint16 did, const QByteArray &data) {
+            QByteArray payload;
+            payload.append(static_cast<char>(0x2E));
+            payload.append(static_cast<char>((did >> 8) & 0xFF));
+            payload.append(static_cast<char>(did & 0xFF));
+            payload.append(data);
+            return payload;
+        };
+        auto sendRawIsoTpWrite = [this, &shortWait, &buildWritePayload](quint16 did, const QByteArray &data, const QString &label) {
+            const QByteArray payload = buildWritePayload(did, data);
+            IsoTpConfig config;
+            config.requestId = RfidProtocol::RequestFrameId;
+            config.responseId = RfidProtocol::ResponseFrameId;
+            config.channel = static_cast<quint32>(ui->sendPathCombo->currentIndex());
+            IsoTpTransport transport(config);
+
+            if (payload.size() <= 7) {
+                QVector<CanFrame> frames;
+                if (transport.buildRequestFrames(payload, &frames) != IsoTpTransport::Result::Ok || frames.isEmpty()) {
+                    return false;
+                }
+                sendRfidFrame(RfidProtocol::RequestFrameId, frames.first().data);
+                return true;
+            }
+
+            const CanFrame firstFrame = transport.buildFirstFrame(payload, payload.size());
+            sendRfidFrame(RfidProtocol::RequestFrameId, firstFrame.data);
+            testCaseService.appendExecutionEvent(QStringLiteral("NVM-003写入请求"),
+                                                 QStringLiteral("%1：DID=0x%2，数据=%3，已发送 ISO-TP 首帧。")
+                                                     .arg(label)
+                                                     .arg(did, 4, 16, QChar('0'))
+                                                     .arg(QString::fromLatin1(data))
+                                                     .toUpper());
+            shortWait(80);
+
+            int offset = 6;
+            quint8 sequence = 1;
+            while (offset < payload.size()) {
+                const QByteArray chunk = payload.mid(offset, 7);
+                const CanFrame cfFrame = transport.buildConsecutiveFrame(chunk, sequence);
+                sendRfidFrame(RfidProtocol::RequestFrameId, cfFrame.data);
+                offset += chunk.size();
+                sequence = static_cast<quint8>((sequence + 1) & 0x0F);
+                shortWait(1);
+            }
+            return true;
+        };
+
+        if (!sendRawIsoTpWrite(0xE7E1, testSnA, QStringLiteral("第一次测试SN写入")) ||
+            !sendRawIsoTpWrite(0xE7E1, testSnB, QStringLiteral("第二次测试SN写入"))) {
+            setMessage(QStringLiteral("构建或发送 DID=0xE7E1 测试 SN 多帧写入失败，已阻止执行。"));
+            return false;
+        }
+        shortWait(2500);
+        if (!sendRawIsoTpWrite(0xE7E1, originalSn, QStringLiteral("原SN恢复写入"))) {
+            setMessage(QStringLiteral("测试 SN 已发送，但原 SN 恢复写入发送失败，请人工恢复 SN。"));
+            return true;
+        }
+        setMessage(QStringLiteral("已连续发送两组不同 DID=0xE7E1 测试 SN 写入请求：SN-A=NVM003SNTESTA001，SN-B=NVM003SNTESTB001；随后已发送原 SN 恢复写入。请根据 7F 2E 忙/拒绝响应或多次 6E E7 E1 串行响应判定。"));
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.ota_query_program_status")) {
@@ -4698,14 +4758,32 @@ bool MainWindow::sendSemiAssistCommand(const TestCase &testCase, QString *messag
         return true;
     }
     if (assistTemplate == QStringLiteral("mt.semi.fault_control_status")) {
-        rfidScanning = true;
+        auto waitMs = [](int milliseconds) {
+            QEventLoop waitLoop;
+            QTimer::singleShot(milliseconds, &waitLoop, &QEventLoop::quit);
+            waitLoop.exec();
+        };
+        const bool timerWasActive = rfidControlTimer != nullptr && rfidControlTimer->isActive();
+        const bool originalScanning = rfidScanning;
+        if (timerWasActive) {
+            rfidControlTimer->stop();
+        }
+        for (int index = 0; index < 3; ++index) {
+            rfidScanning = true;
+            updateMeituanTopStatus();
+            sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
+            waitMs(600);
+            rfidScanning = false;
+            updateMeituanTopStatus();
+            sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
+            waitMs(600);
+        }
+        rfidScanning = originalScanning;
         updateMeituanTopStatus();
-        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
-        QEventLoop waitLoop;
-        QTimer::singleShot(300, &waitLoop, &QEventLoop::quit);
-        waitLoop.exec();
-        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
-        setMessage(QStringLiteral("半自动辅助已发送 0x207 开始/停止命令，正在采集故障状态证据。"));
+        if (timerWasActive) {
+            rfidControlTimer->start();
+        }
+        setMessage(QStringLiteral("半自动辅助已暂停后台 0x207 周期帧，并发送 3 轮开始/停止交替命令；执行后已恢复原 0x207 周期状态。"));
         return true;
     }
     if (assistTemplate == QStringLiteral("mt.semi.ota_start_upgrade_current_file")) {
@@ -4895,8 +4973,10 @@ void MainWindow::runSelectedTestCaseSemiAssist()
         semiJudgeTemplate == QStringLiteral("mt.semi.tag_absent_cleared") ||
         semiJudgeTemplate == QStringLiteral("mt.semi.tag_24byte_collected") ||
         semiJudgeTemplate == QStringLiteral("mt.semi.tag_residue_cleared") ||
+        semiJudgeTemplate == QStringLiteral("mt.semi.fault_status_collected") ||
         semiJudgeTemplate == QStringLiteral("mt.device_id_prefix_check") ||
         semiJudgeTemplate == QStringLiteral("mt.startup_broadcast_period") ||
+        semiJudgeTemplate == QStringLiteral("mt.control_0x207_fault_toggle_repeated") ||
         semiJudgeTemplate == QStringLiteral("mt.ota_a1_accepted_boot") ||
         semiJudgeTemplate == QStringLiteral("mt.ota_a1_rejected") ||
         semiJudgeTemplate == QStringLiteral("mt.ota_a2_first_frame_error") ||

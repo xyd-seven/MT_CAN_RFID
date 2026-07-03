@@ -702,6 +702,32 @@
 - Release 构建：PASS（2026-07-02，`qmake ..\CAN.pro` + `mingw32-make -j4` 编译通过）
 - 最新可执行文件：`F:\TestTools\MT_CAN\CAN_RFID_Qt\release\CAN_RFID.exe`
 
+## 38. 最新交接补充（2026-07-02 - NVM-003 改为不同 SN 连续写入并恢复）
+
+根据最新实测，`MT-RFID-NVM-003` 原“连续写当前硬件版本”仍存在证据区分度不足问题：两次写入数据相同且仅 2 字节，终端即使均返回肯定响应，也无法判断第二次写入是否真实进入写流程。
+
+- **执行逻辑更新**：
+  - 用例改为写 `DID=0xE7E1` 设备 SN，多帧写入长度更接近真实 NVM 写入场景。
+  - 执行前读取当前 `0x2C4/0x2C5` 拼接 SN，作为恢复值；未采集到 16 字节 SN 时阻止执行。
+  - 连续发送两组不同测试 SN：
+    - `NVM003SNTESTA001`
+    - `NVM003SNTESTB001`
+  - 两组测试 SN 写入后等待约 2.5s，再发送原 SN 恢复写入请求。
+
+- **判定逻辑更新**：
+  - 采集到两组不同 SN 写入请求，并出现允许范围内 `7F 2E` 忙/拒绝类否定响应时判定通过。
+  - 若未出现忙/拒绝响应，但采集到两组不同 SN 请求和至少两次 `6E E7 E1` 肯定响应，则按“终端串行处理连续写入”判定通过。
+  - 若无法采集两组不同 SN 请求、忙/拒绝响应或足够肯定响应，则阻塞并提示证据不足。
+
+- **用例资源更新**：
+  - `MT-RFID-NVM-003` 的测试数据、步骤、预期结果、关键帧 ID 已同步为 `DID=0xE7E1` SN 连续写入与恢复。
+  - 新命令模板名：`mt.nvm_double_write_distinct_sn`；旧模板名 `mt.nvm_double_write_current_hw_version` 在代码中保留兼容。
+
+### 最新测试状态
+- JSON 用例资源校验：PASS（当前内置用例数 88，无重复 ID）
+- Release 构建：PASS（2026-07-02，`qmake ..\CAN.pro` + `mingw32-make -j4` 编译通过）
+- 最新可执行文件：`F:\TestTools\MT_CAN\CAN_RFID_Qt\release\CAN_RFID.exe`
+
 ## 37. 最新交接补充（2026-07-02 - OTA-010/OTA-013 停留 BOOT 查询补齐）
 
 继续补齐需要判断终端停留状态的 OTA 用例：
@@ -741,3 +767,43 @@
 - JSON 用例资源校验：PASS（当前内置用例数 88，无重复 ID）
 - Release 构建：PASS（2026-07-02，`qmake ..\CAN.pro` + `mingw32-make -j4` 编译通过）
 - 最新可执行文件：`F:\TestTools\MT_CAN\CAN_RFID_Qt\release\CAN_RFID.exe`
+
+## 39. 最新交接补充（2026-07-03 - 未识别 TAG 0x30 占位与 0x2C6 扩展占位修正）
+
+根据终端最新逻辑和实测反馈，完成美团 RFID TAG 广播解析、压力统计、产线保护和测试执行判定修正：
+
+- **未识别 TAG 占位规则**：
+  - 未识别 TAG 时，`0x2C1/0x2C2/0x2C6` TAG 分片按全 `0x30` 判定为占位值。
+  - `0x2C0 Byte2=0x00` 仍作为未识别 TAG 的状态依据，不改为 `0x30`。
+  - 不再兼容全 `0x00` 作为当前用例通过条件。
+- **16 字节 TAG 场景新增规则**：
+  - 终端识别 16 字节 TAG 时仍会广播 `0x2C6`，但 `0x2C6` 内容为全 `0x30` 扩展占位。
+  - 上位机监控和压力测试已修正为：`0x2C6` 全 `0x30` 只清空扩展分片，不清空 `0x2C1/0x2C2` 已识别的 16 字节 TAG。
+- **测试执行判定修正**：
+  - `MT-RFID-BC-007`：要求 `0x2C0 Byte2=0x01`，且 `0x2C1/0x2C2` 为有效可打印 ASCII TAG 分片；若采集到 `0x2C6` 全 `0x30`，记录为扩展占位证据并允许通过。
+  - `MT-RFID-BC-009`：要求 `0x2C1/0x2C2/0x2C6` 均为有效 TAG 分片，`0x2C6` 不能是全 `0x30`。
+  - `MT-RFID-BC-008` / `MT-RFID-ERR-004`：无 TAG/残留检查按全 `0x30` 占位判定。
+  - 修正了 `RF012206` 这类包含 `R` 的可打印 ASCII TAG 被“十六进制字符限定”误拦截的问题。
+- **产线和压力测试保护**：
+  - 压力测试不再把全 `0x30` 占位值计入有效 TAG 或不同 TAG。
+  - 产线检测增加占位 TAG 兜底保护，避免占位值被记录为读卡成功。
+
+### 修改文件
+- `CAN_RFID_Qt/rfidprotocol.h`
+- `CAN_RFID_Qt/rfidprotocol.cpp`
+- `CAN_RFID_Qt/application/rfidservice.h`
+- `CAN_RFID_Qt/application/rfidservice.cpp`
+- `CAN_RFID_Qt/application/stresstestservice.cpp`
+- `CAN_RFID_Qt/application/productiontestservice.cpp`
+- `CAN_RFID_Qt/application/testcasejudge.cpp`
+- `CAN_RFID_Qt/resources/testcases/meituan_rfid_can_testcases.json`
+- `CAN_RFID_Qt/mainwindow.cpp`
+- `HANDOFF.md`
+
+### 最新测试状态
+- Release 构建：PASS，2026-07-03 在 `F:\TestTools\MT_CAN\CAN_RFID_Qt\release` 使用 `qmake ..\CAN.pro` + `mingw32-make -j4` 编译通过。
+- 最新可执行文件：`F:\TestTools\MT_CAN\CAN_RFID_Qt\release\CAN_RFID.exe`，更新时间 `2026-07-03 08:27:35`。
+
+### 剩余风险与建议
+- 当前 TAG 分片判定按“可打印 ASCII”处理，适配 `RF012206`、`17068350`、`E280...` 等 HEX 字符格式广播；如果后续终端改为原始二进制 EPC 字节广播，需要再次放宽判定口径。
+- 当前工作区仍存在未纳入本次提交范围的协议 PDF 删除和若干未跟踪文档/输出文件，提交前已刻意排除，避免误提交无关变更。

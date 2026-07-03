@@ -353,6 +353,18 @@ bool StressTestService::canAcceptSample() const
 
 void StressTestService::updateTagPart(quint32 frameId, const QByteArray &payload)
 {
+    if (RfidProtocol::isUnrecognizedTagPlaceholderPayload(payload)) {
+        if (frameId == RfidProtocol::TagPart3FrameId) {
+            tagPart3.clear();
+        } else {
+            tagPart1.clear();
+            tagPart2.clear();
+            tagPart3.clear();
+        }
+        currentStats.currentTag = currentTagText();
+        return;
+    }
+
     const QString payloadText = RfidProtocol::parseAsciiPayload(payload);
 
     if (frameId == RfidProtocol::TagPart1FrameId) {
@@ -398,6 +410,9 @@ bool StressTestService::currentTagIsValid() const
 
 bool StressTestService::isValidTagText(const QString &tag) const
 {
+    if (RfidProtocol::isUnrecognizedTagPlaceholderText(tag)) {
+        return false;
+    }
     if (tag.length() != 16 && tag.length() != 24) {
         return false;
     }
@@ -413,7 +428,8 @@ bool StressTestService::isValidTagText(const QString &tag) const
 
 QString StressTestService::currentTagText() const
 {
-    return tagPart1 + tagPart2 + tagPart3;
+    const QString tag = tagPart1 + tagPart2 + tagPart3;
+    return RfidProtocol::isUnrecognizedTagPlaceholderText(tag) ? QString() : tag;
 }
 
 void StressTestService::clearCurrentTag()
