@@ -1,5 +1,6 @@
 #include "productiontestservice.h"
 #include "application/qingjurfidservice.h"
+#include "rfidprotocol.h"
 
 #include <QRegularExpression>
 
@@ -187,7 +188,7 @@ void ProductionTestService::handleRfidStatus(const RfidState &state)
         return;
     }
 
-    if (!state.tag.isEmpty()) {
+    if (!state.tag.isEmpty() && !RfidProtocol::isUnrecognizedTagPlaceholderText(state.tag)) {
         m_lastValidTag = state.tag;
         m_state.currentTag = state.tag;
     }
@@ -208,7 +209,7 @@ void ProductionTestService::handleRfidStatus(const RfidState &state)
     }
 
     if (isCardPresent(state)) {
-        if (!state.tag.isEmpty()) {
+        if (!state.tag.isEmpty() && !RfidProtocol::isUnrecognizedTagPlaceholderText(state.tag)) {
             recordSuccess(state.tag);
             return;
         }
@@ -220,7 +221,8 @@ void ProductionTestService::handleRfidStatus(const RfidState &state)
 
 void ProductionTestService::handleRfidTagUpdate(const QString &tag)
 {
-    if (m_phase != Phase::TestingCard || tag.isEmpty()) {
+    if (m_phase != Phase::TestingCard || tag.isEmpty() ||
+        RfidProtocol::isUnrecognizedTagPlaceholderText(tag)) {
         return;
     }
 
@@ -524,6 +526,10 @@ void ProductionTestService::finishTest(bool passed, const QString &reason)
 void ProductionTestService::recordSuccess(const QString &tag)
 {
     if (m_phase != Phase::TestingCard || m_state.completedSamples >= m_config.totalSamples) {
+        return;
+    }
+    if (RfidProtocol::isUnrecognizedTagPlaceholderText(tag)) {
+        recordFailure(QStringLiteral("未识别 TAG 占位值，不作为有效读卡结果"));
         return;
     }
 

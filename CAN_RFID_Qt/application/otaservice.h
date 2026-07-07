@@ -27,6 +27,12 @@ struct OtaErrorConfig
     bool ignoreFcInterval = false;
     bool isoTpSnError = false;
     bool outOfOrderState = false;
+    bool stopAfterA1Accepted = false;
+    bool stopAfterFirstA2Success = false;
+    bool abortAfterFirstA2Success = false;
+    bool queryLocationAfterA1Reject = false;
+    quint8 expectedProgramLocationAfterA1Accepted = 0xFF;
+    quint8 expectedProgramLocationAfterA1Reject = 0xFF;
 };
 
 class OtaWorker : public QThread

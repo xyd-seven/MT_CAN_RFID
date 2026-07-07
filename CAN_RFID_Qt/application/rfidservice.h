@@ -33,6 +33,7 @@ public:
     quint16 softwareVersion() const { return m_softwareVersion; }
 
 private:
+    void handleTagPartFrame(quint32 frameId, const QByteArray &payload);
     void handleStatusFrame(const QByteArray &payload);
     void handleVersionFrame(const QByteArray &payload);
     void handleResponseFrame(const QByteArray &payload);

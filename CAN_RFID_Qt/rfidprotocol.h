@@ -71,6 +71,8 @@ public:
     static RfidResponse parseResponseFrame(const QByteArray &payload);
 
     static QString parseAsciiPayload(const QByteArray &payload);
+    static bool isUnrecognizedTagPlaceholderPayload(const QByteArray &payload);
+    static bool isUnrecognizedTagPlaceholderText(const QString &text);
     static QString workModeText(quint8 value);
     static QString cardStatusText(quint8 value);
     static QString faultStatusText(quint8 value);

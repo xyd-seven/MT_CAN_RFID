@@ -1,10 +1,12 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
 #include "canlogwindow.h"
+#include "domain/isotptransport.h"
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QGroupBox>
 #include <QGridLayout>
@@ -4100,6 +4102,37 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         data.append(static_cast<char>(version & 0xFF));
         return data;
     };
+    auto startOtaUpgradeForTest = [this, &setMessage](OtaErrorConfig injectConfig, const QString &description) {
+        const QString firmwarePath = otaFirmwarePathValue == nullptr ? QString() : otaFirmwarePathValue->text().trimmed();
+        if (firmwarePath.isEmpty() || firmwarePath == QStringLiteral("-") || !QFileInfo::exists(firmwarePath)) {
+            setMessage(QStringLiteral("未选择有效 OTA 固件文件，已阻止自动升级。"));
+            return false;
+        }
+        const OtaService::State otaState = otaService.state();
+        if (otaState == OtaService::State::QueryProgram ||
+            otaState == OtaService::State::StartUpgrade ||
+            otaState == OtaService::State::SendData ||
+            otaState == OtaService::State::FinishUpgrade) {
+            setMessage(QStringLiteral("OTA 流程正在运行，已阻止重复启动。请等待当前升级结束或中止后再执行用例。"));
+            return false;
+        }
+        if (rfidService.hardwareVersion() == 0) {
+            setMessage(QStringLiteral("未采集到有效 0x2C3 硬件版本，已阻止 OTA 测试执行；请先采集版本广播后重试。"));
+            return false;
+        }
+        otaService.setChannel(static_cast<quint32>(ui->sendPathCombo->currentIndex()));
+        otaService.setDeviceVersions(rfidService.vendorCode(), rfidService.hardwareVersion(), rfidService.softwareVersion());
+        otaService.startUpgrade(firmwarePath, injectConfig);
+        setMessage(QStringLiteral("%1：固件=%2。OTA Tx/Rx 将写入当前用例证据日志。").arg(description, firmwarePath));
+        return true;
+    };
+    auto jumpAndStartOtaForTest = [this, &shortWait, &startOtaUpgradeForTest](quint8 targetProgram,
+                                                                              const OtaErrorConfig &injectConfig,
+                                                                              const QString &description) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(targetProgram));
+        shortWait(800);
+        return startOtaUpgradeForTest(injectConfig, description);
+    };
 
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x01_set_scan_period")) {
         QRegularExpression payloadRegex(QStringLiteral("\\b02\\s+01\\s+([0-9A-Fa-f]{2})\\b"));
@@ -4242,7 +4275,8 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         setMessage(QStringLiteral("已发送禁用故障诊断：ID=0x007 数据=02 85 00 55 55 55 55 55"));
         return true;
     }
-    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config")) {
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config") ||
+        testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config_and_reboot")) {
         quint16 canId = 0;
         quint16 periodMs = 0;
         if (!parsePeriodConfig(testCase.testData, &canId, &periodMs)) {
@@ -4250,6 +4284,15 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
             return false;
         }
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(canId, periodMs));
+        if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config_and_reboot")) {
+            shortWait(800);
+            sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
+            setMessage(QStringLiteral("已发送 0x29 周期配置并触发重启采集：ID=0x007 目标=0x%1 周期=0x%2；随后发送 SID=0x02 重启。")
+                .arg(canId, 3, 16, QChar('0'))
+                .arg(periodMs, 4, 16, QChar('0'))
+                .toUpper());
+            return true;
+        }
         setMessage(QStringLiteral("已发送 0x29 周期配置：ID=0x007 目标=0x%1 周期=0x%2。")
             .arg(canId, 3, 16, QChar('0'))
             .arg(periodMs, 4, 16, QChar('0'))
@@ -4295,6 +4338,7 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.nvm_write_current_device_id") ||
+        testCase.commandTemplate == QStringLiteral("mt.diag_isotp_multiframe_current_device_id") ||
         testCase.commandTemplate == QStringLiteral("mt.nvm_writeback_sn_and_reboot")) {
         const QByteArray data = currentDeviceIdBytes();
         if (data.isEmpty()) {
@@ -4304,6 +4348,10 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         if (!rfidDiagnosticTransfer.startWriteNonVolatile(0xE7E1, data)) {
             setMessage(QStringLiteral("启动设备 ID/SN 回写失败，请确认诊断传输未被占用。"));
             return false;
+        }
+        if (testCase.commandTemplate == QStringLiteral("mt.diag_isotp_multiframe_current_device_id")) {
+            setMessage(QStringLiteral("已按当前设备 ID 触发 DID=0xE7E1 多帧写回，用于验证 ISO-TP FF/FC/CF 流控过程。"));
+            return true;
         }
         if (testCase.commandTemplate == QStringLiteral("mt.nvm_writeback_sn_and_reboot")) {
             if (!waitUntilDiagnosticIdle(5000)) {
@@ -4318,25 +4366,176 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         setMessage(QStringLiteral("已按当前 0x2C4/0x2C5 设备 ID 回写 DID=0xE7E1。"));
         return true;
     }
-    if (testCase.commandTemplate == QStringLiteral("mt.nvm_double_write_current_hw_version")) {
-        const QByteArray data = currentHardwareVersionBytes();
-        if (data.isEmpty()) {
-            setMessage(QStringLiteral("当前未采集到有效 0x2C3 硬件版本，已阻止连续写入。"));
+    if (testCase.commandTemplate == QStringLiteral("mt.nvm_double_write_current_hw_version") ||
+        testCase.commandTemplate == QStringLiteral("mt.nvm_double_write_distinct_sn")) {
+        const QByteArray originalSn = currentDeviceIdBytes();
+        if (originalSn.size() != 16) {
+            setMessage(QStringLiteral("当前未采集到有效 16 字节 0x2C4/0x2C5 设备 SN，已阻止连续写入和恢复。"));
             return false;
         }
-        if (!rfidDiagnosticTransfer.startWriteNonVolatile(0xE7E0, data)) {
-            setMessage(QStringLiteral("启动第一次硬件版本写入失败，请确认诊断传输未被占用。"));
+        const QByteArray testSnA("NVM003SNTESTA001");
+        const QByteArray testSnB("NVM003SNTESTB001");
+        if (originalSn == testSnA || originalSn == testSnB) {
+            setMessage(QStringLiteral("当前设备 SN 与 NVM-003 测试 SN 冲突，已阻止写入以避免无法恢复。"));
             return false;
         }
-        shortWait(100);
-        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildWriteNonVolatileFrame(0xE7E0, data));
-        setMessage(QStringLiteral("已连续发送两次 DID=0xE7E0 硬件版本写入请求，等待设备忙处理或串行响应。"));
+
+        auto buildWritePayload = [](quint16 did, const QByteArray &data) {
+            QByteArray payload;
+            payload.append(static_cast<char>(0x2E));
+            payload.append(static_cast<char>((did >> 8) & 0xFF));
+            payload.append(static_cast<char>(did & 0xFF));
+            payload.append(data);
+            return payload;
+        };
+        auto sendRawIsoTpWrite = [this, &shortWait, &buildWritePayload](quint16 did, const QByteArray &data, const QString &label) {
+            const QByteArray payload = buildWritePayload(did, data);
+            IsoTpConfig config;
+            config.requestId = RfidProtocol::RequestFrameId;
+            config.responseId = RfidProtocol::ResponseFrameId;
+            config.channel = static_cast<quint32>(ui->sendPathCombo->currentIndex());
+            IsoTpTransport transport(config);
+
+            if (payload.size() <= 7) {
+                QVector<CanFrame> frames;
+                if (transport.buildRequestFrames(payload, &frames) != IsoTpTransport::Result::Ok || frames.isEmpty()) {
+                    return false;
+                }
+                sendRfidFrame(RfidProtocol::RequestFrameId, frames.first().data);
+                return true;
+            }
+
+            const CanFrame firstFrame = transport.buildFirstFrame(payload, payload.size());
+            sendRfidFrame(RfidProtocol::RequestFrameId, firstFrame.data);
+            testCaseService.appendExecutionEvent(QStringLiteral("NVM-003写入请求"),
+                                                 QStringLiteral("%1：DID=0x%2，数据=%3，已发送 ISO-TP 首帧。")
+                                                     .arg(label)
+                                                     .arg(did, 4, 16, QChar('0'))
+                                                     .arg(QString::fromLatin1(data))
+                                                     .toUpper());
+            shortWait(80);
+
+            int offset = 6;
+            quint8 sequence = 1;
+            while (offset < payload.size()) {
+                const QByteArray chunk = payload.mid(offset, 7);
+                const CanFrame cfFrame = transport.buildConsecutiveFrame(chunk, sequence);
+                sendRfidFrame(RfidProtocol::RequestFrameId, cfFrame.data);
+                offset += chunk.size();
+                sequence = static_cast<quint8>((sequence + 1) & 0x0F);
+                shortWait(1);
+            }
+            return true;
+        };
+
+        if (!sendRawIsoTpWrite(0xE7E1, testSnA, QStringLiteral("第一次测试SN写入")) ||
+            !sendRawIsoTpWrite(0xE7E1, testSnB, QStringLiteral("第二次测试SN写入"))) {
+            setMessage(QStringLiteral("构建或发送 DID=0xE7E1 测试 SN 多帧写入失败，已阻止执行。"));
+            return false;
+        }
+        shortWait(2500);
+        if (!sendRawIsoTpWrite(0xE7E1, originalSn, QStringLiteral("原SN恢复写入"))) {
+            setMessage(QStringLiteral("测试 SN 已发送，但原 SN 恢复写入发送失败，请人工恢复 SN。"));
+            return true;
+        }
+        setMessage(QStringLiteral("已连续发送两组不同 DID=0xE7E1 测试 SN 写入请求：SN-A=NVM003SNTESTA001，SN-B=NVM003SNTESTB001；随后已发送原 SN 恢复写入。请根据 7F 2E 忙/拒绝响应或多次 6E E7 E1 串行响应判定。"));
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.ota_query_program_status")) {
         sendRfidFrame(RfidProtocol::RequestFrameId, queryProgramStatusPayload());
         setMessage(QStringLiteral("已发送 OTA 程序位置查询：ID=0x007 数据=01 A4 55 55 55 55 55 55。"));
         return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_start_upgrade_current_file")) {
+        return startOtaUpgradeForTest(OtaErrorConfig(), QStringLiteral("已启动 OTA 升级"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_start_app_valid")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.stopAfterA1Accepted = true;
+        cfg.expectedProgramLocationAfterA1Accepted = 0x00;
+        return jumpAndStartOtaForTest(0x01, cfg, QStringLiteral("已跳转 APP 并启动 OTA A1 合法请求测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_start_boot_valid")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.stopAfterA1Accepted = true;
+        cfg.expectedProgramLocationAfterA1Accepted = 0x00;
+        return jumpAndStartOtaForTest(0x02, cfg, QStringLiteral("已跳转 BOOT 并启动 OTA A1 合法请求测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_start_vendor_mismatch")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.vendorMismatch = true;
+        return startOtaUpgradeForTest(cfg, QStringLiteral("已启动 OTA A1 厂商代码不匹配测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_start_app_vendor_mismatch")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.vendorMismatch = true;
+        cfg.queryLocationAfterA1Reject = true;
+        cfg.expectedProgramLocationAfterA1Reject = 0x01;
+        return jumpAndStartOtaForTest(0x01, cfg, QStringLiteral("已跳转 APP 并启动 OTA A1 厂商代码不匹配测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_start_boot_vendor_mismatch")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.vendorMismatch = true;
+        cfg.queryLocationAfterA1Reject = true;
+        cfg.expectedProgramLocationAfterA1Reject = 0x00;
+        return jumpAndStartOtaForTest(0x02, cfg, QStringLiteral("已跳转 BOOT 并启动 OTA A1 厂商代码不匹配测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_start_hw_mismatch")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.hwMismatch = true;
+        return startOtaUpgradeForTest(cfg, QStringLiteral("已启动 OTA A1 硬件版本不匹配测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_start_app_hw_mismatch")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.hwMismatch = true;
+        cfg.queryLocationAfterA1Reject = true;
+        cfg.expectedProgramLocationAfterA1Reject = 0x01;
+        return jumpAndStartOtaForTest(0x01, cfg, QStringLiteral("已跳转 APP 并启动 OTA A1 硬件版本不匹配测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_start_boot_hw_mismatch")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.hwMismatch = true;
+        cfg.queryLocationAfterA1Reject = true;
+        cfg.expectedProgramLocationAfterA1Reject = 0x00;
+        return jumpAndStartOtaForTest(0x02, cfg, QStringLiteral("已跳转 BOOT 并启动 OTA A1 硬件版本不匹配测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_a2_first_frame_data_error")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.a2FirstFrameDataError = true;
+        return startOtaUpgradeForTest(cfg, QStringLiteral("已启动 OTA A2 首包数据错误测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_a2_first_frame_success_boot_hold")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.stopAfterFirstA2Success = true;
+        return startOtaUpgradeForTest(cfg, QStringLiteral("已启动 OTA A2 首包正确写入后停止并查询 BOOT 测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_a3_crc_error")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.crcError = true;
+        return startOtaUpgradeForTest(cfg, QStringLiteral("已启动 OTA A3 CRC 错误测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_silent_timeout_retry")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.silentTimeout = true;
+        return startOtaUpgradeForTest(cfg, QStringLiteral("已启动 OTA A2 静默超时重试测试"));
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.ota_abort_upgrade_command")) {
+        OtaErrorConfig cfg;
+        cfg.enabled = true;
+        cfg.abortAfterFirstA2Success = true;
+        return startOtaUpgradeForTest(cfg, QStringLiteral("已启动 OTA 升级过程中止测试"));
     }
     if (testCase.commandTemplate == QStringLiteral("mt.diag_invalid_requests")) {
         sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("0199555555555555"));
@@ -4410,9 +4609,16 @@ void MainWindow::runSelectedTestCaseAuto()
         return;
     }
     resetCurrentCaseEvidenceView(QStringLiteral("自动执行用例：%1").arg(testCase.id));
+    testCaseService.appendExecutionEvent(QStringLiteral("自动执行开始"),
+                                         QStringLiteral("用例=%1；命令模板=%2；判定模板=%3")
+                                             .arg(testCase.id,
+                                                  testCase.commandTemplate.isEmpty() ? QStringLiteral("-") : testCase.commandTemplate,
+                                                  testCase.judgeTemplate.isEmpty() ? QStringLiteral("-") : testCase.judgeTemplate));
 
     QString commandMessage;
     const bool commandSent = sendAutoTestCommand(testCase, &commandMessage);
+    testCaseService.appendExecutionEvent(commandSent ? QStringLiteral("自动命令已发送") : QStringLiteral("自动命令未发送"),
+                                         commandMessage);
     if (testEvidenceLogText != nullptr) {
         testEvidenceLogText->append(QStringLiteral("[自动执行] %1").arg(commandMessage));
     }
@@ -4454,13 +4660,24 @@ void MainWindow::runSelectedTestCaseAuto()
     QEventLoop waitLoop;
     QTimer::singleShot(waitMs, &waitLoop, &QEventLoop::quit);
     waitLoop.exec();
+    testCaseService.appendExecutionEvent(QStringLiteral("采集窗口结束"),
+                                         QStringLiteral("等待 %1 ms 后开始自动判定").arg(waitMs));
 
     const TestJudgeResult judgeResult = testCaseJudge.judge(testCase, readEvidenceText(testCase.id));
+    testCaseService.appendExecutionEvent(QStringLiteral("自动判定完成"),
+                                         QStringLiteral("%1：%2")
+                                             .arg(testResultStatusText(judgeResult.status), judgeResult.reason));
     QString restoreMessage;
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config") &&
         testCase.testData.contains(QStringLiteral("FF FF"), Qt::CaseInsensitive)) {
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(0x02C0, 0x0064));
         restoreMessage = QStringLiteral("已发送 0x29 恢复命令：目标 0x2C0 周期恢复为 0x0064。");
+    }
+    if (testCase.postCommandTemplate == QStringLiteral("mt.sid_0x29_restore_2c0_default")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(0x02C0, 0x0064));
+        restoreMessage = restoreMessage.isEmpty()
+            ? QStringLiteral("已发送 0x29 恢复命令：目标 0x2C0 周期恢复为 0x0064。")
+            : restoreMessage + QStringLiteral(" 已发送 0x29 恢复命令：目标 0x2C0 周期恢复为 0x0064。");
     }
     if (testCase.postCommandTemplate == QStringLiteral("mt.control_0x207_restore_saved")) {
         if (testHasSavedRfidControlState) {
@@ -4541,15 +4758,103 @@ bool MainWindow::sendSemiAssistCommand(const TestCase &testCase, QString *messag
         return true;
     }
     if (assistTemplate == QStringLiteral("mt.semi.fault_control_status")) {
-        rfidScanning = true;
+        auto waitMs = [](int milliseconds) {
+            QEventLoop waitLoop;
+            QTimer::singleShot(milliseconds, &waitLoop, &QEventLoop::quit);
+            waitLoop.exec();
+        };
+        const bool timerWasActive = rfidControlTimer != nullptr && rfidControlTimer->isActive();
+        const bool originalScanning = rfidScanning;
+        if (timerWasActive) {
+            rfidControlTimer->stop();
+        }
+        for (int index = 0; index < 3; ++index) {
+            rfidScanning = true;
+            updateMeituanTopStatus();
+            sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
+            waitMs(600);
+            rfidScanning = false;
+            updateMeituanTopStatus();
+            sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
+            waitMs(600);
+        }
+        rfidScanning = originalScanning;
         updateMeituanTopStatus();
-        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
-        QEventLoop waitLoop;
-        QTimer::singleShot(300, &waitLoop, &QEventLoop::quit);
-        waitLoop.exec();
-        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
-        setMessage(QStringLiteral("半自动辅助已发送 0x207 开始/停止命令，正在采集故障状态证据。"));
+        if (timerWasActive) {
+            rfidControlTimer->start();
+        }
+        setMessage(QStringLiteral("半自动辅助已暂停后台 0x207 周期帧，并发送 3 轮开始/停止交替命令；执行后已恢复原 0x207 周期状态。"));
         return true;
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_start_upgrade_current_file")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_start_upgrade_current_file");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_app_start_valid")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_start_app_valid");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_boot_start_valid")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_start_boot_valid");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_app_vendor_mismatch")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_start_app_vendor_mismatch");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_boot_vendor_mismatch")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_start_boot_vendor_mismatch");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_app_hw_mismatch")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_start_app_hw_mismatch");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_boot_hw_mismatch")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_start_boot_hw_mismatch");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_start_vendor_mismatch")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_start_vendor_mismatch");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_start_hw_mismatch")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_start_hw_mismatch");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_a2_first_frame_data_error")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_a2_first_frame_data_error");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_a2_first_frame_success_boot_hold")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_a2_first_frame_success_boot_hold");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_a3_crc_error")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_a3_crc_error");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_silent_timeout_retry")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_silent_timeout_retry");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_abort_upgrade_command")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_abort_upgrade_command");
+        return sendAutoTestCommand(otaCase, message);
     }
 
     setMessage(cleanDisplayText(testCase.manualPrompt,
@@ -4592,9 +4897,18 @@ void MainWindow::runSelectedTestCaseSemiAssist()
         return;
     }
     resetCurrentCaseEvidenceView(QStringLiteral("半自动执行用例：%1").arg(testCase.id));
+    testCaseService.appendExecutionEvent(QStringLiteral("人工事件"),
+                                         QStringLiteral("已确认半自动前置条件：%1").arg(prompt));
+    testCaseService.appendExecutionEvent(QStringLiteral("半自动执行开始"),
+                                         QStringLiteral("用例=%1；辅助模板=%2；判定模板=%3")
+                                             .arg(testCase.id,
+                                                  testCase.semiAssistTemplate.isEmpty() ? QStringLiteral("-") : testCase.semiAssistTemplate,
+                                                  testCase.semiJudgeTemplate.isEmpty() ? testCase.judgeTemplate : testCase.semiJudgeTemplate));
 
     QString commandMessage;
     const bool commandSent = sendSemiAssistCommand(testCase, &commandMessage);
+    testCaseService.appendExecutionEvent(commandSent ? QStringLiteral("半自动辅助已执行") : QStringLiteral("半自动辅助未执行"),
+                                         commandMessage);
     if (testEvidenceLogText != nullptr) {
         testEvidenceLogText->append(QStringLiteral("[半自动执行] %1").arg(commandMessage));
     }
@@ -4613,34 +4927,82 @@ void MainWindow::runSelectedTestCaseSemiAssist()
         return;
     }
 
-    const int waitMs = qBound(500, testCase.semiWaitMs > 0 ? testCase.semiWaitMs : testCase.timeoutMs, 30000);
-    QEventLoop waitLoop;
-    QTimer::singleShot(waitMs, &waitLoop, &QEventLoop::quit);
-    waitLoop.exec();
+    const bool otaSemiAssist = testCase.semiAssistTemplate.startsWith(QStringLiteral("mt.semi.ota"));
+    const int maxSemiWaitMs = otaSemiAssist ? 180000 : 30000;
+    const int waitMs = qBound(500, testCase.semiWaitMs > 0 ? testCase.semiWaitMs : testCase.timeoutMs, maxSemiWaitMs);
+    int actualWaitMs = waitMs;
+    if (otaSemiAssist) {
+        auto otaRunning = [this]() {
+            const OtaService::State state = otaService.state();
+            return state == OtaService::State::QueryProgram ||
+                   state == OtaService::State::StartUpgrade ||
+                   state == OtaService::State::SendData ||
+                   state == OtaService::State::FinishUpgrade;
+        };
+        QElapsedTimer waitTimer;
+        waitTimer.start();
+        do {
+            QEventLoop waitLoop;
+            QTimer::singleShot(100, &waitLoop, &QEventLoop::quit);
+            waitLoop.exec();
+            if (waitTimer.elapsed() >= 500 && !otaRunning()) {
+                break;
+            }
+        } while (waitTimer.elapsed() < waitMs);
+        actualWaitMs = static_cast<int>(qMin<qint64>(waitTimer.elapsed(), waitMs));
+    } else {
+        QEventLoop waitLoop;
+        QTimer::singleShot(waitMs, &waitLoop, &QEventLoop::quit);
+        waitLoop.exec();
+    }
+    testCaseService.appendExecutionEvent(QStringLiteral("半自动采集窗口结束"),
+                                         QStringLiteral("等待 %1 ms 后开始机器预判").arg(actualWaitMs));
 
     TestCase judgeCase = testCase;
     if (!judgeCase.semiJudgeTemplate.trimmed().isEmpty()) {
         judgeCase.judgeTemplate = judgeCase.semiJudgeTemplate.trimmed();
     }
     const TestJudgeResult judgeResult = testCaseJudge.judge(judgeCase, readEvidenceText(testCase.id));
+    testCaseService.appendExecutionEvent(QStringLiteral("半自动预判完成"),
+                                         QStringLiteral("%1：%2")
+                                             .arg(testResultStatusText(judgeResult.status), judgeResult.reason));
+    const QString semiJudgeTemplate = judgeCase.judgeTemplate.trimmed();
+    const bool allowSemiAutoPass =
+        semiJudgeTemplate == QStringLiteral("mt.semi.tag_present_detected") ||
+        semiJudgeTemplate == QStringLiteral("mt.semi.tag_16byte_collected") ||
+        semiJudgeTemplate == QStringLiteral("mt.semi.tag_absent_cleared") ||
+        semiJudgeTemplate == QStringLiteral("mt.semi.tag_24byte_collected") ||
+        semiJudgeTemplate == QStringLiteral("mt.semi.tag_residue_cleared") ||
+        semiJudgeTemplate == QStringLiteral("mt.semi.fault_status_collected") ||
+        semiJudgeTemplate == QStringLiteral("mt.device_id_prefix_check") ||
+        semiJudgeTemplate == QStringLiteral("mt.startup_broadcast_period") ||
+        semiJudgeTemplate == QStringLiteral("mt.control_0x207_fault_toggle_repeated") ||
+        semiJudgeTemplate == QStringLiteral("mt.ota_a1_accepted_boot") ||
+        semiJudgeTemplate == QStringLiteral("mt.ota_a1_rejected") ||
+        semiJudgeTemplate == QStringLiteral("mt.ota_a2_first_frame_error") ||
+        semiJudgeTemplate == QStringLiteral("mt.ota_a2_first_frame_boot_hold") ||
+        semiJudgeTemplate == QStringLiteral("mt.ota_a3_crc_error_rejected") ||
+        semiJudgeTemplate == QStringLiteral("mt.ota_success_app_running") ||
+        semiJudgeTemplate == QStringLiteral("mt.ota_timeout_boot_hold") ||
+        semiJudgeTemplate == QStringLiteral("mt.ota_abort_boot_hold");
     TestCaseResult result = testCaseService.resultForCase(testCase.id);
     result.caseId = testCase.id;
-    result.status = judgeResult.status == TestResultStatus::Passed
+    result.status = judgeResult.status == TestResultStatus::Passed && !allowSemiAutoPass
         ? TestResultStatus::Blocked
         : judgeResult.status;
-    result.failureCategory = judgeResult.status == TestResultStatus::Passed
+    result.failureCategory = judgeResult.status == TestResultStatus::Passed && !allowSemiAutoPass
         ? QStringLiteral("待人工确认")
         : judgeResult.failureCategory;
-    result.judgeReason = judgeResult.status == TestResultStatus::Passed
+    result.judgeReason = judgeResult.status == TestResultStatus::Passed && !allowSemiAutoPass
         ? QStringLiteral("机器预判通过，需人工确认外部场景后保存为通过。")
         : judgeResult.reason;
     result.keyFrames = judgeResult.keyFrames;
     result.actualResult = QStringLiteral("[半自动执行] %1\n[等待窗口] %2 ms\n[半自动判定模板] %3\n[机器预判] %4\n[保存建议] %5")
         .arg(commandMessage,
-             QString::number(waitMs),
+             QString::number(actualWaitMs),
              judgeCase.judgeTemplate.isEmpty() ? QStringLiteral("-") : judgeCase.judgeTemplate,
              judgeResult.reason,
-             judgeResult.status == TestResultStatus::Passed
+             judgeResult.status == TestResultStatus::Passed && !allowSemiAutoPass
                 ? QStringLiteral("证据满足机器规则，请结合外部场景人工确认后保存为通过。")
                 : QStringLiteral("按机器预判处理，必要时结合外部场景复核。"));
     if (!judgeResult.keyFrames.isEmpty()) {
@@ -5874,6 +6236,7 @@ void MainWindow::logSentRfidFrame(UINT canId, const QByteArray &payload)
     frame.protocol = CanFrameProtocol::ClassicCan;
     frame.hostDateTime = QDateTime::currentDateTime();
     addCanFrameToList(frame);
+    appendTestEvidenceFrame(frame, protocolDecodeText(frame));
 }
 
 void MainWindow::handleRfidFrame(const CanFrame &frame)
