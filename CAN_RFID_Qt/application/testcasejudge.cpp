@@ -32,6 +32,14 @@ struct PeriodWindowCheck
     QString reason;
 };
 
+struct PeriodConfigRequest
+{
+    int targetId = -1;
+    int periodMs = -1;
+    QString requestCompact;
+    QString positiveCompact;
+};
+
 QStringList parseCsvLine(const QString &line)
 {
     QStringList fields;
@@ -292,6 +300,29 @@ QString asciiFromFrame(const EvidenceFrame &frame)
         }
     }
     return text;
+}
+
+bool findFirstFrameDataAfter(const QVector<EvidenceFrame> &frames,
+                             int canId,
+                             const QString &compactSequence,
+                             const QDateTime &baseTime,
+                             EvidenceFrame *matched)
+{
+    if (!baseTime.isValid()) {
+        return false;
+    }
+    for (const EvidenceFrame &frame : frames) {
+        if (frame.canId == canId &&
+            frame.timestamp.isValid() &&
+            frame.timestamp > baseTime &&
+            frameHasData(frame, compactSequence)) {
+            if (matched != nullptr) {
+                *matched = frame;
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 int hexByteValue(const QString &byteText)
@@ -567,39 +598,45 @@ bool parseScanPeriod(const TestCase &testCase, QString *periodHex)
     return true;
 }
 
-bool parsePeriodConfig(const TestCase &testCase, int *targetId, int *periodMs, QString *compactPayload)
+QVector<PeriodConfigRequest> parsePeriodConfigs(const TestCase &testCase)
 {
+    QVector<PeriodConfigRequest> configs;
     const QString text = testCase.testData;
     QRegularExpression payloadRegex(QStringLiteral("\\b05\\s+29\\s+([0-9A-Fa-f]{2})\\s+([0-9A-Fa-f]{2})\\s+([0-9A-Fa-f]{2})\\s+([0-9A-Fa-f]{2})\\b"));
-    QRegularExpressionMatch match = payloadRegex.match(text);
-    if (!match.hasMatch()) {
-        return false;
-    }
+    QRegularExpressionMatchIterator it = payloadRegex.globalMatch(text);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch match = it.next();
+        bool ok = false;
+        const int parsedId = match.captured(1).toInt(&ok, 16) << 8;
+        if (!ok) continue;
+        const int parsedIdLow = match.captured(2).toInt(&ok, 16);
+        if (!ok) continue;
+        const int parsedPeriod = match.captured(3).toInt(&ok, 16) << 8;
+        if (!ok) continue;
+        const int parsedPeriodLow = match.captured(4).toInt(&ok, 16);
+        if (!ok) continue;
 
-    bool ok = false;
-    const int parsedId = match.captured(1).toInt(&ok, 16) << 8;
-    if (!ok) return false;
-    const int parsedIdLow = match.captured(2).toInt(&ok, 16);
-    if (!ok) return false;
-    const int parsedPeriod = match.captured(3).toInt(&ok, 16) << 8;
-    if (!ok) return false;
-    const int parsedPeriodLow = match.captured(4).toInt(&ok, 16);
-    if (!ok) return false;
-
-    if (targetId != nullptr) {
-        *targetId = parsedId | parsedIdLow;
-    }
-    if (periodMs != nullptr) {
-        *periodMs = parsedPeriod | parsedPeriodLow;
-    }
-    if (compactPayload != nullptr) {
-        *compactPayload = QStringLiteral("0529%1%2%3%4")
+        PeriodConfigRequest config;
+        config.targetId = parsedId | parsedIdLow;
+        config.periodMs = parsedPeriod | parsedPeriodLow;
+        config.requestCompact = QStringLiteral("0529%1%2%3%4")
             .arg(match.captured(1).toUpper(),
                  match.captured(2).toUpper(),
                  match.captured(3).toUpper(),
                  match.captured(4).toUpper());
+        config.positiveCompact = QStringLiteral("69") + config.requestCompact.mid(4);
+        bool exists = false;
+        for (const PeriodConfigRequest &existing : configs) {
+            if (existing.requestCompact == config.requestCompact) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            configs.append(config);
+        }
     }
-    return true;
+    return configs;
 }
 
 QVector<QPair<int, QString>> expectedBroadcastBytes(const QString &caseText)
@@ -1137,6 +1174,111 @@ TestJudgeResult judgeBroadcastRecovered(const QVector<EvidenceFrame> &frames)
     return judgePositiveResponseAndBroadcast(frames, QStringLiteral("28"), QStringLiteral("026801"));
 }
 
+TestJudgeResult judgeBroadcastRecoveredAfterDisableEnable(const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLines(frames, QList<int>() << kRfidRequestId << kRfidResponseId
+        << 0x2C0 << 0x2C1 << 0x2C2 << 0x2C3 << 0x2C4 << 0x2C5 << 0x2C6);
+    if (hasNegativeResponse(frames, QStringLiteral("28"))) {
+        return makeFailed(QStringLiteral("收到通信控制 0x28 否定响应，使能广播用例失败。"),
+                          QStringLiteral("negative_response"),
+                          keyFrames);
+    }
+
+    EvidenceFrame disableResponse;
+    if (!findFirstFrameData(frames, kRfidResponseId, QStringLiteral("026800"), &disableResponse) ||
+        !disableResponse.timestamp.isValid()) {
+        return makeBlocked(QStringLiteral("未发现先置条件 02 68 00 肯定响应，无法证明已先禁用广播。"),
+                           QStringLiteral("disable_response_missing"),
+                           keyFrames);
+    }
+
+    EvidenceFrame enableResponse;
+    if (!findFirstFrameDataAfter(frames, kRfidResponseId, QStringLiteral("026801"), disableResponse.timestamp, &enableResponse) ||
+        !enableResponse.timestamp.isValid()) {
+        return makeBlocked(QStringLiteral("未发现禁用后的 02 68 01 肯定响应，无法确认使能广播命令生效。"),
+                           QStringLiteral("enable_response_missing"),
+                           keyFrames);
+    }
+
+    QStringList missingAfterEnable;
+    for (int canId = kRfidBroadcastFirstId; canId <= kRfidBroadcastLastId; ++canId) {
+        if (framesAfter(frames, enableResponse.timestamp, canId, 0).isEmpty()) {
+            missingAfterEnable.append(idText(canId));
+        }
+    }
+    if (!missingAfterEnable.isEmpty()) {
+        return makeBlocked(QStringLiteral("使能后广播恢复证据不完整，缺失：%1。")
+                               .arg(missingAfterEnable.join(QStringLiteral(", "))),
+                           QStringLiteral("broadcast_missing"),
+                           keyFrames);
+    }
+
+    return makePassed(QStringLiteral("已先收到 02 68 00 禁用响应，再收到 02 68 01 使能响应，且 0x2C0~0x2C6 已恢复广播。"),
+                      keyFrames);
+}
+
+TestJudgeResult judgeBroadcastRecoveredAfterDisableReboot(const QVector<EvidenceFrame> &frames)
+{
+    const QStringList keyFrames = keyFrameLines(frames, QList<int>() << kRfidRequestId << kRfidResponseId
+        << 0x2C0 << 0x2C1 << 0x2C2 << 0x2C3 << 0x2C4 << 0x2C5 << 0x2C6);
+    if (hasNegativeResponse(frames, QStringLiteral("28")) || hasNegativeResponse(frames, QStringLiteral("02"))) {
+        return makeFailed(QStringLiteral("禁用广播或重启请求收到否定响应，无法确认禁用后重启恢复。"),
+                          QStringLiteral("negative_response"),
+                          keyFrames);
+    }
+
+    EvidenceFrame disableResponse;
+    if (!findFirstFrameData(frames, kRfidResponseId, QStringLiteral("026800"), &disableResponse) ||
+        !disableResponse.timestamp.isValid()) {
+        return makeBlocked(QStringLiteral("未发现 02 68 00 肯定响应，无法确认禁用广播命令生效。"),
+                           QStringLiteral("response_missing"),
+                           keyFrames);
+    }
+
+    EvidenceFrame rebootRequest;
+    if (!findFirstFrameDataAfter(frames, kRfidRequestId, QStringLiteral("0102"), disableResponse.timestamp, &rebootRequest) ||
+        !rebootRequest.timestamp.isValid()) {
+        return makeBlocked(QStringLiteral("已禁用广播，但未发现后续 SID=0x02 重启请求，无法验证重启后恢复广播。"),
+                           QStringLiteral("reboot_missing"),
+                           keyFrames);
+    }
+
+    QStringList stillBroadcastingBeforeReboot;
+    for (int canId = kRfidBroadcastFirstId; canId <= kRfidBroadcastLastId; ++canId) {
+        if (!framesBetween(frames, disableResponse.timestamp, rebootRequest.timestamp, canId, 200).isEmpty()) {
+            stillBroadcastingBeforeReboot.append(idText(canId));
+        }
+    }
+    if (!stillBroadcastingBeforeReboot.isEmpty()) {
+        return makeFailed(QStringLiteral("收到 02 68 00 后、重启前仍有广播帧出现：%1。")
+                              .arg(stillBroadcastingBeforeReboot.join(QStringLiteral(", "))),
+                          QStringLiteral("broadcast_not_disabled"),
+                          keyFrames);
+    }
+
+    if (!evidenceHasFrameData(frames, kRfidResponseId, QStringLiteral("0142"), true)) {
+        return makeBlocked(QStringLiteral("已发送 SID=0x02 重启请求，但未发现 01 42 肯定响应。"),
+                           QStringLiteral("reboot_response_missing"),
+                           keyFrames);
+    }
+
+    QStringList missingAfterReboot;
+    for (int canId = kRfidBroadcastFirstId; canId <= kRfidBroadcastLastId; ++canId) {
+        if (framesAfter(frames, rebootRequest.timestamp, canId, 0).isEmpty()) {
+            missingAfterReboot.append(idText(canId));
+        }
+    }
+    if (!missingAfterReboot.isEmpty()) {
+        return makeBlocked(QStringLiteral("重启后广播恢复证据不完整，缺失：%1。")
+                               .arg(missingAfterReboot.join(QStringLiteral(", "))),
+                           QStringLiteral("broadcast_missing"),
+                           keyFrames);
+    }
+
+    return makePassed(QStringLiteral("禁用广播后重启前未再出现 0x2C0~0x2C6，发送 SID=0x02 重启后 0x2C0~0x2C6 已恢复广播。"),
+                      keyFrames);
+}
+
 TestJudgeResult judgeBroadcastDisabled(const QVector<EvidenceFrame> &frames)
 {
     const QStringList keyFrames = keyFrameLines(frames, QList<int>() << kRfidRequestId << kRfidResponseId
@@ -1156,8 +1298,13 @@ TestJudgeResult judgeBroadcastDisabled(const QVector<EvidenceFrame> &frames)
     if (!findFirstFrameData(frames, kRfidResponseId, QStringLiteral("026800"), &responseFrame) ||
         !responseFrame.timestamp.isValid()) {
         return makeBlocked(QStringLiteral("已收到 02 68 00 肯定响应，但无法解析响应时间，不能按响应后窗口判断广播是否停止。"),
-                           QStringLiteral("timestamp_invalid"),
-                           keyFrames);
+                            QStringLiteral("timestamp_invalid"),
+                            keyFrames);
+    }
+
+    EvidenceFrame rebootRequest;
+    if (findFirstFrameDataAfter(frames, kRfidRequestId, QStringLiteral("0102"), responseFrame.timestamp, &rebootRequest)) {
+        return judgeBroadcastRecoveredAfterDisableReboot(frames);
     }
 
     QStringList stillBroadcasting;
@@ -1177,11 +1324,9 @@ TestJudgeResult judgeBroadcastDisabled(const QVector<EvidenceFrame> &frames)
 TestJudgeResult judgePeriodConfig(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
 {
     const QStringList keyFrames = keyFrameLines(frames, QList<int>() << kRfidRequestId << kRfidResponseId
-        << 0x2C0 << 0x2C1 << 0x2C2 << 0x2C6);
-    int targetId = -1;
-    int periodMs = -1;
-    QString requestCompact;
-    if (!parsePeriodConfig(testCase, &targetId, &periodMs, &requestCompact)) {
+        << 0x2C0 << 0x2C1 << 0x2C2 << 0x2C3 << 0x2C4 << 0x2C5 << 0x2C6);
+    const QVector<PeriodConfigRequest> configs = parsePeriodConfigs(testCase);
+    if (configs.isEmpty()) {
         return makeBlocked(QStringLiteral("0x29 用例测试数据格式无效，无法解析目标 ID 和周期。"),
                            QStringLiteral("manual_required"),
                            keyFrames);
@@ -1191,66 +1336,150 @@ TestJudgeResult judgePeriodConfig(const TestCase &testCase, const QVector<Eviden
                           QStringLiteral("negative_response"),
                           keyFrames);
     }
-    const QString positiveCompact = QStringLiteral("69") + requestCompact.mid(4);
-    if (!evidenceHasFrameData(frames, kRfidResponseId, positiveCompact, true)) {
-        return makeBlocked(QStringLiteral("未发现 0x29 周期配置肯定响应，或响应 ID/周期与请求不一致。"),
-                           QStringLiteral("response_missing"),
-                           keyFrames);
-    }
-    EvidenceFrame responseFrame;
-    if (!findFirstFrameData(frames, kRfidResponseId, positiveCompact, &responseFrame) ||
-        !responseFrame.timestamp.isValid()) {
-        return makeBlocked(QStringLiteral("已收到 0x29 肯定响应，但无法解析响应时间，不能按响应后窗口统计周期。"),
-                           QStringLiteral("timestamp_invalid"),
-                           keyFrames);
-    }
 
-    const QVector<EvidenceFrame> targetFrames = framesAfter(frames, responseFrame.timestamp, targetId, 0);
-    if (periodMs == 0xFFFF) {
-        const QVector<EvidenceFrame> afterGraceFrames = framesAfter(frames, responseFrame.timestamp, targetId, 200);
-        if (afterGraceFrames.isEmpty()) {
-            return makePassed(QStringLiteral("收到 0x29 禁止广播肯定响应，目标 %1 在响应后 200ms 之外未再出现。").arg(idText(targetId)),
-                              keyFrames);
+    QStringList summaries;
+    QDateTime lastConfigResponseTime;
+    for (const PeriodConfigRequest &config : configs) {
+        if (!evidenceHasFrameData(frames, kRfidResponseId, config.positiveCompact, true)) {
+            return makeBlocked(QStringLiteral("未发现目标 %1 周期 0x%2 的 0x29 肯定响应，或响应 ID/周期与请求不一致。")
+                                   .arg(idText(config.targetId))
+                                   .arg(config.periodMs, 4, 16, QChar('0')).toUpper(),
+                               QStringLiteral("response_missing"),
+                               keyFrames);
         }
-        return makeFailed(QStringLiteral("目标 %1 配置 0xFFFF 后仍在响应后 200ms 之外出现广播。").arg(idText(targetId)),
-                          QStringLiteral("broadcast_not_disabled"),
-                          keyFrames);
-    }
-
-    if (targetFrames.size() < 3) {
-        return makeBlocked(QStringLiteral("已收到 0x29 肯定响应，但目标 %1 周期采样不足，至少需要 3 帧。").arg(idText(targetId)),
-                           QStringLiteral("insufficient_samples"),
-                           keyFrames);
-    }
-
-    qint64 totalInterval = 0;
-    int intervalCount = 0;
-    for (int index = 1; index < targetFrames.size(); ++index) {
-        if (!targetFrames.at(index - 1).timestamp.isValid() || !targetFrames.at(index).timestamp.isValid()) {
-            return makeBlocked(QStringLiteral("目标 %1 帧时间戳无效，无法统计周期。").arg(idText(targetId)),
+        EvidenceFrame responseFrame;
+        if (!findFirstFrameData(frames, kRfidResponseId, config.positiveCompact, &responseFrame) ||
+            !responseFrame.timestamp.isValid()) {
+            return makeBlocked(QStringLiteral("目标 %1 已收到 0x29 肯定响应，但无法解析响应时间，不能按响应后窗口统计周期。")
+                                   .arg(idText(config.targetId)),
                                QStringLiteral("timestamp_invalid"),
                                keyFrames);
         }
-        const qint64 interval = targetFrames.at(index - 1).timestamp.msecsTo(targetFrames.at(index).timestamp);
-        if (interval > 0) {
-            totalInterval += interval;
-            ++intervalCount;
+        if (!lastConfigResponseTime.isValid() || responseFrame.timestamp > lastConfigResponseTime) {
+            lastConfigResponseTime = responseFrame.timestamp;
         }
+
+        const QVector<EvidenceFrame> targetFrames = framesAfter(frames, responseFrame.timestamp, config.targetId, 0);
+        if (config.periodMs == 0xFFFF) {
+            const QVector<EvidenceFrame> afterGraceFrames = framesAfter(frames, responseFrame.timestamp, config.targetId, 200);
+            if (!afterGraceFrames.isEmpty()) {
+                return makeFailed(QStringLiteral("目标 %1 配置 0xFFFF 后仍在响应后 200ms 之外出现广播。")
+                                      .arg(idText(config.targetId)),
+                                  QStringLiteral("broadcast_not_disabled"),
+                                  keyFrames);
+            }
+            summaries << QStringLiteral("%1 已停止广播").arg(idText(config.targetId));
+            continue;
+        }
+
+        if (targetFrames.size() < 3) {
+            return makeBlocked(QStringLiteral("已收到 0x29 肯定响应，但目标 %1 周期采样不足，至少需要 3 帧。")
+                                   .arg(idText(config.targetId)),
+                               QStringLiteral("insufficient_samples"),
+                               keyFrames);
+        }
+
+        qint64 totalInterval = 0;
+        int intervalCount = 0;
+        for (int index = 1; index < targetFrames.size(); ++index) {
+            if (!targetFrames.at(index - 1).timestamp.isValid() || !targetFrames.at(index).timestamp.isValid()) {
+                return makeBlocked(QStringLiteral("目标 %1 帧时间戳无效，无法统计周期。").arg(idText(config.targetId)),
+                                   QStringLiteral("timestamp_invalid"),
+                                   keyFrames);
+            }
+            const qint64 interval = targetFrames.at(index - 1).timestamp.msecsTo(targetFrames.at(index).timestamp);
+            if (interval > 0) {
+                totalInterval += interval;
+                ++intervalCount;
+            }
+        }
+        if (intervalCount == 0) {
+            return makeBlocked(QStringLiteral("目标 %1 帧时间间隔无效，无法统计周期。").arg(idText(config.targetId)),
+                               QStringLiteral("timestamp_invalid"),
+                               keyFrames);
+        }
+        const double averageMs = static_cast<double>(totalInterval) / intervalCount;
+        const double tolerance = config.periodMs <= 100 ? 30.0 : (config.periodMs <= 1000 ? config.periodMs * 0.2 : config.periodMs * 0.25);
+        if (qAbs(averageMs - config.periodMs) > tolerance) {
+            return makeFailed(QStringLiteral("目标 %1 周期配置响应正确，但实测平均周期 %2 ms 与期望 %3 ms 超出容差。")
+                                  .arg(idText(config.targetId))
+                                  .arg(averageMs, 0, 'f', 1)
+                                  .arg(config.periodMs),
+                              QStringLiteral("period_mismatch"),
+                              keyFrames);
+        }
+        summaries << QStringLiteral("%1 平均周期 %2 ms").arg(idText(config.targetId)).arg(averageMs, 0, 'f', 1);
     }
-    if (intervalCount == 0) {
-        return makeBlocked(QStringLiteral("目标 %1 帧时间间隔无效，无法统计周期。").arg(idText(targetId)),
-                           QStringLiteral("timestamp_invalid"),
-                           keyFrames);
-    }
-    const double averageMs = static_cast<double>(totalInterval) / intervalCount;
-    const double tolerance = periodMs <= 100 ? 30.0 : (periodMs <= 1000 ? periodMs * 0.2 : periodMs * 0.25);
-    if (qAbs(averageMs - periodMs) > tolerance) {
-        return makeFailed(QStringLiteral("目标 %1 周期配置响应正确，但实测平均周期 %2 ms 与期望 %3 ms 超出容差。")
-                              .arg(idText(targetId))
-                              .arg(averageMs, 0, 'f', 1)
-                              .arg(periodMs),
-                          QStringLiteral("period_mismatch"),
-                          keyFrames);
+
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config_and_reboot")) {
+        EvidenceFrame rebootRequest;
+        if (!findFirstFrameDataAfter(frames, kRfidRequestId, QStringLiteral("0102"), lastConfigResponseTime, &rebootRequest) ||
+            !rebootRequest.timestamp.isValid()) {
+            return makeBlocked(QStringLiteral("已完成 0x29 配置响应检查，但未发现后续 SID=0x02 重启请求，无法验证配置掉电不丢失。"),
+                               QStringLiteral("reboot_missing"),
+                               keyFrames);
+        }
+        EvidenceFrame rebootResponse;
+        if (!findFirstFrameDataAfter(frames, kRfidResponseId, QStringLiteral("0142"), rebootRequest.timestamp, &rebootResponse)) {
+            return makeBlocked(QStringLiteral("已发送 SID=0x02 重启请求，但未发现 01 42 肯定响应，无法验证重启后的配置保持。"),
+                               QStringLiteral("reboot_response_missing"),
+                               keyFrames);
+        }
+
+        QStringList rebootSummaries;
+        for (const PeriodConfigRequest &config : configs) {
+            const QVector<EvidenceFrame> rebootFrames = framesAfter(frames, rebootRequest.timestamp, config.targetId, 500);
+            if (config.periodMs == 0xFFFF) {
+                if (!rebootFrames.isEmpty()) {
+                    return makeFailed(QStringLiteral("目标 %1 配置 0xFFFF 后，重启后仍出现广播帧。")
+                                          .arg(idText(config.targetId)),
+                                      QStringLiteral("broadcast_not_disabled_after_reboot"),
+                                      keyFrames);
+                }
+                rebootSummaries << QStringLiteral("%1 重启后保持禁止广播").arg(idText(config.targetId));
+                continue;
+            }
+            if (rebootFrames.size() < 3) {
+                return makeBlocked(QStringLiteral("目标 %1 重启后周期样本不足，至少需要 3 帧，当前 %2 帧。")
+                                       .arg(idText(config.targetId))
+                                       .arg(rebootFrames.size()),
+                                   QStringLiteral("insufficient_reboot_samples"),
+                                   keyFrames);
+            }
+            qint64 totalInterval = 0;
+            int intervalCount = 0;
+            for (int index = 1; index < rebootFrames.size(); ++index) {
+                if (!rebootFrames.at(index - 1).timestamp.isValid() || !rebootFrames.at(index).timestamp.isValid()) {
+                    return makeBlocked(QStringLiteral("目标 %1 重启后帧时间戳无效，无法统计周期。")
+                                           .arg(idText(config.targetId)),
+                                       QStringLiteral("timestamp_invalid"),
+                                       keyFrames);
+                }
+                const qint64 interval = rebootFrames.at(index - 1).timestamp.msecsTo(rebootFrames.at(index).timestamp);
+                if (interval > 0) {
+                    totalInterval += interval;
+                    ++intervalCount;
+                }
+            }
+            if (intervalCount == 0) {
+                return makeBlocked(QStringLiteral("目标 %1 重启后帧时间间隔无效，无法统计周期。")
+                                       .arg(idText(config.targetId)),
+                                   QStringLiteral("timestamp_invalid"),
+                                   keyFrames);
+            }
+            const double rebootAverageMs = static_cast<double>(totalInterval) / intervalCount;
+            const double tolerance = config.periodMs <= 100 ? 30.0 : (config.periodMs <= 1000 ? config.periodMs * 0.2 : config.periodMs * 0.25);
+            if (qAbs(rebootAverageMs - config.periodMs) > tolerance) {
+                return makeFailed(QStringLiteral("目标 %1 重启后平均周期 %2 ms 与期望 %3 ms 超出容差，配置保持验证失败。")
+                                      .arg(idText(config.targetId))
+                                      .arg(rebootAverageMs, 0, 'f', 1)
+                                      .arg(config.periodMs),
+                                  QStringLiteral("period_mismatch_after_reboot"),
+                                  keyFrames);
+            }
+            rebootSummaries << QStringLiteral("%1 重启后平均周期 %2 ms").arg(idText(config.targetId)).arg(rebootAverageMs, 0, 'f', 1);
+        }
+        summaries << QStringLiteral("重启保持验证：%1").arg(rebootSummaries.join(QStringLiteral("；")));
     }
 
     const QString caseText = QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8")
@@ -1260,12 +1489,15 @@ TestJudgeResult judgePeriodConfig(const TestCase &testCase, const QVector<Eviden
              testCase.testData,
              testCase.steps,
              testCase.expectedResult,
-             testCase.commandTemplate,
-             testCase.judgeTemplate);
+              testCase.commandTemplate,
+              testCase.judgeTemplate);
     if (requiresStartupBroadcastPeriodCheck(caseText)) {
         const QList<int> startupIds = startupPeriodTargetIds(caseText);
         QList<int> periodFrameIds;
-        periodFrameIds << kRfidRequestId << kRfidResponseId << targetId;
+        periodFrameIds << kRfidRequestId << kRfidResponseId;
+        for (const PeriodConfigRequest &config : configs) {
+            periodFrameIds << config.targetId;
+        }
         for (const int canId : startupIds) {
             if (!periodFrameIds.contains(canId)) {
                 periodFrameIds.append(canId);
@@ -1281,18 +1513,16 @@ TestJudgeResult judgePeriodConfig(const TestCase &testCase, const QVector<Eviden
                                QStringLiteral("insufficient_period_evidence"),
                                periodKeyFrames);
         }
-        return makePassed(QStringLiteral("收到 0x29 肯定响应，目标 %1 响应后平均周期 %2 ms 符合期望 %3 ms；%4")
-                              .arg(idText(targetId))
-                              .arg(averageMs, 0, 'f', 1)
-                              .arg(periodMs)
+        return makePassed(QStringLiteral("收到 %1 条 0x29 肯定响应，周期验证通过：%2；%3")
+                              .arg(configs.size())
+                              .arg(summaries.join(QStringLiteral("；")))
                               .arg(startupCheck.reason),
-                          periodKeyFrames);
+                           periodKeyFrames);
     }
 
-    return makePassed(QStringLiteral("收到 0x29 肯定响应，目标 %1 响应后平均周期 %2 ms，符合期望 %3 ms。")
-                          .arg(idText(targetId))
-                          .arg(averageMs, 0, 'f', 1)
-                          .arg(periodMs),
+    return makePassed(QStringLiteral("收到 %1 条 0x29 肯定响应，周期验证通过：%2。")
+                          .arg(configs.size())
+                          .arg(summaries.join(QStringLiteral("；"))),
                       keyFrames);
 }
 
@@ -2538,6 +2768,9 @@ TestJudgeResult TestCaseJudge::judge(const TestCase &testCase, const QString &ev
         return judgeBroadcastDisabled(frames);
     }
     if (judgeTemplate == QStringLiteral("mt.broadcast_recovered")) {
+        if (testCase.commandTemplate == QStringLiteral("mt.sid_0x28_broadcast_disable_then_enable")) {
+            return judgeBroadcastRecoveredAfterDisableEnable(frames);
+        }
         return judgeBroadcastRecovered(frames);
     }
     if (judgeTemplate == QStringLiteral("mt.period_config_response_and_effect")) {

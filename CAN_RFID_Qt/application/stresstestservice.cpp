@@ -15,6 +15,8 @@ void StressTestService::start()
     currentStats.startTime = QDateTime::currentDateTime();
     currentStats.elapsedSeconds = 0;
     currentStats.elapsedMilliseconds = 0;
+    pendingSuccessTagValidation = false;
+    tagPart3FrameReceived = false;
     elapsedTimer.restart();
 }
 
@@ -38,6 +40,8 @@ void StressTestService::reset()
     tagPart2.clear();
     tagPart3.clear();
     uniqueTags.clear();
+    pendingSuccessTagValidation = false;
+    tagPart3FrameReceived = false;
     if (sampleCsvFile.isOpen()) {
         sampleCsvFile.close();
     }
@@ -328,15 +332,18 @@ void StressTestService::handleStatusFrame(const CanFrame &frame)
         break;
     case 0x02:
         ++currentStats.tagLengthErrorCount;
+        pendingSuccessTagValidation = false;
         clearCurrentTag();
         markFailure(QStringLiteral("TAG 长度异常"));
         break;
     case 0x00:
         ++currentStats.noTagCount;
+        pendingSuccessTagValidation = false;
         clearCurrentTag();
         markFailure(QStringLiteral("未识别到 TAG"));
         break;
     default:
+        pendingSuccessTagValidation = false;
         clearCurrentTag();
         markFailure(QStringLiteral("卡状态非法"));
         break;
@@ -356,10 +363,13 @@ void StressTestService::updateTagPart(quint32 frameId, const QByteArray &payload
     if (RfidProtocol::isUnrecognizedTagPlaceholderPayload(payload)) {
         if (frameId == RfidProtocol::TagPart3FrameId) {
             tagPart3.clear();
+            tagPart3FrameReceived = true;
+            finalizePendingSuccessTag();
         } else {
             tagPart1.clear();
             tagPart2.clear();
             tagPart3.clear();
+            tagPart3FrameReceived = false;
         }
         currentStats.currentTag = currentTagText();
         return;
@@ -368,12 +378,17 @@ void StressTestService::updateTagPart(quint32 frameId, const QByteArray &payload
     const QString payloadText = RfidProtocol::parseAsciiPayload(payload);
 
     if (frameId == RfidProtocol::TagPart1FrameId) {
+        tagPart2.clear();
+        tagPart3.clear();
+        tagPart3FrameReceived = false;
         tagPart1 = payloadText;
     } else if (frameId == RfidProtocol::TagPart2FrameId) {
         tagPart2 = payloadText;
     } else if (frameId == RfidProtocol::TagPart3FrameId) {
         tagPart3 = payloadText;
+        tagPart3FrameReceived = true;
     }
+    finalizePendingSuccessTag();
 }
 
 void StressTestService::updateRates()
@@ -393,19 +408,21 @@ void StressTestService::updateRates()
     }
 }
 
-bool StressTestService::currentTagIsValid() const
+bool StressTestService::currentTagPartsComplete() const
 {
     const QString tag = currentTagText();
-    
-    // Check if tag parts are logically complete to prevent intermediate/fragment tags.
-    bool partsComplete = false;
-    if (tag.length() == 16 && !tagPart1.isEmpty() && !tagPart2.isEmpty() && tagPart3.isEmpty()) {
-        partsComplete = true;
-    } else if (tag.length() == 24 && !tagPart1.isEmpty() && !tagPart2.isEmpty() && !tagPart3.isEmpty()) {
-        partsComplete = true;
+    if (!tagPart3FrameReceived) {
+        return false;
     }
-    
-    return partsComplete && isValidTagText(tag);
+    if (tag.length() == 16 && !tagPart1.isEmpty() && !tagPart2.isEmpty() && tagPart3.isEmpty()) {
+        return true;
+    }
+    return tag.length() == 24 && !tagPart1.isEmpty() && !tagPart2.isEmpty() && !tagPart3.isEmpty();
+}
+
+bool StressTestService::currentTagIsValid() const
+{
+    return currentTagPartsComplete() && isValidTagText(currentTagText());
 }
 
 bool StressTestService::isValidTagText(const QString &tag) const
@@ -418,8 +435,8 @@ bool StressTestService::isValidTagText(const QString &tag) const
     }
     for (const QChar ch : tag) {
         if (!ch.isDigit() &&
-            !(ch >= QLatin1Char('a') && ch <= QLatin1Char('f')) &&
-            !(ch >= QLatin1Char('A') && ch <= QLatin1Char('F'))) {
+            !(ch >= QLatin1Char('a') && ch <= QLatin1Char('z')) &&
+            !(ch >= QLatin1Char('A') && ch <= QLatin1Char('Z'))) {
             return false;
         }
     }
@@ -437,7 +454,50 @@ void StressTestService::clearCurrentTag()
     tagPart1.clear();
     tagPart2.clear();
     tagPart3.clear();
+    tagPart3FrameReceived = false;
     currentStats.currentTag.clear();
+}
+
+void StressTestService::recordValidCurrentTag()
+{
+    ++currentStats.validTagCount;
+    const QString newTag = currentTagText();
+    currentStats.currentTag = newTag;
+
+    if (!uniqueTags.contains(newTag)) {
+        uniqueTags.insert(newTag);
+        currentStats.lastTagUpdateTime = QDateTime::currentDateTime();
+        currentStats.uniqueTagCount = static_cast<quint64>(uniqueTags.size());
+    }
+
+    if (!currentStats.lastSuccessTag.isEmpty() && currentStats.lastSuccessTag != newTag) {
+        ++currentStats.tagChangeCount;
+    }
+
+    currentStats.lastSuccessTag = newTag;
+    currentStats.lastFailureReason.clear();
+}
+
+void StressTestService::finalizePendingSuccessTag()
+{
+    if (!pendingSuccessTagValidation) {
+        return;
+    }
+
+    if (currentTagIsValid()) {
+        recordValidCurrentTag();
+        pendingSuccessTagValidation = false;
+        updateRates();
+        return;
+    }
+
+    if (currentTagPartsComplete()) {
+        ++currentStats.tagContentErrorCount;
+        currentStats.currentTag = currentTagText();
+        currentStats.lastFailureReason = QStringLiteral("识别成功但 TAG 内容异常");
+        pendingSuccessTagValidation = false;
+        updateRates();
+    }
 }
 
 void StressTestService::markSuccess()
@@ -447,25 +507,18 @@ void StressTestService::markSuccess()
     currentStats.currentContinuousFailure = 0;
 
     if (currentTagIsValid()) {
-        ++currentStats.validTagCount;
-        const QString newTag = currentTagText();
-        currentStats.currentTag = newTag;
-
-        if (!uniqueTags.contains(newTag)) {
-            uniqueTags.insert(newTag);
-            currentStats.lastTagUpdateTime = QDateTime::currentDateTime();
-            currentStats.uniqueTagCount = static_cast<quint64>(uniqueTags.size());
-        }
-
-        if (!currentStats.lastSuccessTag.isEmpty() && currentStats.lastSuccessTag != newTag) {
-            ++currentStats.tagChangeCount;
-        }
-
-        currentStats.lastSuccessTag = newTag;
-        currentStats.lastFailureReason.clear();
+        recordValidCurrentTag();
+        pendingSuccessTagValidation = false;
         return;
     }
 
+    if (!currentTagPartsComplete()) {
+        pendingSuccessTagValidation = true;
+        currentStats.lastFailureReason = QStringLiteral("识别成功，等待 TAG 分片补齐");
+        return;
+    }
+
+    pendingSuccessTagValidation = false;
     ++currentStats.tagContentErrorCount;
     currentStats.lastFailureReason = QStringLiteral("识别成功但 TAG 内容异常");
 }

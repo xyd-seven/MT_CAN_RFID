@@ -126,6 +126,7 @@ private:
     void processProductionScanText(const QString &text, bool showError);
     void sendProductionScanControl(bool enabled);
     bool performQingjuProductionWrite(quint16 did, const QByteArray &data);
+    bool readManualMeituanOtaA1Params(quint8 *vendor, quint16 *hardwareVersion, QString *error) const;
     void abortRfidDiagnosticTransferSilently();
     void sendRfidFrame(UINT canId, const QByteArray &payload);
     void logSentRfidFrame(UINT canId, const QByteArray &payload);
@@ -427,6 +428,10 @@ private:
     QPushButton *otaSelectFileBtn;
     QLabel *otaVersionLabel;
     QLineEdit *otaVersionEdit;
+    QGroupBox *otaManualA1Group;
+    QCheckBox *otaManualA1Check;
+    QLineEdit *otaManualA1VendorEdit;
+    QLineEdit *otaManualA1HwEdit;
 
     // OTA 升级压力测试 UI 控件
     QCheckBox *otaStressTestEnabledCheck;

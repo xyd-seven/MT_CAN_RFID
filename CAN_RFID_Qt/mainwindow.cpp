@@ -86,6 +86,64 @@ bool parseHexUInt16(const QString &text, quint16 *value)
     return true;
 }
 
+bool parseHexUInt8(const QString &text, quint8 *value)
+{
+    QString normalized = normalizeHexText(text);
+    if (normalized.isEmpty() || normalized.length() > 2) {
+        return false;
+    }
+    bool ok = false;
+    uint val = normalized.toUInt(&ok, 16);
+    if (!ok || val > 0xFF) {
+        return false;
+    }
+    if (value) {
+        *value = static_cast<quint8>(val);
+    }
+    return true;
+}
+
+bool parseMeituanOtaHardwareBcd(const QString &text, quint16 *value)
+{
+    QString normalized = normalizeHexText(text);
+    if (normalized.isEmpty() || normalized.length() > 4) {
+        return false;
+    }
+    normalized = normalized.rightJustified(4, QLatin1Char('0'));
+    for (const QChar &ch : normalized) {
+        if (!ch.isDigit()) {
+            return false;
+        }
+    }
+    bool ok = false;
+    uint val = normalized.toUInt(&ok, 16);
+    if (!ok || val > 0x0999) {
+        return false;
+    }
+    if (value) {
+        *value = static_cast<quint16>(val);
+    }
+    return true;
+}
+
+QByteArray qingjuProductionSnPayload(const QByteArray &data)
+{
+    QByteArray actualData = data;
+    constexpr int QingjuQrCodeLongSnLength = 25;
+    constexpr int QingjuQrCodeWriteTailLength = 11;
+    constexpr int LegacyQingjuSnTailLength = 10;
+    if (actualData.size() == QingjuQrCodeLongSnLength) {
+        return actualData.right(QingjuQrCodeWriteTailLength);
+    }
+    if (actualData.size() > LegacyQingjuSnTailLength) {
+        actualData = actualData.right(LegacyQingjuSnTailLength);
+    }
+    if (actualData.size() == LegacyQingjuSnTailLength) {
+        actualData = actualData.left(5) + "0" + actualData.mid(5);
+    }
+    return actualData;
+}
+
 bool parseHexByteArray(const QString &text, QByteArray *data)
 {
     QString normalized = normalizeHexText(text);
@@ -301,6 +359,10 @@ MainWindow::MainWindow(QWidget *parent) :
     otaStartUpgradeBtn(nullptr),
     otaAbortUpgradeBtn(nullptr),
     otaSelectFileBtn(nullptr),
+    otaManualA1Group(nullptr),
+    otaManualA1Check(nullptr),
+    otaManualA1VendorEdit(nullptr),
+    otaManualA1HwEdit(nullptr),
     otaStressTestEnabledCheck(nullptr),
     otaStressCyclesSpin(nullptr),
     otaCooldownSpin(nullptr),
@@ -693,13 +755,7 @@ MainWindow::MainWindow(QWidget *parent) :
                          }
                     }
 
-                    QByteArray expectedBytes = m_productionWritePendingData;
-                    if (expectedBytes.size() > 10) {
-                        expectedBytes = expectedBytes.right(10);
-                    }
-                    if (expectedBytes.size() == 10) {
-                        expectedBytes = expectedBytes.left(5) + "0" + expectedBytes.mid(5);
-                    }
+                    QByteArray expectedBytes = qingjuProductionSnPayload(m_productionWritePendingData);
                     QString expectedSn = QString::fromLatin1(expectedBytes);
 
                     productionWriteTimer->stop();
@@ -1583,6 +1639,7 @@ void MainWindow::updateControlsState()
                 if (otaAbortUpgradeBtn != nullptr) otaAbortUpgradeBtn->setEnabled(false);
             }
             if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->setEnabled(false);
+            if (otaManualA1Group != nullptr) otaManualA1Group->setEnabled(false);
             if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(false);
             if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(false);
         } else {
@@ -1591,6 +1648,7 @@ void MainWindow::updateControlsState()
             if (otaSelectFileBtn != nullptr) otaSelectFileBtn->setEnabled(false);
             if (otaAbortUpgradeBtn != nullptr) otaAbortUpgradeBtn->setEnabled(false);
             if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->setEnabled(false);
+            if (otaManualA1Group != nullptr) otaManualA1Group->setEnabled(false);
             if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(false);
             if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(false);
         }
@@ -1624,6 +1682,7 @@ void MainWindow::updateControlsState()
         if (otaSelectFileBtn != nullptr) otaSelectFileBtn->setEnabled(false);
         if (otaAbortUpgradeBtn != nullptr) otaAbortUpgradeBtn->setEnabled(false);
         if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->setEnabled(false);
+        if (otaManualA1Group != nullptr) otaManualA1Group->setEnabled(false);
         if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(false);
         if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(false);
     }
@@ -1670,6 +1729,7 @@ void MainWindow::updateControlsState()
         if (otaSelectFileBtn != nullptr) otaSelectFileBtn->setEnabled(false);
         if (otaAbortUpgradeBtn != nullptr) otaAbortUpgradeBtn->setEnabled(true);
         if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->setEnabled(false);
+        if (otaManualA1Group != nullptr) otaManualA1Group->setEnabled(false);
         if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(false);
         if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(false);
     }
@@ -1716,6 +1776,7 @@ void MainWindow::updateControlsState()
         if (otaSelectFileBtn != nullptr) otaSelectFileBtn->setEnabled(false);
         if (otaAbortUpgradeBtn != nullptr) otaAbortUpgradeBtn->setEnabled(false);
         if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->setEnabled(false);
+        if (otaManualA1Group != nullptr) otaManualA1Group->setEnabled(false);
         if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(false);
         if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(false);
     }
@@ -1773,6 +1834,7 @@ void MainWindow::updateControlsState()
         if (otaSelectFileBtn != nullptr) otaSelectFileBtn->setEnabled(true); // 可以断连时选择文件
         if (otaAbortUpgradeBtn != nullptr) otaAbortUpgradeBtn->setEnabled(false);
         if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->setEnabled(true);
+        if (otaManualA1Group != nullptr) otaManualA1Group->setEnabled(true);
         if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->setEnabled(true);
         if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->setEnabled(true);
     }
@@ -4045,28 +4107,28 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
             *message = text;
         }
     };
-    auto parsePeriodConfig = [](const QString &text, quint16 *canId, quint16 *periodMs) {
+    auto parsePeriodConfigs = [](const QString &text) {
+        QVector<QPair<quint16, quint16>> configs;
         QRegularExpression regex(QStringLiteral("\\b05\\s+29\\s+([0-9A-Fa-f]{2})\\s+([0-9A-Fa-f]{2})\\s+([0-9A-Fa-f]{2})\\s+([0-9A-Fa-f]{2})\\b"));
-        const QRegularExpressionMatch match = regex.match(text);
-        if (!match.hasMatch()) {
-            return false;
+        QRegularExpressionMatchIterator it = regex.globalMatch(text);
+        while (it.hasNext()) {
+            const QRegularExpressionMatch match = it.next();
+            bool ok = false;
+            const quint16 parsedId = static_cast<quint16>((match.captured(1).toUInt(&ok, 16) << 8));
+            if (!ok) continue;
+            const quint16 parsedIdLow = static_cast<quint16>(match.captured(2).toUInt(&ok, 16));
+            if (!ok) continue;
+            const quint16 parsedPeriod = static_cast<quint16>((match.captured(3).toUInt(&ok, 16) << 8));
+            if (!ok) continue;
+            const quint16 parsedPeriodLow = static_cast<quint16>(match.captured(4).toUInt(&ok, 16));
+            if (!ok) continue;
+            const QPair<quint16, quint16> config(static_cast<quint16>(parsedId | parsedIdLow),
+                                                 static_cast<quint16>(parsedPeriod | parsedPeriodLow));
+            if (!configs.contains(config)) {
+                configs.append(config);
+            }
         }
-        bool ok = false;
-        const quint16 parsedId = static_cast<quint16>((match.captured(1).toUInt(&ok, 16) << 8));
-        if (!ok) return false;
-        const quint16 parsedIdLow = static_cast<quint16>(match.captured(2).toUInt(&ok, 16));
-        if (!ok) return false;
-        const quint16 parsedPeriod = static_cast<quint16>((match.captured(3).toUInt(&ok, 16) << 8));
-        if (!ok) return false;
-        const quint16 parsedPeriodLow = static_cast<quint16>(match.captured(4).toUInt(&ok, 16));
-        if (!ok) return false;
-        if (canId != nullptr) {
-            *canId = static_cast<quint16>(parsedId | parsedIdLow);
-        }
-        if (periodMs != nullptr) {
-            *periodMs = static_cast<quint16>(parsedPeriod | parsedPeriodLow);
-        }
-        return true;
+        return configs;
     };
     auto shortWait = [](int ms) {
         QEventLoop waitLoop;
@@ -4260,9 +4322,23 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         setMessage(QStringLiteral("已发送禁用周期广播：ID=0x007 数据=02 28 00 55 55 55 55 55"));
         return true;
     }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x28_broadcast_disable_then_reboot")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationControlFrame(false));
+        shortWait(800);
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
+        setMessage(QStringLiteral("已发送禁用周期广播，并发送 SID=0x02 重启请求模拟下电再上电。"));
+        return true;
+    }
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x28_broadcast_enable")) {
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationControlFrame(true));
         setMessage(QStringLiteral("已发送使能周期广播：ID=0x007 数据=02 28 01 55 55 55 55 55"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x28_broadcast_disable_then_enable")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationControlFrame(false));
+        shortWait(800);
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationControlFrame(true));
+        setMessage(QStringLiteral("已先发送禁用周期广播，再发送使能周期广播。"));
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x85_diag_enable")) {
@@ -4277,26 +4353,24 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
     }
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config") ||
         testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config_and_reboot")) {
-        quint16 canId = 0;
-        quint16 periodMs = 0;
-        if (!parsePeriodConfig(testCase.testData, &canId, &periodMs)) {
+        const QVector<QPair<quint16, quint16>> periodConfigs = parsePeriodConfigs(testCase.testData);
+        if (periodConfigs.isEmpty()) {
             setMessage(QStringLiteral("0x29 周期配置测试数据格式无效，已阻止自动发送。"));
             return false;
         }
-        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(canId, periodMs));
+        for (const QPair<quint16, quint16> &config : periodConfigs) {
+            sendRfidFrame(RfidProtocol::RequestFrameId,
+                          RfidProtocol::buildSetBroadcastPeriodFrame(config.first, config.second));
+            shortWait(200);
+        }
         if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config_and_reboot")) {
             shortWait(800);
             sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
-            setMessage(QStringLiteral("已发送 0x29 周期配置并触发重启采集：ID=0x007 目标=0x%1 周期=0x%2；随后发送 SID=0x02 重启。")
-                .arg(canId, 3, 16, QChar('0'))
-                .arg(periodMs, 4, 16, QChar('0'))
-                .toUpper());
+            setMessage(QStringLiteral("已发送 %1 条 0x29 周期配置，并发送 SID=0x02 重启请求模拟下电再上电。")
+                .arg(periodConfigs.size()));
             return true;
         }
-        setMessage(QStringLiteral("已发送 0x29 周期配置：ID=0x007 目标=0x%1 周期=0x%2。")
-            .arg(canId, 3, 16, QChar('0'))
-            .arg(periodMs, 4, 16, QChar('0'))
-            .toUpper());
+        setMessage(QStringLiteral("已发送 %1 条 0x29 周期配置。").arg(periodConfigs.size()));
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x01_invalid_length")) {
@@ -4678,6 +4752,17 @@ void MainWindow::runSelectedTestCaseAuto()
         restoreMessage = restoreMessage.isEmpty()
             ? QStringLiteral("已发送 0x29 恢复命令：目标 0x2C0 周期恢复为 0x0064。")
             : restoreMessage + QStringLiteral(" 已发送 0x29 恢复命令：目标 0x2C0 周期恢复为 0x0064。");
+    }
+    if (testCase.postCommandTemplate == QStringLiteral("mt.sid_0x29_restore_2c0_to_2c6_default")) {
+        for (quint16 canId = 0x02C0; canId <= 0x02C6; ++canId) {
+            sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(canId, 0x0064));
+            QEventLoop restoreWaitLoop;
+            QTimer::singleShot(120, &restoreWaitLoop, &QEventLoop::quit);
+            restoreWaitLoop.exec();
+        }
+        restoreMessage = restoreMessage.isEmpty()
+            ? QStringLiteral("已发送 0x29 恢复命令：0x2C0~0x2C6 周期恢复为 0x0064。")
+            : restoreMessage + QStringLiteral(" 已发送 0x29 恢复命令：0x2C0~0x2C6 周期恢复为 0x0064。");
     }
     if (testCase.postCommandTemplate == QStringLiteral("mt.control_0x207_restore_saved")) {
         if (testHasSavedRfidControlState) {
@@ -5751,6 +5836,32 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
     qjOtaTargetLabel->hide();
     qjOtaTargetCombo->hide();
 
+    otaManualA1Group = new QGroupBox(QStringLiteral("BOOT恢复A1参数"), otaWidget);
+    QGridLayout *manualA1Layout = new QGridLayout(otaManualA1Group);
+    manualA1Layout->setContentsMargins(8, 8, 8, 8);
+    manualA1Layout->setHorizontalSpacing(6);
+    manualA1Layout->setVerticalSpacing(6);
+    otaManualA1Check = new QCheckBox(QStringLiteral("使用手动A1参数"), otaManualA1Group);
+    otaManualA1VendorEdit = new QLineEdit(otaManualA1Group);
+    otaManualA1VendorEdit->setPlaceholderText(QStringLiteral("如 0x02、02 或 2"));
+    otaManualA1HwEdit = new QLineEdit(otaManualA1Group);
+    otaManualA1HwEdit->setPlaceholderText(QStringLiteral("如 0x0100、0100 或 01 00"));
+    otaManualA1VendorEdit->setEnabled(false);
+    otaManualA1HwEdit->setEnabled(false);
+    manualA1Layout->addWidget(otaManualA1Check, 0, 0, 1, 2);
+    manualA1Layout->addWidget(new QLabel(QStringLiteral("厂商代码"), otaManualA1Group), 1, 0);
+    manualA1Layout->addWidget(otaManualA1VendorEdit, 1, 1);
+    manualA1Layout->addWidget(new QLabel(QStringLiteral("硬件版本"), otaManualA1Group), 2, 0);
+    manualA1Layout->addWidget(otaManualA1HwEdit, 2, 1);
+    connect(otaManualA1Check, &QCheckBox::toggled, this, [this](bool checked) {
+        if (otaManualA1VendorEdit != nullptr) {
+            otaManualA1VendorEdit->setEnabled(checked);
+        }
+        if (otaManualA1HwEdit != nullptr) {
+            otaManualA1HwEdit->setEnabled(checked);
+        }
+    });
+
     otaStressGroup = new QGroupBox(QStringLiteral("升级压力测试"), otaWidget);
     QGridLayout *stressLayout = new QGridLayout(otaStressGroup);
     stressLayout->setContentsMargins(8, 8, 8, 8);
@@ -5854,10 +5965,11 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
 
     layout->addWidget(fileGroup, 0, 0);
     layout->addWidget(controlGroup, 1, 0);
-    layout->addWidget(otaStressGroup, 2, 0);
+    layout->addWidget(otaManualA1Group, 2, 0);
+    layout->addWidget(otaStressGroup, 3, 0);
     layout->addWidget(stateGroup, 0, 1, 2, 1); // 跨 2 行
-    layout->addWidget(otaErrorInjectionGroup, 2, 1); // 美团异常注入
-    layout->addWidget(qjOtaAnomalyGroup, 2, 1);      // 青桔异常注入
+    layout->addWidget(otaErrorInjectionGroup, 3, 1); // 美团异常注入
+    layout->addWidget(qjOtaAnomalyGroup, 3, 1);      // 青桔异常注入
     layout->setColumnStretch(0, 1);
     layout->setColumnStretch(1, 1);
 
@@ -5976,7 +6088,25 @@ QWidget *MainWindow::createOtaTab(QWidget *parent)
             emit requestHlOtaStartUpgrade(firmwarePath);
         } else { // 美团协议
             otaService.setChannel(static_cast<quint32>(ui->sendPathCombo->currentIndex()));
-            otaService.setDeviceVersions(rfidService.vendorCode(), rfidService.hardwareVersion(), rfidService.softwareVersion());
+            quint8 otaVendor = rfidService.vendorCode();
+            quint16 otaHardwareVersion = rfidService.hardwareVersion();
+            const quint16 otaSoftwareVersion = rfidService.softwareVersion();
+            if (otaManualA1Check != nullptr && otaManualA1Check->isChecked()) {
+                QString error;
+                if (!readManualMeituanOtaA1Params(&otaVendor, &otaHardwareVersion, &error)) {
+                    QMessageBox::warning(this, QStringLiteral("警告"), error);
+                    return;
+                }
+                const QString message = QStringLiteral("OTA A1参数来源：手动输入；厂商代码=0x%1；硬件版本=0x%2")
+                    .arg(otaVendor, 2, 16, QChar('0'))
+                    .arg(otaHardwareVersion, 4, 16, QChar('0'))
+                    .toUpper();
+                logService.logRuntime(LogLevel::Info, message);
+                if (otaMessageValue != nullptr) {
+                    otaMessageValue->setText(message);
+                }
+            }
+            otaService.setDeviceVersions(otaVendor, otaHardwareVersion, otaSoftwareVersion);
 
             if (otaStressTestEnabledCheck != nullptr && otaStressTestEnabledCheck->isChecked()) {
                 m_otaStressRunning = true;
@@ -6584,14 +6714,8 @@ bool MainWindow::performQingjuProductionWrite(quint16 did, const QByteArray &dat
 {
     m_qingjuWritePendingRegister = did;
     bool ok = false;
-    if (did == 0xA00D) { // 写SN (固定8个寄存器，截取后10位并在第5位后添加'0')
-        QByteArray actualData = data;
-        if (actualData.size() > 10) {
-            actualData = actualData.right(10);
-        }
-        if (actualData.size() == 10) {
-            actualData = actualData.left(5) + "0" + actualData.mid(5);
-        }
+    if (did == 0xA00D) { // 写SN (固定8个寄存器)
+        QByteArray actualData = qingjuProductionSnPayload(data);
         const int regCount = 8; // 固定为 8 个寄存器 (16 字节)
         m_qingjuWritePendingRegCount = regCount;
         QByteArray paddedData = actualData;
@@ -6613,6 +6737,43 @@ bool MainWindow::performQingjuProductionWrite(quint16 did, const QByteArray &dat
         ok = qingjuCanManager->writeRegisters(0x0A, 0xA004, hwRegs);
     }
     return ok;
+}
+
+bool MainWindow::readManualMeituanOtaA1Params(quint8 *vendor, quint16 *hardwareVersion, QString *error) const
+{
+    if (otaManualA1Check == nullptr || !otaManualA1Check->isChecked()) {
+        return false;
+    }
+    if (otaManualA1VendorEdit == nullptr || otaManualA1HwEdit == nullptr) {
+        if (error != nullptr) {
+            *error = QStringLiteral("手动A1参数控件未初始化。");
+        }
+        return false;
+    }
+
+    quint8 parsedVendor = 0;
+    if (!parseHexUInt8(otaManualA1VendorEdit->text(), &parsedVendor)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("厂商代码必须为1字节十六进制，例如 0x02、02 或 2。");
+        }
+        return false;
+    }
+
+    quint16 parsedHw = 0;
+    if (!parseMeituanOtaHardwareBcd(otaManualA1HwEdit->text(), &parsedHw)) {
+        if (error != nullptr) {
+            *error = QStringLiteral("硬件版本必须为2字节BCD十六进制，范围0000~0999，例如 0x0100、0100 或 01 00。");
+        }
+        return false;
+    }
+
+    if (vendor != nullptr) {
+        *vendor = parsedVendor;
+    }
+    if (hardwareVersion != nullptr) {
+        *hardwareVersion = parsedHw;
+    }
+    return true;
 }
 
 void MainWindow::addCanFrameToList(const CanFrame &frame)
@@ -8109,6 +8270,7 @@ void MainWindow::onProtocolModeChanged(int index)
 
         if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->hide();
         if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->show();
+        if (otaManualA1Group != nullptr) otaManualA1Group->show();
         if (otaStressGroup != nullptr) otaStressGroup->show();
         if (qjOtaTargetLabel != nullptr) qjOtaTargetLabel->hide();
         if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->hide();
@@ -8144,6 +8306,7 @@ void MainWindow::onProtocolModeChanged(int index)
 
         if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->show();
         if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->hide();
+        if (otaManualA1Group != nullptr) otaManualA1Group->hide();
         if (otaStressGroup != nullptr) otaStressGroup->show();
         if (qjOtaTargetLabel != nullptr) qjOtaTargetLabel->show();
         if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->show();
@@ -8167,6 +8330,7 @@ void MainWindow::onProtocolModeChanged(int index)
                 // 隐藏美团/青桔专属的异常注入与配置项，重置按钮文本
                 if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->hide();
                 if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->hide();
+                if (otaManualA1Group != nullptr) otaManualA1Group->hide();
                 if (otaStressGroup != nullptr) otaStressGroup->hide();
                 if (qjOtaTargetLabel != nullptr) qjOtaTargetLabel->hide();
                 if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->hide();
@@ -8184,6 +8348,7 @@ void MainWindow::onProtocolModeChanged(int index)
                 // 显示版本号输入框，隐藏美团/青桔专属控件
                 if (qjOtaAnomalyGroup != nullptr) qjOtaAnomalyGroup->hide();
                 if (otaErrorInjectionGroup != nullptr) otaErrorInjectionGroup->hide();
+                if (otaManualA1Group != nullptr) otaManualA1Group->hide();
                 if (otaStressGroup != nullptr) otaStressGroup->hide();
                 if (qjOtaTargetLabel != nullptr) qjOtaTargetLabel->hide();
                 if (qjOtaTargetCombo != nullptr) qjOtaTargetCombo->hide();

@@ -62,10 +62,13 @@ private:
     bool canAcceptSample() const;
     void updateTagPart(quint32 frameId, const QByteArray &payload);
     void updateRates();
+    bool currentTagPartsComplete() const;
     bool currentTagIsValid() const;
     bool isValidTagText(const QString &tag) const;
     QString currentTagText() const;
     void clearCurrentTag();
+    void recordValidCurrentTag();
+    void finalizePendingSuccessTag();
     void markSuccess();
     void markFailure(const QString &reason);
     void writeSampleCsv(const CanFrame &frame, const RfidStatus &status, bool success, bool tagValid);
@@ -85,6 +88,8 @@ private:
     QFile sampleCsvFile;
     QElapsedTimer elapsedTimer;
     int pendingSampleRows = 0;
+    bool pendingSuccessTagValidation = false;
+    bool tagPart3FrameReceived = false;
 };
 
 #endif // STRESSTESTSERVICE_H
