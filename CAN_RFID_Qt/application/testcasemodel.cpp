@@ -147,6 +147,9 @@ void TestCaseModel::rebuildVisibleRows()
 
 bool TestCaseModel::matchesFilters(const TestCase &testCase) const
 {
+    if (!testCase.showInMainExecution) {
+        return false;
+    }
     if (!m_moduleFilter.isEmpty() && m_moduleFilter != QStringLiteral("全部") && testCase.module != m_moduleFilter) {
         return false;
     }

@@ -4,6 +4,7 @@
 #include "testsession.h"
 
 #include <QMap>
+#include <QDateTime>
 #include <QVector>
 
 class CanFrame;
@@ -31,7 +32,8 @@ public:
     QMap<QString, TestCaseResult> results() const;
     bool saveResult(const TestCaseResult &result, QString *error = nullptr);
 
-    bool appendEvidence(const QString &direction,
+    bool appendEvidence(const QDateTime &timestamp,
+                        const QString &direction,
                         const QString &channel,
                         const QString &frameId,
                         const QString &dataHex,

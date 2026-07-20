@@ -259,14 +259,14 @@ bool OtaWorker::sendSingleFrame(quint8 sid, const QByteArray &params)
         clearPendingFramesLocked(); // Clear queue before sending request!
     }
 
-    if (m_canthread != nullptr && m_canthread->isRunning()) {
-        m_canthread->sendClassicData(frames[0].id, config.channel, frames[0].data);
+    if (m_canthread != nullptr && m_canthread->isRunning() &&
+        m_canthread->sendClassicData(frames[0].id, config.channel, frames[0].data, &frames[0])) {
     } else {
         lastError = "CAN device is not ready or thread dead";
         return false;
     }
 
-    emit transmitFrame(frames[0].id, frames[0].data);
+    emit transmitFrame(frames[0]);
     return true;
 }
 
@@ -286,13 +286,13 @@ bool OtaWorker::sendMultiFrame(const QByteArray &payload, int timeoutMs)
         clearPendingFramesLocked(); // Clear queue before sending FF!
     }
     
-    if (m_canthread != nullptr && m_canthread->isRunning()) {
-        m_canthread->sendClassicData(ffFrame.id, config.channel, ffFrame.data);
+    if (m_canthread != nullptr && m_canthread->isRunning() &&
+        m_canthread->sendClassicData(ffFrame.id, config.channel, ffFrame.data, &ffFrame)) {
     } else {
         lastError = "CAN device is not ready or thread dead";
         return false;
     }
-    emit transmitFrame(ffFrame.id, ffFrame.data);
+    emit transmitFrame(ffFrame);
 
     // 等待流控帧 (FC)
     IsoTpFlowControl fc;
@@ -359,13 +359,13 @@ bool OtaWorker::sendMultiFrame(const QByteArray &payload, int timeoutMs)
         seq = (seq + 1) & 0x0F;
 
         // 发送连续帧
-        if (m_canthread != nullptr && m_canthread->isRunning()) {
-            m_canthread->sendClassicData(cfFrame.id, config.channel, cfFrame.data);
+        if (m_canthread != nullptr && m_canthread->isRunning() &&
+            m_canthread->sendClassicData(cfFrame.id, config.channel, cfFrame.data, &cfFrame)) {
         } else {
             lastError = "CAN device is not ready or thread dead during CF";
             return false;
         }
-        emit transmitFrame(cfFrame.id, cfFrame.data);
+        emit transmitFrame(cfFrame);
 
         bsCount++;
         if (fc.blockSize > 0 && bsCount >= fc.blockSize && offset < totalSize) {

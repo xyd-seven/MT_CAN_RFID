@@ -129,8 +129,12 @@ private:
     bool readManualMeituanOtaA1Params(quint8 *vendor, quint16 *hardwareVersion, QString *error) const;
     void abortRfidDiagnosticTransferSilently();
     void sendRfidFrame(UINT canId, const QByteArray &payload);
+    void sendRfidFrameWithDlc(UINT canId, const QByteArray &payload, UINT dlc);
+    void setRfidControlPeriodicActive(bool enabled);
     void logSentRfidFrame(UINT canId, const QByteArray &payload);
     void addCanFrameToList(const CanFrame &frame);
+    void flushOrderedCanFrameOutputs();
+    void saveAndRenderCanFrame(const CanFrame &frame);
     void flushPendingLogRows();
     QString protocolDecodeText(const CanFrame &frame) const;
     QString qingjuAddressName(quint8 address) const;
@@ -159,6 +163,7 @@ private:
     void bindStressStatsToSelectedTestCase();
     void runSelectedTestCaseAuto();
     void runSelectedTestCaseSemiAssist();
+    bool confirmExternalTestStage(const QString &title, const QString &instruction, const QString &eventName);
     void runFilteredTestCases();
     void retestFailedCases();
     void applyTestTemplatePreset(int index);
@@ -231,6 +236,7 @@ private:
     QSpinBox *rfidScanPeriodSpin;
     RfidService rfidService;
     StressTestService stressTestService;
+    QString stressTimingSummary;
     ProductionTestService productionTestService;
     TestCaseService testCaseService;
     TestCaseJudge testCaseJudge;
@@ -241,6 +247,13 @@ private:
     int maxLogRows;
     QTimer *logFlushTimer;
     QVector<QStringList> pendingLogRows;
+    struct PendingCanFrameOutput {
+        CanFrame frame;
+        quint64 sequence = 0;
+    };
+    QTimer *canFrameOrderTimer;
+    QVector<PendingCanFrameOutput> pendingCanFrameOutputs;
+    quint64 nextCanFrameSequence;
     bool canStarted;
     QTimer *stressRefreshTimer;
     QLabel *stressStateValue;
@@ -258,6 +271,7 @@ private:
     QLabel *stressUniqueTagCountValue;
     QLabel *stressMaxContinuousFailureValue;
     QLabel *stressLastFailureReasonValue;
+    QLabel *stressTimingSummaryValue;
     QCheckBox *stressAutoSaveCheckBox;
     QCheckBox *stressAutoExportSummaryCheckBox;
     QSpinBox *stressDurationSecondsSpin;
@@ -281,6 +295,7 @@ private:
     QString logDirectory;
     OtaService otaService;
     RfidDiagnosticTransfer rfidDiagnosticTransfer;
+    RfidDiagnosticTransfer rfidDiagnosticConflictTransfer;
     bool productionWritePending;
     bool m_testExecutionRunning;
     QLabel *otaStateValue;
@@ -302,6 +317,9 @@ private:
     bool testSavedRfidControlTimerActive;
     bool testSavedRfidScanning;
     bool testHasSavedRfidControlState;
+    quint8 lastObservedScanPeriod10ms;
+    quint8 testSavedScanPeriod10ms;
+    bool testHasSavedScanPeriod;
 
     QGroupBox *statusGroup;
     QTabWidget *rfidTabs;

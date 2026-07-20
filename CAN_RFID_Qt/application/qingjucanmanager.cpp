@@ -162,10 +162,12 @@ bool QingjuCanManager::sendModbusRequest(quint8 destAddr, quint8 funcCode, const
         id.index = numFrames - 1 - i; // 从 N-1 递减至 0
 
         quint32 rawId = id.toRawId();
-        if (!m_canThread->sendData(rawId, 1, 0, 0, m_channel, frameData.constData(), frameData.size())) {
+        CanFrame frame;
+        if (!m_canThread->sendData(rawId, 1, 0, 0, m_channel,
+                                   frameData.constData(), frameData.size(), &frame)) {
             success = false;
         } else {
-            emit frameSent(rawId, frameData, m_channel, false);
+            emit frameSent(frame);
         }
 
         // 帧间延时 2ms，防止总线拥堵

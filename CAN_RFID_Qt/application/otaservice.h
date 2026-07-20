@@ -47,7 +47,7 @@ public:
     void handleIncomingFrame(const CanFrame &frame);
 
 signals:
-    void transmitFrame(quint32 id, const QByteArray &payload);
+    void transmitFrame(const CanFrame &frame);
     void statusUpdated(int stateVal, const QString &message, int progressPercent);
 
 protected:
@@ -113,7 +113,7 @@ public:
     void handleIncomingFrame(const CanFrame &frame);
 
 signals:
-    void transmitFrame(quint32 id, const QByteArray &payload);
+    void transmitFrame(const CanFrame &frame);
     void otaStateChanged(OtaService::State state, const QString &message);
     void otaProgress(int percentage);
 

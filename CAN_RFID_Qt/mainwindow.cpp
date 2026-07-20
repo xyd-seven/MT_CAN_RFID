@@ -29,6 +29,7 @@
 #include <QScreen>
 #include <QScrollArea>
 #include <QRegularExpression>
+#include <QSet>
 #include <QScrollBar>
 #include <QInputDialog>
 #include <QLineEdit>
@@ -46,6 +47,9 @@
 #include <QToolButton>
 #include <QClipboard>
 #include <QSignalBlocker>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <algorithm>
 
 namespace {
 const QStringList DeviceTypeNames = {
@@ -57,9 +61,15 @@ const QStringList DeviceTypeNames = {
 const int DeviceTypeIndexes[] = {42, 3, 42, 3, 42, 3, 41, 4, 41, 4, 200, 201};
 constexpr int MaxManualPayloadBytes = 64;
 constexpr int LogFlushIntervalMs = 100;
+constexpr int CanFrameReorderWindowMs = 50;
+constexpr int MaxPendingCanFrameOutputs = 1000;
 constexpr int LogPruneBatchRows = 200;
 constexpr int MeituanOnlineTimeoutMs = 3000;
 constexpr int QingjuOnlineTimeoutMs = 1500;
+constexpr int BootBroadcastStopObservationMs = 4000;
+constexpr int OtaBootInactivityWaitMs = 1200;
+constexpr int OtaAppConfirmationWaitMs = 300;
+constexpr int OtaPowerOnBootQueryTimeoutMs = 2500;
 
 QString normalizeHexText(QString text)
 {
@@ -208,8 +218,11 @@ MainWindow::MainWindow(QWidget *parent) :
     testCaseModel(new TestCaseModel(this)),
     maxLogRows(1000),
     logFlushTimer(new QTimer(this)),
+    canFrameOrderTimer(new QTimer(this)),
+    nextCanFrameSequence(0),
     canStarted(false),
     stressRefreshTimer(new QTimer(this)),
+    stressTimingSummaryValue(nullptr),
     canAutoSaveCheckBox(nullptr),
     saveCanLogButton(nullptr),
     compactCanLogButton(nullptr),
@@ -229,6 +242,7 @@ MainWindow::MainWindow(QWidget *parent) :
     logDirectory(),
     otaService(this),
     rfidDiagnosticTransfer(this),
+    rfidDiagnosticConflictTransfer(this),
     productionWritePending(false),
     m_testExecutionRunning(false),
     testerPresentTimer(new QTimer(this)),
@@ -243,6 +257,9 @@ MainWindow::MainWindow(QWidget *parent) :
     testSavedRfidControlTimerActive(false),
     testSavedRfidScanning(false),
     testHasSavedRfidControlState(false),
+    lastObservedScanPeriod10ms(0),
+    testSavedScanPeriod10ms(0),
+    testHasSavedScanPeriod(false),
     statusGroup(nullptr),
     rfidTabs(nullptr),
     rfidStartScanBtn(nullptr),
@@ -447,6 +464,9 @@ MainWindow::MainWindow(QWidget *parent) :
     logFlushTimer->setSingleShot(true);
     logFlushTimer->setInterval(LogFlushIntervalMs);
     connect(logFlushTimer, &QTimer::timeout, this, &MainWindow::flushPendingLogRows);
+    canFrameOrderTimer->setSingleShot(true);
+    canFrameOrderTimer->setInterval(CanFrameReorderWindowMs);
+    connect(canFrameOrderTimer, &QTimer::timeout, this, &MainWindow::flushOrderedCanFrameOutputs);
     productionScanStableTimer->setSingleShot(true);
     productionScanStableTimer->setInterval(200);
     connect(productionScanStableTimer, &QTimer::timeout, this, [this]() {
@@ -673,11 +693,12 @@ MainWindow::MainWindow(QWidget *parent) :
         }
     });
 
-    // 100ms 定时广播 RFID 控制帧 (0x207)
+    // 仅作为周期控制状态标记；实际 0x207 发送由 CAN 工作线程调度。
     rfidControlTimer->setInterval(100);
     connect(rfidControlTimer, &QTimer::timeout, this, [this]() {
         if (canStarted) {
-            sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(rfidScanning));
+            const UINT channel = static_cast<UINT>(ui->sendPathCombo->currentIndex());
+            canthread->setRfidControlPeriodicEnabled(true, channel, rfidScanning);
         }
     });
 
@@ -725,16 +746,7 @@ MainWindow::MainWindow(QWidget *parent) :
     connect(qingjuRfidService, &QingjuRfidService::stateUpdated, this, &MainWindow::updateQingjuRfidPanel);
     connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, qingjuOtaService, &QingjuOtaService::handleIncomingModbusPacket);
     connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, this, &MainWindow::handleQjCustomResponse);
-    connect(qingjuCanManager, &QingjuCanManager::frameSent, this, [this](quint32 id, const QByteArray &data, quint8 channel, bool isCanFd) {
-        CanFrame frame;
-        frame.id = id;
-        frame.channel = channel;
-        frame.data = data;
-        frame.direction = CanFrameDirection::Tx;
-        frame.protocol = isCanFd ? CanFrameProtocol::CanFd : CanFrameProtocol::ClassicCan;
-        frame.extendedFrame = true;
-        frame.remoteFrame = false;
-        frame.hostDateTime = QDateTime::currentDateTime();
+    connect(qingjuCanManager, &QingjuCanManager::frameSent, this, [this](const CanFrame &frame) {
         addCanFrameToList(frame);
     });
     connect(qingjuCanManager, &QingjuCanManager::modbusPacketReceived, this, [this](quint8 srcAddr, quint8 destAddr, quint8 funcCode, const QByteArray &payload) {
@@ -859,7 +871,9 @@ MainWindow::MainWindow(QWidget *parent) :
             otaProgressBar->setValue(percentage);
         }
     });
-    connect(&otaService, &OtaService::transmitFrame, this, &MainWindow::logSentRfidFrame);
+    connect(&otaService, &OtaService::transmitFrame, this, [this](const CanFrame &frame) {
+        addCanFrameToList(frame);
+    });
 
     connect(&rfidDiagnosticTransfer, &RfidDiagnosticTransfer::frameReady, this, [this](quint32 id, const QByteArray &payload) {
         sendRfidFrame(static_cast<UINT>(id), payload);
@@ -879,6 +893,16 @@ MainWindow::MainWindow(QWidget *parent) :
         } else {
             QMessageBox::warning(this, QStringLiteral("写入失败"), message);
         }
+    });
+    connect(&rfidDiagnosticConflictTransfer, &RfidDiagnosticTransfer::frameReady, this, [this](quint32 id, const QByteArray &payload) {
+        sendRfidFrame(static_cast<UINT>(id), payload);
+    });
+    connect(&rfidDiagnosticConflictTransfer, &RfidDiagnosticTransfer::logMessage, this, [this](const QString &message) {
+        logService.logRuntime(LogLevel::Info, QStringLiteral("NVM-003第二会话：%1").arg(message));
+    });
+    connect(&rfidDiagnosticConflictTransfer, &RfidDiagnosticTransfer::finished, this, [this](bool success, const QString &message) {
+        logService.logRuntime(success ? LogLevel::Info : LogLevel::Warning,
+                              QStringLiteral("NVM-003第二会话：%1").arg(message));
     });
 
     connect(&productionTestService, &ProductionTestService::writeSnRequested, this, [this](quint16 did, const QByteArray &data) {
@@ -1342,7 +1366,7 @@ void MainWindow::updateCanControlState(bool deviceOpened, bool canInitialized, b
     if (canStarted) {
         testerPresentTimer->start();
         if (rfidControlEnabledCheck != nullptr && rfidControlEnabledCheck->isChecked()) {
-            rfidControlTimer->start();
+            setRfidControlPeriodicActive(true);
         }
         rfidOnlineCheckTimer->start();
         lastRfidFrameTime = QDateTime();
@@ -1355,7 +1379,7 @@ void MainWindow::updateCanControlState(bool deviceOpened, bool canInitialized, b
         abortRfidDiagnosticTransferSilently();
         productionWritePending = false;
         testerPresentTimer->stop();
-        rfidControlTimer->stop();
+        setRfidControlPeriodicActive(false);
         rfidOnlineCheckTimer->stop();
         rfidScanning = false;
         lastRfidFrameTime = QDateTime();
@@ -1917,6 +1941,8 @@ void MainWindow::oneClickStartCan()
 
 void MainWindow::startStressTest()
 {
+    stressTimingSummary.clear();
+    logService.beginCanTimingMeasurement();
     const int protocolMode = protocolModeCombo != nullptr ? protocolModeCombo->currentIndex() : 0;
     const bool is485Mode = (protocolMode == 2 || protocolMode == 3 || protocolMode == 4);
 
@@ -1979,7 +2005,7 @@ void MainWindow::startStressTest()
         } else {
             rfidScanning = true; // 开启周期发送以支持持续读卡
             sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
-            rfidControlTimer->start(); // 开启压测时同步启动 0x207 周期发送
+            setRfidControlPeriodicActive(true); // 开启压测时同步启动 0x207 周期发送
         }
     }
     
@@ -2007,6 +2033,7 @@ void MainWindow::stopStressTest(bool autoStopped)
 
     stressTestService.stop();
     stressRefreshTimer->stop();
+    stressTimingSummary = logService.finishCanTimingMeasurement();
 
     if (is485Mode) {
         emit requestRs485StopScan();
@@ -2017,11 +2044,8 @@ void MainWindow::stopStressTest(bool autoStopped)
         } else {
             rfidScanning = false; // 关闭周期发送，切回空闲状态
             sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
-            if (canStarted && rfidControlEnabledCheck != nullptr && rfidControlEnabledCheck->isChecked()) {
-                rfidControlTimer->start();
-            } else {
-                rfidControlTimer->stop();
-            }
+            setRfidControlPeriodicActive(canStarted && rfidControlEnabledCheck != nullptr &&
+                                         rfidControlEnabledCheck->isChecked());
         }
     }
     
@@ -2342,9 +2366,9 @@ QWidget *MainWindow::createRfidMonitorTab(QWidget *parent)
     });
     connect(rfidControlEnabledCheck, &QCheckBox::stateChanged, this, [this](int state) {
         if (canStarted && state == Qt::Checked) {
-            rfidControlTimer->start();
+            setRfidControlPeriodicActive(true);
         } else {
-            rfidControlTimer->stop();
+            setRfidControlPeriodicActive(false);
         }
         saveAppConfig();
     });
@@ -3270,15 +3294,21 @@ void MainWindow::refreshTestCaseDetail()
     const TestCase testCase = testCaseModel->caseAt(current.row());
     const TestCaseResult result = testCaseService.resultForCase(testCase.id);
     loadingTestCaseDetail = true;
+    if (testRunAutoBtn != nullptr) {
+        testRunAutoBtn->setText(testCase.executionMode == QStringLiteral("manual")
+            ? QStringLiteral("开始人工记录")
+            : (testCase.executionMode == QStringLiteral("semi")
+                ? QStringLiteral("开始逐条引导")
+                : QStringLiteral("自动执行本用例")));
+    }
     testCaseTitleValue->setText(QStringLiteral("%1  %2  %3").arg(testCase.id, testCase.module, testCase.priority));
     testCaseDetailText->setPlainText(QStringLiteral(
-        "测试类型：%1\n执行模式：%2\n命令模板：%3\n判定模板：%4\n超时/重试：%5 ms / %6 次\n依据：%7\n\n前置条件：\n%8\n\n测试数据：\n%9\n\n操作步骤：\n%10\n\n预期结果：\n%11\n\n人工提示：\n%12")
+        "测试类型：%1\n执行模式：%2\n命令模板：%3\n判定模板：%4\n超时：%5 ms\n依据：%6\n\n前置条件：\n%7\n\n测试数据：\n%8\n\n操作步骤：\n%9\n\n预期结果：\n%10\n\n人工提示：\n%11")
         .arg(testCase.type,
              testCase.executionMode,
              testCase.commandTemplate.isEmpty() ? QStringLiteral("-") : testCase.commandTemplate,
              testCase.judgeTemplate.isEmpty() ? QStringLiteral("-") : testCase.judgeTemplate)
         .arg(testCase.timeoutMs)
-        .arg(testCase.retryCount)
         .arg(testCase.basis,
              testCase.precondition,
              testCase.testData,
@@ -4195,6 +4225,26 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         shortWait(800);
         return startOtaUpgradeForTest(injectConfig, description);
     };
+    auto waitForOtaCompletion = [this, &shortWait](int timeoutMs) {
+        QElapsedTimer timer;
+        timer.start();
+        bool started = false;
+        while (timer.elapsed() < timeoutMs) {
+            const OtaService::State state = otaService.state();
+            if (state == OtaService::State::StartUpgrade || state == OtaService::State::SendData ||
+                state == OtaService::State::FinishUpgrade || state == OtaService::State::Abort ||
+                state == OtaService::State::QueryProgram) {
+                started = true;
+            }
+            if (state == OtaService::State::Completed || state == OtaService::State::Failed ||
+                (started && state == OtaService::State::Idle)) {
+                return true;
+            }
+            shortWait(50);
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        }
+        return false;
+    };
 
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x01_set_scan_period")) {
         QRegularExpression payloadRegex(QStringLiteral("\\b02\\s+01\\s+([0-9A-Fa-f]{2})\\b"));
@@ -4209,12 +4259,44 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
             setMessage(QStringLiteral("扫描周期参数解析失败，已阻止自动发送。"));
             return false;
         }
+        const bool verifyPersistence = testCase.postCommandTemplate == QStringLiteral("mt.sid_0x01_restore_saved");
+        if (verifyPersistence) {
+            if (lastObservedScanPeriod10ms == 0) {
+                setMessage(QStringLiteral("未采集到有效0x2C0扫描周期基线，已阻止持久化用例。"));
+                return false;
+            }
+            testSavedScanPeriod10ms = lastObservedScanPeriod10ms;
+            testHasSavedScanPeriod = true;
+            testCaseService.appendExecutionEvent(
+                QStringLiteral("扫描周期基线"),
+                QStringLiteral("执行前周期=0x%1").arg(testSavedScanPeriod10ms, 2, 16, QChar('0')).toUpper());
+        }
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetScanPeriodFrame(period));
+        if (verifyPersistence) {
+            shortWait(800);
+            sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
+            setMessage(QStringLiteral("已配置扫描周期0x%1，随后发送SID=0x02软件复位验证保持；结束时恢复执行前周期0x%2。")
+                .arg(period, 2, 16, QChar('0'))
+                .arg(testSavedScanPeriod10ms, 2, 16, QChar('0')).toUpper());
+            return true;
+        }
         setMessage(QStringLiteral("已发送扫描周期配置：ID=0x007 数据=02 01 %1 55 55 55 55 55")
             .arg(period, 2, 16, QChar('0')).toUpper());
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x02_reboot")) {
+        if (testCase.id == QStringLiteral("MT-RFID-SVC-005")) {
+            const QString deviceId = rfidService.state().deviceId.trimmed();
+            if (lastObservedScanPeriod10ms == 0 || deviceId.size() != 16) {
+                setMessage(QStringLiteral("未采集到完整设备ID或有效扫描周期基线，已阻止配置保持用例。"));
+                return false;
+            }
+            testCaseService.appendExecutionEvent(
+                QStringLiteral("SVC-005配置基线"),
+                QStringLiteral("扫描周期=0x%1；设备ID=%2")
+                    .arg(lastObservedScanPeriod10ms, 2, 16, QChar('0'))
+                    .arg(deviceId).toUpper());
+        }
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
         setMessage(QStringLiteral("已发送重启指令：ID=0x007 数据=01 02 55 55 55 55 55 55"));
         return true;
@@ -4242,7 +4324,7 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         const bool timerWasActive = rfidControlTimer != nullptr && rfidControlTimer->isActive();
         const bool originalScanning = rfidScanning;
         if (timerWasActive) {
-            rfidControlTimer->stop();
+            setRfidControlPeriodicActive(false);
         }
         sendRfidFrame(RfidProtocol::ControlFrameId, QByteArray::fromHex("0255555555555555"));
         shortWait(400);
@@ -4252,7 +4334,7 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         updateMeituanTopStatus();
         sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(originalScanning));
         if (timerWasActive) {
-            rfidControlTimer->start();
+            setRfidControlPeriodicActive(true);
         }
         setMessage(QStringLiteral("已发送非法 0x207 工作模式 0x02 和 0xFF，并已恢复执行前的 0x207 状态。"));
         return true;
@@ -4261,7 +4343,7 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         const bool timerWasActive = rfidControlTimer != nullptr && rfidControlTimer->isActive();
         const bool originalScanning = rfidScanning;
         if (timerWasActive) {
-            rfidControlTimer->stop();
+            setRfidControlPeriodicActive(false);
         }
         for (int i = 0; i < 10; ++i) {
             sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
@@ -4273,7 +4355,7 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         updateMeituanTopStatus();
         sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(originalScanning));
         if (timerWasActive) {
-            rfidControlTimer->start();
+            setRfidControlPeriodicActive(true);
         }
         setMessage(QStringLiteral("已发送 10 轮 0x207 开始/停止切换，并已恢复执行前的 0x207 状态。"));
         return true;
@@ -4283,7 +4365,7 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         testSavedRfidScanning = rfidScanning;
         testHasSavedRfidControlState = true;
         if (rfidControlTimer != nullptr) {
-            rfidControlTimer->stop();
+            setRfidControlPeriodicActive(false);
         }
         setMessage(QStringLiteral("已暂停 0x207 周期发送，等待设备上报通信异常或安全状态。"));
         return true;
@@ -4374,6 +4456,7 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x01_invalid_length")) {
+        shortWait(400);
         sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("0101555555555555"));
         shortWait(400);
         sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("0301329955555555"));
@@ -4389,13 +4472,41 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         setMessage(QStringLiteral("已发送 SID=0x29 非法配置请求：非法ID、周期小于10ms、长度错误各 1 条。"));
         return true;
     }
-    if (testCase.commandTemplate == QStringLiteral("mt.can_short_dlc_probe")) {
-        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("0102"));
+    if (testCase.commandTemplate == QStringLiteral("mt.diag_short_dlc_probe")) {
+        testHasSavedScanPeriod = false;
+        if (lastObservedScanPeriod10ms == 0) {
+            setMessage(QStringLiteral("未采集到有效 0x2C0 扫描周期基线，已阻止短 DLC 用例，避免无法恢复终端原周期。"));
+            return false;
+        }
+        testSavedScanPeriod10ms = lastObservedScanPeriod10ms;
+        testHasSavedScanPeriod = true;
+
+        // 截断 0x007 单帧：长度字段声明 7 字节，但实际 DLC 不足 8。
+        sendRfidFrameWithDlc(RfidProtocol::RequestFrameId, QByteArray::fromHex("0701"), 2);
         shortWait(200);
-        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("02013255"));
+        sendRfidFrameWithDlc(RfidProtocol::RequestFrameId, QByteArray::fromHex("07013255"), 4);
         shortWait(200);
-        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("062902C00064"));
-        setMessage(QStringLiteral("已发送 DLC=2/4/6 的短帧探测请求，用于确认设备安全忽略或规范响应。"));
+        sendRfidFrameWithDlc(RfidProtocol::RequestFrameId, QByteArray::fromHex("07013255555555"), 7);
+        shortWait(200);
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetScanPeriodFrame(0x32));
+        setMessage(QStringLiteral("已发送 0x007 DLC=2/4/7 截断请求，并发送合法 SID=0x01、周期=0x32 恢复请求；等待 0x107=02 41 32。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.control_reserved_padding_ignore")) {
+        const bool timerWasActive = rfidControlTimer != nullptr && rfidControlTimer->isActive();
+        if (timerWasActive) {
+            setRfidControlPeriodicActive(false);
+        }
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(false));
+        shortWait(500);
+        sendRfidFrame(RfidProtocol::ControlFrameId, QByteArray::fromHex("0199555555555555"));
+        shortWait(500);
+        rfidScanning = true;
+        updateMeituanTopStatus();
+        if (timerWasActive) {
+            setRfidControlPeriodicActive(true);
+        }
+        setMessage(QStringLiteral("已建立停止检测基线并发送保留字节错误的0x207开始检测命令；应按合法Byte1执行。0x107错误填充为补充人工注入项，不计入通过条件。"));
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.nvm_write_current_hw_version")) {
@@ -4429,12 +4540,10 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         }
         if (testCase.commandTemplate == QStringLiteral("mt.nvm_writeback_sn_and_reboot")) {
             if (!waitUntilDiagnosticIdle(5000)) {
-                setMessage(QStringLiteral("设备 ID/SN 写入仍在进行，已阻止自动重启以避免中断写入。"));
+                setMessage(QStringLiteral("设备 ID/SN 写入仍在进行，已阻止进入断电阶段以避免中断写入。"));
                 return false;
             }
-            shortWait(500);
-            sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
-            setMessage(QStringLiteral("已回写当前设备 ID/SN，并发送重启指令用于回读验证。"));
+            setMessage(QStringLiteral("已回写当前设备 ID/SN，等待半自动流程执行真实断电上电。"));
             return true;
         }
         setMessage(QStringLiteral("已按当前 0x2C4/0x2C5 设备 ID 回写 DID=0xE7E1。"));
@@ -4454,70 +4563,187 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
             return false;
         }
 
-        auto buildWritePayload = [](quint16 did, const QByteArray &data) {
-            QByteArray payload;
-            payload.append(static_cast<char>(0x2E));
-            payload.append(static_cast<char>((did >> 8) & 0xFF));
-            payload.append(static_cast<char>(did & 0xFF));
-            payload.append(data);
-            return payload;
-        };
-        auto sendRawIsoTpWrite = [this, &shortWait, &buildWritePayload](quint16 did, const QByteArray &data, const QString &label) {
-            const QByteArray payload = buildWritePayload(did, data);
-            IsoTpConfig config;
-            config.requestId = RfidProtocol::RequestFrameId;
-            config.responseId = RfidProtocol::ResponseFrameId;
-            config.channel = static_cast<quint32>(ui->sendPathCombo->currentIndex());
-            IsoTpTransport transport(config);
-
-            if (payload.size() <= 7) {
-                QVector<CanFrame> frames;
-                if (transport.buildRequestFrames(payload, &frames) != IsoTpTransport::Result::Ok || frames.isEmpty()) {
-                    return false;
+        bool firstFinished = false;
+        bool secondStarted = false;
+        bool secondFinished = false;
+        QEventLoop conflictLoop;
+        QTimer conflictTimeout;
+        conflictTimeout.setSingleShot(true);
+        const QMetaObject::Connection firstPayloadConnection = connect(
+            &rfidDiagnosticTransfer, &RfidDiagnosticTransfer::payloadSent, this, [&]() {
+                if (secondStarted) {
+                    return;
                 }
-                sendRfidFrame(RfidProtocol::RequestFrameId, frames.first().data);
-                return true;
-            }
+                secondStarted = true;
+                testCaseService.appendExecutionEvent(
+                    QStringLiteral("NVM-003连续写入"),
+                    QStringLiteral("第一组 SN 的 ISO-TP 数据已按 FC 发送完成，立即发起第二组 SN 写入，不等待第一组最终业务响应。"));
+                if (!rfidDiagnosticConflictTransfer.startWriteNonVolatile(0xE7E1, testSnB)) {
+                    secondFinished = true;
+                    conflictLoop.quit();
+                }
+            });
+        const QMetaObject::Connection firstFinishedConnection = connect(
+            &rfidDiagnosticTransfer, &RfidDiagnosticTransfer::finished, &conflictLoop,
+            [&](bool, const QString &) {
+                firstFinished = true;
+                if (secondFinished) {
+                    conflictLoop.quit();
+                }
+            });
+        const QMetaObject::Connection secondFinishedConnection = connect(
+            &rfidDiagnosticConflictTransfer, &RfidDiagnosticTransfer::finished, &conflictLoop,
+            [&](bool, const QString &) {
+                secondFinished = true;
+                if (firstFinished) {
+                    conflictLoop.quit();
+                }
+            });
+        connect(&conflictTimeout, &QTimer::timeout, &conflictLoop, &QEventLoop::quit);
 
-            const CanFrame firstFrame = transport.buildFirstFrame(payload, payload.size());
-            sendRfidFrame(RfidProtocol::RequestFrameId, firstFrame.data);
-            testCaseService.appendExecutionEvent(QStringLiteral("NVM-003写入请求"),
-                                                 QStringLiteral("%1：DID=0x%2，数据=%3，已发送 ISO-TP 首帧。")
-                                                     .arg(label)
-                                                     .arg(did, 4, 16, QChar('0'))
-                                                     .arg(QString::fromLatin1(data))
-                                                     .toUpper());
-            shortWait(80);
-
-            int offset = 6;
-            quint8 sequence = 1;
-            while (offset < payload.size()) {
-                const QByteArray chunk = payload.mid(offset, 7);
-                const CanFrame cfFrame = transport.buildConsecutiveFrame(chunk, sequence);
-                sendRfidFrame(RfidProtocol::RequestFrameId, cfFrame.data);
-                offset += chunk.size();
-                sequence = static_cast<quint8>((sequence + 1) & 0x0F);
-                shortWait(1);
-            }
-            return true;
-        };
-
-        if (!sendRawIsoTpWrite(0xE7E1, testSnA, QStringLiteral("第一次测试SN写入")) ||
-            !sendRawIsoTpWrite(0xE7E1, testSnB, QStringLiteral("第二次测试SN写入"))) {
-            setMessage(QStringLiteral("构建或发送 DID=0xE7E1 测试 SN 多帧写入失败，已阻止执行。"));
+        if (!rfidDiagnosticTransfer.startWriteNonVolatile(0xE7E1, testSnA)) {
+            disconnect(firstPayloadConnection);
+            disconnect(firstFinishedConnection);
+            disconnect(secondFinishedConnection);
+            setMessage(QStringLiteral("第一组 DID=0xE7E1 测试 SN 写入无法启动，已阻止执行。"));
             return false;
         }
-        shortWait(2500);
-        if (!sendRawIsoTpWrite(0xE7E1, originalSn, QStringLiteral("原SN恢复写入"))) {
-            setMessage(QStringLiteral("测试 SN 已发送，但原 SN 恢复写入发送失败，请人工恢复 SN。"));
+        conflictTimeout.start(8000);
+        conflictLoop.exec();
+        disconnect(firstPayloadConnection);
+        disconnect(firstFinishedConnection);
+        disconnect(secondFinishedConnection);
+        if (rfidDiagnosticTransfer.isBusy()) {
+            rfidDiagnosticTransfer.abort();
+        }
+        if (rfidDiagnosticConflictTransfer.isBusy()) {
+            rfidDiagnosticConflictTransfer.abort();
+        }
+        if (!secondStarted) {
+            setMessage(QStringLiteral("第一组 ISO-TP 数据未完成，第二组连续写入未启动；已阻止判定并准备恢复原 SN。"));
+        }
+
+        shortWait(300);
+        bool restoreFinished = false;
+        bool restoreSucceeded = false;
+        QEventLoop restoreLoop;
+        QTimer restoreTimeout;
+        restoreTimeout.setSingleShot(true);
+        const QMetaObject::Connection restoreConnection = connect(
+            &rfidDiagnosticTransfer, &RfidDiagnosticTransfer::finished, &restoreLoop,
+            [&](bool success, const QString &) {
+                restoreFinished = true;
+                restoreSucceeded = success;
+                restoreLoop.quit();
+            });
+        connect(&restoreTimeout, &QTimer::timeout, &restoreLoop, &QEventLoop::quit);
+        const bool restoreStarted = rfidDiagnosticTransfer.startWriteNonVolatile(0xE7E1, originalSn);
+        if (restoreStarted) {
+            testCaseService.appendExecutionEvent(
+                QStringLiteral("NVM-003原SN恢复"),
+                QStringLiteral("冲突测试结束，使用正常 ISO-TP 会话恢复原 SN=%1。").arg(QString::fromLatin1(originalSn)));
+            restoreTimeout.start(5000);
+            restoreLoop.exec();
+        }
+        disconnect(restoreConnection);
+        if (!restoreStarted || !restoreFinished || !restoreSucceeded) {
+            setMessage(QStringLiteral("连续写入测试已执行，但原 SN 恢复未获得肯定响应；用例将阻塞并要求人工恢复。"));
             return true;
         }
-        setMessage(QStringLiteral("已连续发送两组不同 DID=0xE7E1 测试 SN 写入请求：SN-A=NVM003SNTESTA001，SN-B=NVM003SNTESTB001；随后已发送原 SN 恢复写入。请根据 7F 2E 忙/拒绝响应或多次 6E E7 E1 串行响应判定。"));
+        shortWait(10500);
+        setMessage(QStringLiteral("已按终端 FC 完成两组重叠 SN 写入，并通过独立正常 ISO-TP 会话恢复原 SN；最终结果将同时检查冲突处理和原值回读。"));
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.ota_query_program_status")) {
         sendRfidFrame(RfidProtocol::RequestFrameId, queryProgramStatusPayload());
         setMessage(QStringLiteral("已发送 OTA 程序位置查询：ID=0x007 数据=01 A4 55 55 55 55 55 55。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.boot_reset_app_recovery")) {
+        constexpr int kBootTransitionWaitMs = 800;
+        constexpr int kBootQueryTimeoutMs = 2500;
+        constexpr int kResetRecoveryWaitMs = 5000;
+
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x02));
+        shortWait(kBootTransitionWaitMs);
+        sendRfidFrame(RfidProtocol::RequestFrameId, queryProgramStatusPayload());
+
+        QElapsedTimer bootQueryTimer;
+        bootQueryTimer.start();
+        bool bootConfirmed = false;
+        while (bootQueryTimer.elapsed() < kBootQueryTimeoutMs) {
+            shortWait(50);
+            flushOrderedCanFrameOutputs();
+            if (readEvidenceText(testCase.id).contains(QStringLiteral("E4 00"), Qt::CaseInsensitive)) {
+                bootConfirmed = true;
+                break;
+            }
+        }
+        if (!bootConfirmed) {
+            setMessage(QStringLiteral("已发送跳转 BOOT 和 0xA4 查询，但 2500ms 内未确认 E4 00；为避免在状态不明时复位，未继续发送 SID=0x11。"));
+            return true;
+        }
+
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSoftwareResetFrame());
+        shortWait(kResetRecoveryWaitMs);
+        sendRfidFrame(RfidProtocol::RequestFrameId, queryProgramStatusPayload());
+        setMessage(QStringLiteral("已自动完成跳转 BOOT、BOOT 位置确认、SID=0x11 软件复位和复位后 0xA4 查询；正在采集 APP 位置与周期广播证据。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.boot_broadcast_startup_verify")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x02));
+        shortWait(800);
+        sendRfidFrame(RfidProtocol::RequestFrameId, queryProgramStatusPayload());
+        setMessage(QStringLiteral("已跳转 BOOT 并发送 A4 查询，正在采集 0x2C3/0x2C4/0x2C5 启动广播周期。"));
+        return true;
+    }
+    if (testCase.commandTemplate == QStringLiteral("mt.boot_a1_a2_broadcast_stop")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x02));
+        shortWait(1200);
+
+        OtaErrorConfig a1Config;
+        a1Config.enabled = true;
+        a1Config.stopAfterA1Accepted = true;
+        a1Config.expectedProgramLocationAfterA1Accepted = 0x00;
+        if (!startOtaUpgradeForTest(a1Config, QStringLiteral("BOOT 广播停止测试：发送 A1 服务"))) {
+            return false;
+        }
+        if (!waitForOtaCompletion(12000)) {
+            setMessage(QStringLiteral("A1 服务流程未在 12 秒内结束，已阻止继续执行 A2 广播停止验证。"));
+            return false;
+        }
+
+        testCaseService.appendExecutionEvent(
+            QStringLiteral("A1后广播停止观察"),
+            QStringLiteral("在 BOOT 快发阶段连续观察 %1ms，确认 0x2C3/0x2C4/0x2C5 已停止。")
+                .arg(BootBroadcastStopObservationMs));
+        shortWait(BootBroadcastStopObservationMs);
+
+        // A1 后不发送重启：升级未完成时终端拒绝重启，等待 OTA 5 秒无后续数据超时回 APP。
+        testCaseService.appendExecutionEvent(
+            QStringLiteral("A1超时返回APP确认"),
+            QStringLiteral("4 秒广播停止观察结束后继续等待 %1ms，随后查询 A4 确认 OTA 超时已返回 APP。")
+                .arg(OtaBootInactivityWaitMs));
+        shortWait(OtaBootInactivityWaitMs);
+        sendRfidFrame(RfidProtocol::RequestFrameId, queryProgramStatusPayload());
+        shortWait(OtaAppConfirmationWaitMs);
+
+        // A2 在新的 BOOT 快发阶段验证。
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x02));
+        shortWait(1200);
+
+        // ISO-TP 单帧：长度3，服务A2、包号0001；不携带固件数据，避免触发写入。
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("03A2000155555555"));
+        testCaseService.appendExecutionEvent(
+            QStringLiteral("A2后广播停止观察"),
+            QStringLiteral("在 BOOT 快发阶段连续观察 %1ms，确认 0x2C3/0x2C4/0x2C5 已停止。")
+                .arg(BootBroadcastStopObservationMs));
+        shortWait(BootBroadcastStopObservationMs);
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x01));
+        shortWait(1000);
+        sendRfidFrame(RfidProtocol::RequestFrameId, queryProgramStatusPayload());
+        shortWait(1000);
+        setMessage(QStringLiteral("A1、A2 均已在独立BOOT快发阶段完成4秒广播停止观察；已尝试跳回APP并发送A4，最终结果将复判E4 01。"));
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.ota_start_upgrade_current_file")) {
@@ -4617,12 +4843,34 @@ bool MainWindow::sendAutoTestCommand(const TestCase &testCase, QString *message)
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x2e_invalid_did")) {
+        const RfidState baseline = rfidService.state();
+        if (baseline.deviceId.trimmed().size() != 16 || rfidService.hardwareVersion() == 0) {
+            setMessage(QStringLiteral("未采集到完整版本/设备ID基线，已阻止非法DID写入用例。"));
+            return false;
+        }
+        testCaseService.appendExecutionEvent(
+            QStringLiteral("NVM非法写基线"),
+            QStringLiteral("HW=%1；SW=%2；设备ID=%3")
+                .arg(rfidService.hardwareVersion(), 4, 16, QChar('0'))
+                .arg(rfidService.softwareVersion(), 4, 16, QChar('0'))
+                .arg(baseline.deviceId.trimmed()).toUpper());
         sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("052EFFFF00005555"));
+        shortWait(600);
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
         setMessage(QStringLiteral("已发送 SID=0x2E 非法 DID 请求：05 2E FF FF 00 00 55 55。"));
         return true;
     }
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x2e_invalid_length")) {
+        const QString deviceId = rfidService.state().deviceId.trimmed();
+        if (deviceId.size() != 16) {
+            setMessage(QStringLiteral("未采集到完整设备ID基线，已阻止SN长度错误用例。"));
+            return false;
+        }
+        testCaseService.appendExecutionEvent(QStringLiteral("NVM非法写基线"),
+                                             QStringLiteral("设备ID=%1").arg(deviceId));
         sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("052EE7E100005555"));
+        shortWait(600);
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildRestartFrame());
         setMessage(QStringLiteral("已发送 SID=0x2E 长度错误请求：DID=E7E1 但 SN 数据长度不足。"));
         return true;
     }
@@ -4664,6 +4912,15 @@ void MainWindow::runSelectedTestCaseAuto()
     }
 
     const TestCase testCase = testCaseModel->caseAt(testCaseTableView->currentIndex().row());
+    if (testCase.executionMode == QStringLiteral("manual")) {
+        startSelectedTestCase();
+        QMessageBox::information(this,
+                                 QStringLiteral("人工记录"),
+                                 testCase.manualPrompt.trimmed().isEmpty()
+                                     ? QStringLiteral("已开始记录，请按用例步骤完成外部操作后手工保存结果。")
+                                     : testCase.manualPrompt);
+        return;
+    }
     if (testCase.executionMode == QStringLiteral("semi") && !testCase.semiAssistTemplate.trimmed().isEmpty()) {
         runSelectedTestCaseSemiAssist();
         return;
@@ -4700,6 +4957,7 @@ void MainWindow::runSelectedTestCaseAuto()
         QMessageBox::information(this, QStringLiteral("自动执行"), commandMessage);
     }
     if (!commandSent && testCase.executionMode == QStringLiteral("auto")) {
+        flushOrderedCanFrameOutputs();
         TestCaseResult result = testCaseService.resultForCase(testCase.id);
         result.caseId = testCase.id;
         result.status = TestResultStatus::Blocked;
@@ -4718,7 +4976,8 @@ void MainWindow::runSelectedTestCaseAuto()
         return;
     }
 
-    int waitMs = qBound(300, testCase.timeoutMs, 30000);
+    const int maximumAutoWaitMs = 180000;
+    int waitMs = qBound(300, testCase.timeoutMs, maximumAutoWaitMs);
     if (testCase.commandTemplate == QStringLiteral("mt.sid_0x02_reboot") ||
         testCase.commandTemplate == QStringLiteral("mt.sid_0x11_reset") ||
         testCase.judgeTemplate == QStringLiteral("mt.broadcast_all_present_after_reboot") ||
@@ -4737,32 +4996,94 @@ void MainWindow::runSelectedTestCaseAuto()
     testCaseService.appendExecutionEvent(QStringLiteral("采集窗口结束"),
                                          QStringLiteral("等待 %1 ms 后开始自动判定").arg(waitMs));
 
-    const TestJudgeResult judgeResult = testCaseJudge.judge(testCase, readEvidenceText(testCase.id));
+    if (testCase.postCommandTemplate == QStringLiteral("mt.control_0x207_restore_saved") &&
+        testHasSavedRfidControlState) {
+        rfidScanning = testSavedRfidScanning;
+        updateMeituanTopStatus();
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(rfidScanning));
+        if (testSavedRfidControlTimerActive && rfidControlTimer != nullptr) {
+            setRfidControlPeriodicActive(true);
+        }
+        testCaseService.appendExecutionEvent(QStringLiteral("0x207恢复后采集"),
+                                             QStringLiteral("已恢复执行前控制状态，继续采集1200ms验证Byte3恢复0x00"));
+        QEventLoop recoveryWaitLoop;
+        QTimer::singleShot(1200, &recoveryWaitLoop, &QEventLoop::quit);
+        recoveryWaitLoop.exec();
+        testHasSavedRfidControlState = false;
+    }
+
+    flushOrderedCanFrameOutputs();
+    TestJudgeResult judgeResult = testCaseJudge.judge(testCase, readEvidenceText(testCase.id));
     testCaseService.appendExecutionEvent(QStringLiteral("自动判定完成"),
                                          QStringLiteral("%1：%2")
                                              .arg(testResultStatusText(judgeResult.status), judgeResult.reason));
     QString restoreMessage;
-    if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config") &&
-        testCase.testData.contains(QStringLiteral("FF FF"), Qt::CaseInsensitive)) {
-        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(0x02C0, 0x0064));
-        restoreMessage = QStringLiteral("已发送 0x29 恢复命令：目标 0x2C0 周期恢复为 0x0064。");
+    auto mergeRestoreJudge = [this, &testCase, &judgeResult, &restoreMessage](const TestJudgeResult &restoreJudgeResult) {
+        testCaseService.appendExecutionEvent(
+            QStringLiteral("恢复判定"),
+            QStringLiteral("%1：%2")
+                .arg(testResultStatusText(restoreJudgeResult.status), restoreJudgeResult.reason));
+        restoreMessage.append(QStringLiteral(" 恢复判定：%1").arg(restoreJudgeResult.reason));
+        if (judgeResult.status == TestResultStatus::Passed &&
+            restoreJudgeResult.status != TestResultStatus::Passed) {
+            judgeResult.status = TestResultStatus::Blocked;
+            judgeResult.failureCategory = restoreJudgeResult.failureCategory.isEmpty()
+                ? QStringLiteral("restore_not_confirmed")
+                : restoreJudgeResult.failureCategory;
+            judgeResult.reason = QStringLiteral("主体判定通过，但恢复未确认：%1")
+                .arg(restoreJudgeResult.reason);
+            judgeResult.keyFrames.append(restoreJudgeResult.keyFrames);
+        }
+    };
+    const bool needsDefaultPeriodRestore =
+        (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config") &&
+         testCase.testData.contains(QStringLiteral("FF FF"), Qt::CaseInsensitive)) ||
+        testCase.postCommandTemplate == QStringLiteral("mt.sid_0x29_restore_2c0_default") ||
+        testCase.postCommandTemplate == QStringLiteral("mt.sid_0x29_restore_2c0_to_2c6_default");
+    bool allowDefaultPeriodRestore = false;
+    if (needsDefaultPeriodRestore) {
+        const bool restoresAllBroadcastPeriods =
+            testCase.postCommandTemplate == QStringLiteral("mt.sid_0x29_restore_2c0_to_2c6_default");
+        const QString restoreMappingText = restoresAllBroadcastPeriods
+            ? QStringLiteral("0x2C0/0x2C1/0x2C2/0x2C6=100ms，0x2C3/0x2C4/0x2C5=10s")
+            : QStringLiteral("0x2C0=100ms（0x0064）");
+        const QMessageBox::StandardButton choice = QMessageBox::question(
+            this,
+            QStringLiteral("确认恢复广播周期"),
+            QStringLiteral("本用例已修改 0x29 广播周期配置。\n\n"
+                           "仅当已确认样机默认周期映射为：%1 时，才可自动恢复。"
+                           "若默认值不一致或不确定，请选择“否”，系统不会下发恢复命令，并会标记需要人工恢复。")
+                .arg(restoreMappingText),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        allowDefaultPeriodRestore = choice == QMessageBox::Yes;
+        testCaseService.appendExecutionEvent(
+            QStringLiteral("0x29恢复确认"),
+            allowDefaultPeriodRestore
+                ? QStringLiteral("人工确认样机基线为 100ms，允许自动恢复。")
+                : QStringLiteral("未确认样机基线为 100ms，未自动下发恢复命令。"));
     }
-    if (testCase.postCommandTemplate == QStringLiteral("mt.sid_0x29_restore_2c0_default")) {
+
+    if (needsDefaultPeriodRestore && !allowDefaultPeriodRestore) {
+        restoreMessage = QStringLiteral("未确认默认周期映射，系统未自动恢复 0x29 配置；请按现场基线人工恢复并确认。");
+    } else if (testCase.commandTemplate == QStringLiteral("mt.sid_0x29_period_config") &&
+               testCase.testData.contains(QStringLiteral("FF FF"), Qt::CaseInsensitive)) {
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(0x02C0, 0x0064));
-        restoreMessage = restoreMessage.isEmpty()
-            ? QStringLiteral("已发送 0x29 恢复命令：目标 0x2C0 周期恢复为 0x0064。")
-            : restoreMessage + QStringLiteral(" 已发送 0x29 恢复命令：目标 0x2C0 周期恢复为 0x0064。");
-    }
-    if (testCase.postCommandTemplate == QStringLiteral("mt.sid_0x29_restore_2c0_to_2c6_default")) {
+        restoreMessage = QStringLiteral("已按人工确认的基线发送 0x29 恢复命令：目标 0x2C0 周期恢复为 0x0064。");
+    } else if (testCase.postCommandTemplate == QStringLiteral("mt.sid_0x29_restore_2c0_default")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(0x02C0, 0x0064));
+        restoreMessage = QStringLiteral("已按人工确认的基线发送 0x29 恢复命令：目标 0x2C0 周期恢复为 0x0064。");
+    } else if (testCase.postCommandTemplate == QStringLiteral("mt.sid_0x29_restore_2c0_to_2c6_default")) {
         for (quint16 canId = 0x02C0; canId <= 0x02C6; ++canId) {
-            sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSetBroadcastPeriodFrame(canId, 0x0064));
+            const quint16 defaultPeriodMs = (canId >= 0x02C3 && canId <= 0x02C5) ? 0x2710 : 0x0064;
+            sendRfidFrame(RfidProtocol::RequestFrameId,
+                          RfidProtocol::buildSetBroadcastPeriodFrame(canId, defaultPeriodMs));
             QEventLoop restoreWaitLoop;
             QTimer::singleShot(120, &restoreWaitLoop, &QEventLoop::quit);
             restoreWaitLoop.exec();
         }
-        restoreMessage = restoreMessage.isEmpty()
-            ? QStringLiteral("已发送 0x29 恢复命令：0x2C0~0x2C6 周期恢复为 0x0064。")
-            : restoreMessage + QStringLiteral(" 已发送 0x29 恢复命令：0x2C0~0x2C6 周期恢复为 0x0064。");
+        restoreMessage = QStringLiteral("已按默认映射发送 0x29 恢复命令：0x2C0/0x2C1/0x2C2/0x2C6=0x0064（100ms），"
+                                        "0x2C3/0x2C4/0x2C5=0x2710（10s）。");
     }
     if (testCase.postCommandTemplate == QStringLiteral("mt.control_0x207_restore_saved")) {
         if (testHasSavedRfidControlState) {
@@ -4770,18 +5091,120 @@ void MainWindow::runSelectedTestCaseAuto()
             updateMeituanTopStatus();
             sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(rfidScanning));
             if (testSavedRfidControlTimerActive && rfidControlTimer != nullptr) {
-                rfidControlTimer->start();
+                setRfidControlPeriodicActive(true);
             }
             restoreMessage = restoreMessage.isEmpty()
                 ? QStringLiteral("已恢复执行前的 0x207 周期发送状态。")
                 : restoreMessage + QStringLiteral(" 已恢复执行前的 0x207 周期发送状态。");
         }
         testHasSavedRfidControlState = false;
+    } else if (testCase.postCommandTemplate == QStringLiteral("mt.sid_0x01_restore_saved")) {
+        if (testHasSavedScanPeriod) {
+            const quint8 restoredScanPeriod = testSavedScanPeriod10ms;
+            sendRfidFrame(RfidProtocol::RequestFrameId,
+                          RfidProtocol::buildSetScanPeriodFrame(restoredScanPeriod));
+            testCaseService.appendExecutionEvent(
+                QStringLiteral("扫描周期恢复"),
+                QStringLiteral("已发送 SID=0x01，将扫描周期恢复为 0x%1。")
+                    .arg(restoredScanPeriod, 2, 16, QChar('0')).toUpper());
+            QEventLoop restoreWaitLoop;
+            QTimer::singleShot(1000, &restoreWaitLoop, &QEventLoop::quit);
+            restoreWaitLoop.exec();
+            restoreMessage = restoreMessage.isEmpty()
+                ? QStringLiteral("已恢复执行前扫描周期 0x%1。")
+                      .arg(restoredScanPeriod, 2, 16, QChar('0')).toUpper()
+                : restoreMessage + QStringLiteral(" 已恢复执行前扫描周期。");
+            TestCase restoreJudgeCase = testCase;
+            restoreJudgeCase.judgeTemplate = QStringLiteral("mt.scan_period_restore_response");
+            restoreJudgeCase.testData = QStringLiteral("restore=%1")
+                .arg(restoredScanPeriod, 2, 16, QChar('0'));
+            flushOrderedCanFrameOutputs();
+            mergeRestoreJudge(testCaseJudge.judge(restoreJudgeCase, readEvidenceText(testCase.id)));
+        }
+        testHasSavedScanPeriod = false;
     } else if (testCase.postCommandTemplate == QStringLiteral("mt.sid_0x10_jump_app")) {
         sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x01));
+        QEventLoop appJumpWaitLoop;
+        QTimer::singleShot(1000, &appJumpWaitLoop, &QEventLoop::quit);
+        appJumpWaitLoop.exec();
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("01A4555555555555"));
+        QEventLoop appQueryWaitLoop;
+        QTimer::singleShot(1000, &appQueryWaitLoop, &QEventLoop::quit);
+        appQueryWaitLoop.exec();
         restoreMessage = restoreMessage.isEmpty()
-            ? QStringLiteral("已发送跳转 APP 恢复命令。")
-            : restoreMessage + QStringLiteral(" 已发送跳转 APP 恢复命令。");
+            ? QStringLiteral("已发送跳转APP恢复命令并查询程序位置。")
+            : restoreMessage + QStringLiteral(" 已发送跳转APP恢复命令并查询程序位置。");
+        TestCase restoreJudgeCase = testCase;
+        restoreJudgeCase.judgeTemplate = QStringLiteral("mt.app_restore_after_test");
+        flushOrderedCanFrameOutputs();
+        mergeRestoreJudge(testCaseJudge.judge(restoreJudgeCase, readEvidenceText(testCase.id)));
+    } else if (testCase.postCommandTemplate == QStringLiteral("mt.sid_0x85_restore_enable")) {
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildCommunicationDiagnosticFrame(true));
+        QEventLoop restoreWaitLoop;
+        QTimer::singleShot(800, &restoreWaitLoop, &QEventLoop::quit);
+        restoreWaitLoop.exec();
+        TestCase restoreJudgeCase = testCase;
+        restoreJudgeCase.commandTemplate = QStringLiteral("mt.sid_0x85_diag_enable");
+        restoreJudgeCase.judgeTemplate = QStringLiteral("mt.diag_0x85_response");
+        flushOrderedCanFrameOutputs();
+        mergeRestoreJudge(testCaseJudge.judge(restoreJudgeCase, readEvidenceText(testCase.id)));
+        restoreMessage = QStringLiteral("已发送SID=0x85子功能0x01并确认诊断使能恢复。业务抑制效果仍需结合故障注入人工观察。");
+    }
+    if (needsDefaultPeriodRestore && allowDefaultPeriodRestore) {
+        QEventLoop restoreResponseWaitLoop;
+        QTimer::singleShot(1200, &restoreResponseWaitLoop, &QEventLoop::quit);
+        restoreResponseWaitLoop.exec();
+        TestCase restoreJudgeCase = testCase;
+        restoreJudgeCase.judgeTemplate =
+            testCase.postCommandTemplate == QStringLiteral("mt.sid_0x29_restore_2c0_to_2c6_default")
+                ? QStringLiteral("mt.period_restore_default_responses")
+                : QStringLiteral("mt.period_restore_2c0_response");
+        flushOrderedCanFrameOutputs();
+        TestJudgeResult restoreJudgeResult = testCaseJudge.judge(
+            restoreJudgeCase, readEvidenceText(testCase.id));
+
+        // CAN 链路偶发漏采单条恢复响应时，仅补发缺失 ID；每个 ID 最多重试一次，
+        // 避免重复改写已经确认的配置，也避免无界重试掩盖真实故障。
+        QSet<quint16> retriedRestoreIds;
+        while (restoreJudgeResult.status != TestResultStatus::Passed &&
+               restoreJudgeResult.failureCategory == QStringLiteral("restore_response_missing")) {
+            const QRegularExpression missingIdPattern(QStringLiteral("0[xX](2[Cc][0-6])"));
+            const QRegularExpressionMatch missingIdMatch = missingIdPattern.match(restoreJudgeResult.reason);
+            bool idOk = false;
+            const quint16 missingCanId = missingIdMatch.hasMatch()
+                ? missingIdMatch.captured(1).toUShort(&idOk, 16)
+                : 0;
+            if (!idOk || retriedRestoreIds.contains(missingCanId)) {
+                break;
+            }
+
+            retriedRestoreIds.insert(missingCanId);
+            const quint16 defaultPeriodMs =
+                (missingCanId >= 0x02C3 && missingCanId <= 0x02C5) ? 0x2710 : 0x0064;
+            sendRfidFrame(RfidProtocol::RequestFrameId,
+                          RfidProtocol::buildSetBroadcastPeriodFrame(missingCanId, defaultPeriodMs));
+            testCaseService.appendExecutionEvent(
+                QStringLiteral("默认周期恢复重试"),
+                QStringLiteral("%1 的 0x69 响应未采集到，仅补发该 ID 一次：周期=0x%2。")
+                    .arg(QStringLiteral("0x%1").arg(missingCanId, 3, 16, QChar('0')).toUpper())
+                    .arg(defaultPeriodMs, 4, 16, QChar('0')).toUpper());
+
+            QEventLoop retryResponseWaitLoop;
+            QTimer::singleShot(800, &retryResponseWaitLoop, &QEventLoop::quit);
+            retryResponseWaitLoop.exec();
+            flushOrderedCanFrameOutputs();
+            restoreJudgeResult = testCaseJudge.judge(
+                restoreJudgeCase, readEvidenceText(testCase.id));
+        }
+        if (!retriedRestoreIds.isEmpty()) {
+            restoreMessage.append(QStringLiteral(" 缺失的默认周期恢复响应已按 ID 定向重试一次。"));
+        }
+        mergeRestoreJudge(restoreJudgeResult);
+    } else if (needsDefaultPeriodRestore && !allowDefaultPeriodRestore &&
+               judgeResult.status == TestResultStatus::Passed) {
+        judgeResult.status = TestResultStatus::Blocked;
+        judgeResult.failureCategory = QStringLiteral("restore_not_confirmed");
+        judgeResult.reason = QStringLiteral("主体判定通过，但未获授权恢复默认周期，样机配置状态需要人工处理。");
     }
     TestCaseResult result = testCaseService.resultForCase(testCase.id);
     result.caseId = testCase.id;
@@ -4794,9 +5217,6 @@ void MainWindow::runSelectedTestCaseAuto()
              QString::number(waitMs),
              testCase.judgeTemplate.isEmpty() ? QStringLiteral("-") : testCase.judgeTemplate,
              judgeResult.reason);
-    if (!judgeResult.keyFrames.isEmpty()) {
-        actual.append(QStringLiteral("\n[关键帧]\n%1").arg(judgeResult.keyFrames.join(QStringLiteral("\n"))));
-    }
     if (!restoreMessage.isEmpty()) {
         actual.append(QStringLiteral("\n[恢复动作] %1").arg(restoreMessage));
     }
@@ -4812,6 +5232,35 @@ void MainWindow::runSelectedTestCaseAuto()
     refreshTestCaseModel();
 }
 
+bool MainWindow::confirmExternalTestStage(const QString &title,
+                                          const QString &instruction,
+                                          const QString &eventName)
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    dialog.setModal(false);
+    QVBoxLayout layout(&dialog);
+    QLabel label(instruction, &dialog);
+    label.setWordWrap(true);
+    layout.addWidget(&label);
+    QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    buttons.button(QDialogButtonBox::Ok)->setText(QStringLiteral("已完成，开始采集"));
+    buttons.button(QDialogButtonBox::Cancel)->setText(QStringLiteral("终止"));
+    layout.addWidget(&buttons);
+
+    QEventLoop loop;
+    bool confirmed = false;
+    connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&]() { confirmed = true; dialog.accept(); });
+    connect(&buttons, &QDialogButtonBox::rejected, &dialog, [&]() { dialog.reject(); });
+    connect(&dialog, &QDialog::finished, &loop, &QEventLoop::quit);
+    dialog.show();
+    loop.exec();
+    if (confirmed) {
+        testCaseService.appendExecutionEvent(QStringLiteral("人工事件"), eventName);
+    }
+    return confirmed;
+}
+
 bool MainWindow::sendSemiAssistCommand(const TestCase &testCase, QString *message)
 {
     auto setMessage = [message](const QString &text) {
@@ -4821,6 +5270,50 @@ bool MainWindow::sendSemiAssistCommand(const TestCase &testCase, QString *messag
     };
 
     const QString assistTemplate = testCase.semiAssistTemplate.trimmed();
+    if (assistTemplate == QStringLiteral("mt.semi.nvm_hw_power_cycle") ||
+        assistTemplate == QStringLiteral("mt.semi.nvm_device_id_power_cycle") ||
+        assistTemplate == QStringLiteral("mt.semi.nvm_sn_power_cycle")) {
+        TestCase writeCase = testCase;
+        if (assistTemplate == QStringLiteral("mt.semi.nvm_hw_power_cycle")) {
+            writeCase.commandTemplate = QStringLiteral("mt.nvm_write_current_hw_version");
+        } else if (assistTemplate == QStringLiteral("mt.semi.nvm_device_id_power_cycle")) {
+            writeCase.commandTemplate = QStringLiteral("mt.nvm_write_current_device_id");
+        } else {
+            writeCase.commandTemplate = QStringLiteral("mt.nvm_writeback_sn_and_reboot");
+        }
+        if (!sendAutoTestCommand(writeCase, message)) {
+            return false;
+        }
+
+        QElapsedTimer writeTimer;
+        writeTimer.start();
+        while (rfidDiagnosticTransfer.isBusy() && writeTimer.elapsed() < 6000) {
+            QEventLoop waitLoop;
+            QTimer::singleShot(50, &waitLoop, &QEventLoop::quit);
+            waitLoop.exec();
+        }
+        if (rfidDiagnosticTransfer.isBusy()) {
+            setMessage(QStringLiteral("NVM 写入未在 6 秒内完成，已阻止断电，避免破坏写入数据。"));
+            return false;
+        }
+        if (!confirmExternalTestStage(QStringLiteral("NVM 持久化验证：断电"),
+                                      QStringLiteral("请断开 RFID 终端电源。确认已完全断电后点击“已完成，开始采集”。"),
+                                      QStringLiteral("已确认 NVM 写入后终端完全断电"))) {
+            setMessage(QStringLiteral("操作员未确认终端断电，用例因持久化条件未完成而阻塞。"));
+            return false;
+        }
+        if (!confirmExternalTestStage(QStringLiteral("NVM 持久化验证：重新上电"),
+                                      QStringLiteral("请重新接通 RFID 终端电源，等待 CAN 通信恢复后点击“已完成，开始采集”。"),
+                                      QStringLiteral("已确认 NVM 写入后终端重新上电"))) {
+            setMessage(QStringLiteral("操作员未确认终端重新上电，用例因回读条件未完成而阻塞。"));
+            return false;
+        }
+        QEventLoop broadcastWaitLoop;
+        QTimer::singleShot(5000, &broadcastWaitLoop, &QEventLoop::quit);
+        broadcastWaitLoop.exec();
+        setMessage(QStringLiteral("已完成 NVM 写入、真实断电、重新上电和 5 秒广播回读采集。"));
+        return true;
+    }
     if (assistTemplate == QStringLiteral("mt.semi.tag_present") ||
         assistTemplate == QStringLiteral("mt.semi.tag_16byte") ||
         assistTemplate == QStringLiteral("mt.semi.tag_absent") ||
@@ -4839,10 +5332,113 @@ bool MainWindow::sendSemiAssistCommand(const TestCase &testCase, QString *messag
         return true;
     }
     if (assistTemplate == QStringLiteral("mt.semi.fault_status")) {
-        setMessage(QStringLiteral("半自动辅助不发送额外命令，仅采集 0x2C0 故障状态证据。"));
+        auto collectFor = [](int milliseconds) {
+            QEventLoop loop;
+            QTimer::singleShot(milliseconds, &loop, &QEventLoop::quit);
+            loop.exec();
+        };
+        testCaseService.appendExecutionEvent(QStringLiteral("晶振异常基线采集"), QStringLiteral("采集 0x2C0 状态10秒"));
+        collectFor(10000);
+        if (!confirmExternalTestStage(QStringLiteral("MT-RFID-CTRL-006：注入晶振异常"),
+                                      QStringLiteral("请按台架操作注入外部晶振异常。完成后点击“已完成，开始采集”。"),
+                                      QStringLiteral("已确认晶振异常注入，开始异常采集"))) {
+            setMessage(QStringLiteral("操作员未完成晶振异常注入，用例将因外部条件未完成而阻塞。"));
+            return false;
+        }
+        collectFor(10000);
+        if (!confirmExternalTestStage(QStringLiteral("MT-RFID-CTRL-006：解除晶振异常"),
+                                      QStringLiteral("请解除外部晶振异常并确认设备恢复。完成后点击“已完成，开始采集”。"),
+                                      QStringLiteral("已确认晶振异常解除，开始恢复采集"))) {
+            setMessage(QStringLiteral("操作员未确认晶振异常解除，用例将因恢复条件未完成而阻塞。"));
+            return false;
+        }
+        collectFor(10000);
+        setMessage(QStringLiteral("已完成基线、晶振异常和恢复三个采集阶段，仅采集 0x2C0 状态证据。"));
+        return true;
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.rf_chip_fault_recovery")) {
+        constexpr int kBaselineCollectMs = 1200;
+        constexpr int kFaultCollectMs = 10000;
+        constexpr int kRecoveryCollectMs = 10000;
+        auto collectFor = [](int milliseconds) {
+            QEventLoop loop;
+            QTimer::singleShot(milliseconds, &loop, &QEventLoop::quit);
+            loop.exec();
+        };
+        auto waitForOperator = [this](const QString &title, const QString &instruction, const QString &eventName) {
+            QDialog dialog(this);
+            dialog.setWindowTitle(title);
+            dialog.setModal(false);
+            QVBoxLayout layout(&dialog);
+            QLabel label(instruction, &dialog);
+            label.setWordWrap(true);
+            layout.addWidget(&label);
+            QDialogButtonBox buttons(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+            buttons.button(QDialogButtonBox::Ok)->setText(QStringLiteral("已完成，开始采集"));
+            buttons.button(QDialogButtonBox::Cancel)->setText(QStringLiteral("终止"));
+            layout.addWidget(&buttons);
+            QEventLoop loop;
+            bool confirmed = false;
+            connect(&buttons, &QDialogButtonBox::accepted, &dialog, [&]() { confirmed = true; dialog.accept(); });
+            connect(&buttons, &QDialogButtonBox::rejected, &dialog, [&]() { dialog.reject(); });
+            connect(&dialog, &QDialog::finished, &loop, &QEventLoop::quit);
+            dialog.show();
+            loop.exec();
+            if (confirmed) {
+                testCaseService.appendExecutionEvent(QStringLiteral("人工事件"), eventName);
+            }
+            return confirmed;
+        };
+
+        rfidScanning = true;
+        updateMeituanTopStatus();
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
+        testCaseService.appendExecutionEvent(QStringLiteral("故障恢复基线采集"), QStringLiteral("采集 0x2C0 Byte3=0x00，时长1200ms"));
+        collectFor(kBaselineCollectMs);
+        if (!waitForOperator(QStringLiteral("MT-RFID-CTRL-003：注入故障"),
+                             QStringLiteral("请擦除射频芯片程序。完成后点击“已完成，开始采集”。\n未完成可点击“终止”，用例将标记为阻塞。"),
+                             QStringLiteral("已确认射频芯片程序擦除，开始故障采集"))) {
+            setMessage(QStringLiteral("操作员终止故障注入，用例将因外部条件未完成而阻塞。"));
+            return false;
+        }
+        collectFor(kFaultCollectMs);
+        if (!waitForOperator(QStringLiteral("MT-RFID-CTRL-003：恢复故障"),
+                             QStringLiteral("请烧写有效射频芯片程序并按需要复位设备。完成后点击“已完成，开始采集”。"),
+                             QStringLiteral("已确认射频芯片程序恢复，开始恢复采集"))) {
+            setMessage(QStringLiteral("操作员终止故障恢复，用例将因外部条件未完成而阻塞。"));
+            return false;
+        }
+        sendRfidFrame(RfidProtocol::ControlFrameId, RfidProtocol::buildControlFrame(true));
+        collectFor(kRecoveryCollectMs);
+        setMessage(QStringLiteral("已完成基线、故障和恢复三个采集阶段，将按 Byte3=00→01→00 的连续状态判定。"));
+        return true;
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.boot_reset_app_recovery")) {
+        constexpr int kBootTransitionWaitMs = 800;
+        constexpr int kResetRecoveryWaitMs = 5000;
+        auto waitForDevice = [](int waitMs) {
+            QEventLoop waitLoop;
+            QTimer::singleShot(waitMs, &waitLoop, &QEventLoop::quit);
+            waitLoop.exec();
+        };
+
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildBootAppJumpFrame(0x02));
+        waitForDevice(kBootTransitionWaitMs);
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("01A4555555555555"));
+        waitForDevice(kBootTransitionWaitMs);
+        sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSoftwareResetFrame());
+        waitForDevice(kResetRecoveryWaitMs);
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("01A4555555555555"));
+        setMessage(QStringLiteral("已发送跳转 BOOT、复位前 0xA4 查询、SID=0x11 软件复位及复位后 0xA4 查询；正在采集 APP 状态与周期广播证据。"));
         return true;
     }
     if (assistTemplate == QStringLiteral("mt.semi.fault_control_status")) {
+        if (!confirmExternalTestStage(QStringLiteral("MT-RFID-CTRL-005：注入模块故障"),
+                                      QStringLiteral("请完成 RFID 模块故障注入。完成后点击“已完成，开始采集”，系统将发送3轮开始/停止控制帧。"),
+                                      QStringLiteral("已确认模块故障注入，开始控制保持采集"))) {
+            setMessage(QStringLiteral("操作员未完成模块故障注入，用例将因外部条件未完成而阻塞。"));
+            return false;
+        }
         auto waitMs = [](int milliseconds) {
             QEventLoop waitLoop;
             QTimer::singleShot(milliseconds, &waitLoop, &QEventLoop::quit);
@@ -4851,7 +5447,7 @@ bool MainWindow::sendSemiAssistCommand(const TestCase &testCase, QString *messag
         const bool timerWasActive = rfidControlTimer != nullptr && rfidControlTimer->isActive();
         const bool originalScanning = rfidScanning;
         if (timerWasActive) {
-            rfidControlTimer->stop();
+            setRfidControlPeriodicActive(false);
         }
         for (int index = 0; index < 3; ++index) {
             rfidScanning = true;
@@ -4866,14 +5462,71 @@ bool MainWindow::sendSemiAssistCommand(const TestCase &testCase, QString *messag
         rfidScanning = originalScanning;
         updateMeituanTopStatus();
         if (timerWasActive) {
-            rfidControlTimer->start();
+            setRfidControlPeriodicActive(true);
         }
+        if (!confirmExternalTestStage(QStringLiteral("MT-RFID-CTRL-005：解除模块故障"),
+                                      QStringLiteral("请解除 RFID 模块故障并确认设备恢复。完成后点击“已完成，开始采集”。"),
+                                      QStringLiteral("已确认模块故障解除，开始恢复采集"))) {
+            setMessage(QStringLiteral("操作员未确认模块故障解除，用例将因恢复条件未完成而阻塞。"));
+            return false;
+        }
+        waitMs(3000);
         setMessage(QStringLiteral("半自动辅助已暂停后台 0x207 周期帧，并发送 3 轮开始/停止交替命令；执行后已恢复原 0x207 周期状态。"));
         return true;
     }
-    if (assistTemplate == QStringLiteral("mt.semi.ota_start_upgrade_current_file")) {
+    if (assistTemplate == QStringLiteral("mt.semi.ota_complete_upgrade_current_file")) {
         TestCase otaCase = testCase;
         otaCase.commandTemplate = QStringLiteral("mt.ota_start_upgrade_current_file");
+        return sendAutoTestCommand(otaCase, message);
+    }
+    if (assistTemplate == QStringLiteral("mt.semi.ota_power_loss_recovery")) {
+        TestCase otaCase = testCase;
+        otaCase.commandTemplate = QStringLiteral("mt.ota_start_upgrade_current_file");
+        if (!sendAutoTestCommand(otaCase, message)) {
+            return false;
+        }
+        if (!confirmExternalTestStage(QStringLiteral("MT-RFID-OTA-015：升级中断电"),
+                                      QStringLiteral("请等待 OTA 进入 A2 分包写入阶段后断开设备电源。完成断电后点击“已完成，开始采集”。"),
+                                      QStringLiteral("已确认 OTA A2 阶段断电"))) {
+            setMessage(QStringLiteral("操作员未确认 OTA 断电，用例将因外部条件未完成而阻塞。"));
+            return false;
+        }
+        if (!confirmExternalTestStage(QStringLiteral("MT-RFID-OTA-015：重新上电"),
+                                      QStringLiteral("请重新接通设备电源，等待设备启动完成后点击“已完成，开始采集”。"),
+                                      QStringLiteral("已确认 OTA 后重新上电，开始 BOOT 状态采集"))) {
+            setMessage(QStringLiteral("操作员未确认 OTA 后重新上电，用例将因外部条件未完成而阻塞。"));
+            return false;
+        }
+        const int bootQueryEvidenceOffset = readEvidenceText(testCase.id).size();
+        sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("01A4555555555555"));
+        bool bootConfirmed = false;
+        bool appDetected = false;
+        QElapsedTimer bootQueryTimer;
+        bootQueryTimer.start();
+        while (bootQueryTimer.elapsed() < OtaPowerOnBootQueryTimeoutMs) {
+            QEventLoop waitLoop;
+            QTimer::singleShot(50, &waitLoop, &QEventLoop::quit);
+            waitLoop.exec();
+            const QString queryEvidence = readEvidenceText(testCase.id)
+                                              .mid(bootQueryEvidenceOffset)
+                                              .toUpper();
+            bootConfirmed = queryEvidence.contains(QStringLiteral("\"0X107\",\"02 E4 00")) ||
+                            queryEvidence.contains(QStringLiteral("CAN ID=0X107；DATA=02 E4 00"));
+            appDetected = queryEvidence.contains(QStringLiteral("\"0X107\",\"02 E4 01")) ||
+                          queryEvidence.contains(QStringLiteral("CAN ID=0X107；DATA=02 E4 01"));
+            if (bootConfirmed || appDetected) {
+                break;
+            }
+        }
+        if (!bootConfirmed) {
+            setMessage(appDetected
+                           ? QStringLiteral("重新上电后 A4 查询返回 E4 01（APP），设备未停留 BOOT。")
+                           : QStringLiteral("重新上电后发送 A4 查询，2500 ms 内未收到 E4 00 BOOT 响应。"));
+            return false;
+        }
+        testCaseService.appendExecutionEvent(
+            QStringLiteral("OTA-015上电恢复确认"),
+            QStringLiteral("A4 查询收到 E4 00，已自动确认设备停留 BOOT，开始第二次 OTA。"));
         return sendAutoTestCommand(otaCase, message);
     }
     if (assistTemplate == QStringLiteral("mt.semi.ota_app_start_valid")) {
@@ -4998,6 +5651,7 @@ void MainWindow::runSelectedTestCaseSemiAssist()
         testEvidenceLogText->append(QStringLiteral("[半自动执行] %1").arg(commandMessage));
     }
     if (!commandSent) {
+        flushOrderedCanFrameOutputs();
         TestCaseResult result = testCaseService.resultForCase(testCase.id);
         result.caseId = testCase.id;
         result.status = TestResultStatus::Blocked;
@@ -5017,6 +5671,31 @@ void MainWindow::runSelectedTestCaseSemiAssist()
     const int waitMs = qBound(500, testCase.semiWaitMs > 0 ? testCase.semiWaitMs : testCase.timeoutMs, maxSemiWaitMs);
     int actualWaitMs = waitMs;
     if (otaSemiAssist) {
+        const bool requiresA1RejectLocationQuery =
+            testCase.semiJudgeTemplate.trimmed() == QStringLiteral("mt.ota_a1_rejected");
+        const bool requiresA2FirstFrameBootQuery =
+            testCase.semiJudgeTemplate.trimmed() == QStringLiteral("mt.ota_a2_first_frame_boot_hold");
+        const bool requiresAbortBootQuery =
+            testCase.semiJudgeTemplate.trimmed() == QStringLiteral("mt.ota_abort_boot_hold");
+        const bool requiresTimeoutBootQuery =
+            testCase.semiJudgeTemplate.trimmed() == QStringLiteral("mt.ota_timeout_boot_hold");
+        const bool requiresPowerLossRecoveryEvidence =
+            testCase.semiJudgeTemplate.trimmed() == QStringLiteral("mt.ota_power_loss_recovery");
+        const bool requiresA1BroadcastStopObservation =
+            testCase.id == QStringLiteral("MT-RFID-OTA-006");
+        auto hasA1RejectLocationQueryEvidence = [this, &testCase]() {
+            const QString evidenceText = readEvidenceText(testCase.id).toUpper();
+            const int rejectIndex = evidenceText.lastIndexOf(QStringLiteral("E1 01"));
+            if (rejectIndex < 0) {
+                return false;
+            }
+            const int queryIndex = evidenceText.indexOf(QStringLiteral("A4"), rejectIndex);
+            if (queryIndex < 0) {
+                return false;
+            }
+            return evidenceText.indexOf(QStringLiteral("E4 00"), queryIndex) >= 0 ||
+                   evidenceText.indexOf(QStringLiteral("E4 01"), queryIndex) >= 0;
+        };
         auto otaRunning = [this]() {
             const OtaService::State state = otaService.state();
             return state == OtaService::State::QueryProgram ||
@@ -5024,13 +5703,59 @@ void MainWindow::runSelectedTestCaseSemiAssist()
                    state == OtaService::State::SendData ||
                    state == OtaService::State::FinishUpgrade;
         };
+        auto hasA2FirstFrameBootQueryEvidence = [this, &testCase]() {
+            const QString evidenceText = readEvidenceText(testCase.id).toUpper();
+            const int firstChunkResponseIndex = qMax(
+                evidenceText.lastIndexOf(QStringLiteral("E2 00 01 00")),
+                evidenceText.lastIndexOf(QStringLiteral("E2 00 01 02")));
+            if (firstChunkResponseIndex < 0) {
+                return false;
+            }
+            const int queryIndex = evidenceText.indexOf(QStringLiteral("A4"), firstChunkResponseIndex);
+            return queryIndex >= 0 && evidenceText.indexOf(QStringLiteral("E4 00"), queryIndex) >= 0;
+        };
+        auto hasPostActionBootQueryEvidence = [this, &testCase, requiresAbortBootQuery]() {
+            const QString evidenceText = readEvidenceText(testCase.id).toUpper();
+            const QString actionMarker = requiresAbortBootQuery
+                ? QStringLiteral("A3 02")
+                : QStringLiteral("A2 00");
+            const int actionIndex = evidenceText.lastIndexOf(actionMarker);
+            if (actionIndex < 0) {
+                return false;
+            }
+            const int queryIndex = evidenceText.indexOf(QStringLiteral("A4"), actionIndex);
+            return queryIndex >= 0 && evidenceText.indexOf(QStringLiteral("E4 00"), queryIndex) >= 0;
+        };
+        auto hasPowerLossRecoveryEvidence = [this, &testCase]() {
+            const QString evidenceText = readEvidenceText(testCase.id).toUpper();
+            const int recoveryBootIndex = evidenceText.indexOf(QStringLiteral("E4 00"));
+            if (recoveryBootIndex < 0) {
+                return false;
+            }
+            const int finishRequestIndex = evidenceText.indexOf(QStringLiteral("A3 01"), recoveryBootIndex);
+            if (finishRequestIndex < 0) {
+                return false;
+            }
+            const int finishResponseIndex = evidenceText.indexOf(QStringLiteral("E3 00"), finishRequestIndex);
+            if (finishResponseIndex < 0) {
+                return false;
+            }
+            const int finalQueryIndex = evidenceText.indexOf(QStringLiteral("A4"), finishResponseIndex);
+            return finalQueryIndex >= 0 &&
+                   evidenceText.indexOf(QStringLiteral("E4 01"), finalQueryIndex) >= 0;
+        };
         QElapsedTimer waitTimer;
         waitTimer.start();
         do {
             QEventLoop waitLoop;
             QTimer::singleShot(100, &waitLoop, &QEventLoop::quit);
             waitLoop.exec();
-            if (waitTimer.elapsed() >= 500 && !otaRunning()) {
+            const int minimumObservationMs = requiresA1BroadcastStopObservation ? 4500 : 500;
+            if (waitTimer.elapsed() >= minimumObservationMs && !otaRunning() &&
+                (!requiresA1RejectLocationQuery || hasA1RejectLocationQueryEvidence()) &&
+                (!requiresA2FirstFrameBootQuery || hasA2FirstFrameBootQueryEvidence()) &&
+                (!(requiresAbortBootQuery || requiresTimeoutBootQuery) || hasPostActionBootQueryEvidence()) &&
+                (!requiresPowerLossRecoveryEvidence || hasPowerLossRecoveryEvidence())) {
                 break;
             }
         } while (waitTimer.elapsed() < waitMs);
@@ -5040,6 +5765,34 @@ void MainWindow::runSelectedTestCaseSemiAssist()
         QTimer::singleShot(waitMs, &waitLoop, &QEventLoop::quit);
         waitLoop.exec();
     }
+    if (testCase.id == QStringLiteral("MT-RFID-OTA-011")) {
+        QEventLoop versionCollectLoop;
+        QTimer::singleShot(1500, &versionCollectLoop, &QEventLoop::quit);
+        versionCollectLoop.exec();
+        const QString completedEvidence = readEvidenceText(testCase.id).toUpper();
+        const int finishResponseIndex = completedEvidence.lastIndexOf(QStringLiteral("E3 00"));
+        const int firstAppIndex = finishResponseIndex < 0
+            ? -1
+            : completedEvidence.indexOf(QStringLiteral("E4 01"), finishResponseIndex);
+        if (finishResponseIndex >= 0 && firstAppIndex >= 0) {
+            testCaseService.appendExecutionEvent(
+                QStringLiteral("OTA-011复位持久化验证"),
+                QStringLiteral("已确认升级成功并运行APP，采集复位前0x2C3后发送SID=0x11。"));
+            sendRfidFrame(RfidProtocol::RequestFrameId, RfidProtocol::buildSoftwareResetFrame());
+            QEventLoop resetWaitLoop;
+            QTimer::singleShot(5000, &resetWaitLoop, &QEventLoop::quit);
+            resetWaitLoop.exec();
+            sendRfidFrame(RfidProtocol::RequestFrameId, QByteArray::fromHex("01A4555555555555"));
+            QEventLoop postResetCollectLoop;
+            QTimer::singleShot(1500, &postResetCollectLoop, &QEventLoop::quit);
+            postResetCollectLoop.exec();
+            actualWaitMs += 8000;
+        } else {
+            testCaseService.appendExecutionEvent(
+                QStringLiteral("OTA-011复位持久化验证"),
+                QStringLiteral("未确认E3 00及其后的E4 01，未继续发送复位，避免在升级失败状态下改变设备。"));
+        }
+    }
     testCaseService.appendExecutionEvent(QStringLiteral("半自动采集窗口结束"),
                                          QStringLiteral("等待 %1 ms 后开始机器预判").arg(actualWaitMs));
 
@@ -5047,6 +5800,7 @@ void MainWindow::runSelectedTestCaseSemiAssist()
     if (!judgeCase.semiJudgeTemplate.trimmed().isEmpty()) {
         judgeCase.judgeTemplate = judgeCase.semiJudgeTemplate.trimmed();
     }
+    flushOrderedCanFrameOutputs();
     const TestJudgeResult judgeResult = testCaseJudge.judge(judgeCase, readEvidenceText(testCase.id));
     testCaseService.appendExecutionEvent(QStringLiteral("半自动预判完成"),
                                          QStringLiteral("%1：%2")
@@ -5060,8 +5814,9 @@ void MainWindow::runSelectedTestCaseSemiAssist()
         semiJudgeTemplate == QStringLiteral("mt.semi.tag_residue_cleared") ||
         semiJudgeTemplate == QStringLiteral("mt.semi.fault_status_collected") ||
         semiJudgeTemplate == QStringLiteral("mt.device_id_prefix_check") ||
-        semiJudgeTemplate == QStringLiteral("mt.startup_broadcast_period") ||
         semiJudgeTemplate == QStringLiteral("mt.control_0x207_fault_toggle_repeated") ||
+        semiJudgeTemplate == QStringLiteral("mt.semi.rf_chip_fault_recovery") ||
+        semiJudgeTemplate == QStringLiteral("mt.boot_reset_app_recovery") ||
         semiJudgeTemplate == QStringLiteral("mt.ota_a1_accepted_boot") ||
         semiJudgeTemplate == QStringLiteral("mt.ota_a1_rejected") ||
         semiJudgeTemplate == QStringLiteral("mt.ota_a2_first_frame_error") ||
@@ -5069,7 +5824,11 @@ void MainWindow::runSelectedTestCaseSemiAssist()
         semiJudgeTemplate == QStringLiteral("mt.ota_a3_crc_error_rejected") ||
         semiJudgeTemplate == QStringLiteral("mt.ota_success_app_running") ||
         semiJudgeTemplate == QStringLiteral("mt.ota_timeout_boot_hold") ||
-        semiJudgeTemplate == QStringLiteral("mt.ota_abort_boot_hold");
+        semiJudgeTemplate == QStringLiteral("mt.ota_abort_boot_hold") ||
+        semiJudgeTemplate == QStringLiteral("mt.ota_power_loss_recovery") ||
+        semiJudgeTemplate == QStringLiteral("mt.nvm_write_same_value_and_verify") ||
+        semiJudgeTemplate == QStringLiteral("mt.nvm_device_id_writeback_verify") ||
+        semiJudgeTemplate == QStringLiteral("mt.nvm_sn_reboot_verify");
     TestCaseResult result = testCaseService.resultForCase(testCase.id);
     result.caseId = testCase.id;
     result.status = judgeResult.status == TestResultStatus::Passed && !allowSemiAutoPass
@@ -5090,9 +5849,6 @@ void MainWindow::runSelectedTestCaseSemiAssist()
              judgeResult.status == TestResultStatus::Passed && !allowSemiAutoPass
                 ? QStringLiteral("证据满足机器规则，请结合外部场景人工确认后保存为通过。")
                 : QStringLiteral("按机器预判处理，必要时结合外部场景复核。"));
-    if (!judgeResult.keyFrames.isEmpty()) {
-        result.actualResult.append(QStringLiteral("\n[关键帧]\n%1").arg(judgeResult.keyFrames.join(QStringLiteral("\n"))));
-    }
     if (!testCaseService.saveResult(result, &error)) {
         QMessageBox::warning(this, QStringLiteral("半自动执行"), error);
         return;
@@ -5113,7 +5869,15 @@ void MainWindow::runFilteredTestCases()
     }
     QVector<TestCase> casesToRun;
     for (int row = 0; row < testCaseModel->rowCount(); ++row) {
-        casesToRun.append(testCaseModel->caseAt(row));
+        const TestCase testCase = testCaseModel->caseAt(row);
+        if (testCase.executionMode == QStringLiteral("auto")) {
+            casesToRun.append(testCase);
+        }
+    }
+    if (casesToRun.isEmpty()) {
+        QMessageBox::information(this, QStringLiteral("批量执行"),
+                                 QStringLiteral("当前筛选结果中没有可无人值守执行的自动用例。"));
+        return;
     }
     QString reason;
     if (!precheckTestExecution(casesToRun.first(), &reason)) {
@@ -5142,7 +5906,7 @@ void MainWindow::runFilteredTestCases()
     }
     if (QMessageBox::question(this,
             QStringLiteral("批量执行确认"),
-            QStringLiteral("将按当前筛选条件执行 %1 条用例。\n自动用例会按用例配置发送测试命令；半自动/手工用例不会自动发送指令，若已有证据将尝试自动判定。")
+            QStringLiteral("将按当前筛选条件执行 %1 条自动用例。\n半自动用例请使用“开始逐条引导”，人工用例请使用“开始人工记录”。")
                 .arg(count),
             QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
         testBatchOverwriteConfirmed = false;
@@ -5173,43 +5937,6 @@ void MainWindow::runFilteredTestCases()
             continue;
         }
         testCaseTableView->selectRow(rowToSelect);
-        if (testCase.executionMode != QStringLiteral("auto")) {
-            TestCaseResult result = testCaseService.resultForCase(testCase.id);
-            result.caseId = testCase.id;
-            if (testCaseService.evidenceExistsForCase(testCase.id)) {
-                const TestJudgeResult judgeResult = testCaseJudge.judge(testCase, readEvidenceText(testCase.id));
-                result.status = judgeResult.status;
-                result.failureCategory = judgeResult.failureCategory;
-                result.judgeReason = judgeResult.reason;
-                result.keyFrames = judgeResult.keyFrames;
-                result.actualResult = QStringLiteral("[批量判定] 半自动/手工用例未自动发送指令，仅基于已有证据判定。\n[自动判定] %1")
-                    .arg(judgeResult.reason);
-                if (!judgeResult.keyFrames.isEmpty()) {
-                    result.actualResult.append(QStringLiteral("\n[关键帧]\n%1").arg(judgeResult.keyFrames.join(QStringLiteral("\n"))));
-                }
-            } else {
-                result.status = TestResultStatus::Blocked;
-                result.failureCategory = QStringLiteral("manual_required");
-                result.judgeReason = testCase.manualPrompt.isEmpty()
-                    ? QStringLiteral("半自动/手工用例未执行，请按步骤操作后再自动判定。")
-                    : testCase.manualPrompt;
-                result.actualResult = result.judgeReason;
-            }
-            QString error;
-            if (!testCaseService.saveResult(result, &error)) {
-                QMessageBox::warning(this,
-                    QStringLiteral("批量执行"),
-                    QStringLiteral("保存测试结果失败：caseId=%1\n原因：%2")
-                        .arg(testCase.id, error.isEmpty() ? QStringLiteral("unknown error") : error));
-                break;
-            }
-            ++failedOrBlocked;
-            if (testFailPauseCheck != nullptr && testFailPauseCheck->isChecked()) {
-                break;
-            }
-            continue;
-        }
-
         runSelectedTestCaseAuto();
         const TestCaseResult result = testCaseService.resultForCase(testCase.id);
         if (result.status == TestResultStatus::Passed) {
@@ -5331,6 +6058,7 @@ void MainWindow::judgeSelectedTestCase()
         return;
     }
     const TestCase testCase = testCaseModel->caseAt(testCaseTableView->currentIndex().row());
+    flushOrderedCanFrameOutputs();
     const TestJudgeResult judgeResult = testCaseJudge.judge(testCase, readEvidenceText(testCase.id));
     const QString message = judgeResult.reason;
     const TestResultStatus status = judgeResult.status;
@@ -5345,9 +6073,6 @@ void MainWindow::judgeSelectedTestCase()
             current.append(QStringLiteral("\n"));
         }
         current.append(QStringLiteral("[自动判定] %1").arg(message));
-        if (!judgeResult.keyFrames.isEmpty()) {
-            current.append(QStringLiteral("\n[关键帧]\n%1").arg(judgeResult.keyFrames.join(QStringLiteral("\n"))));
-        }
         testActualResultEdit->setPlainText(current);
     }
     TestCaseResult result = testCaseService.resultForCase(testCase.id);
@@ -5465,6 +6190,7 @@ void MainWindow::appendTestEvidenceFrame(const CanFrame &frame, const QString &d
     QString error;
     const QString direction = frame.direction == CanFrameDirection::Tx ? QStringLiteral("发送") : QStringLiteral("接收");
     testCaseService.appendEvidence(
+        frame.hostDateTime,
         direction,
         QString::number(frame.channel),
         frame.idText(),
@@ -5474,7 +6200,7 @@ void MainWindow::appendTestEvidenceFrame(const CanFrame &frame, const QString &d
 
     if (testEvidenceLogText != nullptr) {
         testEvidenceLogText->append(QStringLiteral("%1  %2  %3  %4  %5")
-            .arg(QDateTime::currentDateTime().toString("hh:mm:ss.zzz"),
+            .arg(frame.hostDateTime.toString("hh:mm:ss.zzz"),
                  direction,
                  frame.idText(),
                  frame.remoteFrame ? QStringLiteral("-") : frame.dataText(),
@@ -5643,6 +6369,14 @@ QWidget *MainWindow::createStressTestTab(QWidget *parent)
     faultLayout->addWidget(new QLabel(QStringLiteral("失败原因"), faultGroup), 2, 0);
     faultLayout->addWidget(stressLastFailureReasonValue, 2, 1, 1, 3);
 
+    QGroupBox *timingGroup = new QGroupBox(QStringLiteral("CAN 时序摘要"), stressWidget);
+    QVBoxLayout *timingLayout = new QVBoxLayout(timingGroup);
+    timingLayout->setContentsMargins(8, 8, 8, 8);
+    stressTimingSummaryValue = new QLabel(QStringLiteral("压测结束后在此显示 0x207 与 0x2C0~0x2C6 的时序统计。"), timingGroup);
+    stressTimingSummaryValue->setWordWrap(true);
+    stressTimingSummaryValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    timingLayout->addWidget(stressTimingSummaryValue);
+
     mtStressPanel = new QWidget(stressWidget);
     QGridLayout *mtLayout = new QGridLayout(mtStressPanel);
     mtLayout->setContentsMargins(0, 0, 0, 0);
@@ -5651,6 +6385,7 @@ QWidget *MainWindow::createStressTestTab(QWidget *parent)
     mtLayout->addWidget(summaryGroup, 0, 0);
     mtLayout->addWidget(tagGroup, 0, 1);
     mtLayout->addWidget(faultGroup, 1, 0, 1, 2);
+    mtLayout->addWidget(timingGroup, 2, 0, 1, 2);
     mtLayout->setColumnStretch(0, 1);
     mtLayout->setColumnStretch(1, 1);
 
@@ -6338,21 +7073,72 @@ void MainWindow::updateQingjuOnlineStatus(bool clearOfflineData)
 void MainWindow::sendRfidFrame(UINT canId, const QByteArray &payload)
 {
     const UINT channel = static_cast<UINT>(ui->sendPathCombo->currentIndex());
-    if (!canthread->sendClassicData(canId, channel, payload)) {
+    const bool isStandardRfidControl = canId == RfidProtocol::ControlFrameId &&
+        payload.size() == RfidProtocol::ClassicCanDlc &&
+        (static_cast<quint8>(payload.at(0)) == 0x00 || static_cast<quint8>(payload.at(0)) == 0x01) &&
+        payload.mid(1) == QByteArray(RfidProtocol::ClassicCanDlc - 1, static_cast<char>(RfidProtocol::FillByte));
+    if (isStandardRfidControl) {
+        CanFrame frame;
+        const CANThread::RfidControlSendResult result = canthread->sendManualRfidControlFrame(
+            channel, static_cast<quint8>(payload.at(0)) == 0x01, &frame);
+        if (result == CANThread::RfidControlSendResult::Failed) {
+            logService.logRuntime(LogLevel::Error,
+                                  QString("Failed to send RFID frame: id=0x%1").arg(canId, 0, 16));
+            return;
+        }
+        if (result == CANThread::RfidControlSendResult::Suppressed) {
+            if (testCaseService.hasActiveCase()) {
+                testCaseService.appendExecutionEvent(QStringLiteral("0x207 发送合并"),
+                                                     QStringLiteral("已由最近同状态周期帧覆盖，未重复发送。"));
+            }
+            return;
+        }
+        addCanFrameToList(frame);
+        return;
+    }
+    CanFrame frame;
+    if (!canthread->sendClassicData(canId, channel, payload, &frame)) {
         logService.logRuntime(LogLevel::Error,
                               QString("Failed to send RFID frame: id=0x%1").arg(canId, 0, 16));
         return;
     }
-
-    CanFrame frame;
-    frame.id = canId;
-    frame.channel = channel;
-    frame.data = payload;
-    frame.direction = CanFrameDirection::Tx;
-    frame.protocol = CanFrameProtocol::ClassicCan;
-    frame.hostDateTime = QDateTime::currentDateTime();
     addCanFrameToList(frame);
-    appendTestEvidenceFrame(frame, protocolDecodeText(frame));
+}
+
+void MainWindow::setRfidControlPeriodicActive(bool enabled)
+{
+    if (rfidControlTimer == nullptr) {
+        return;
+    }
+    if (enabled) {
+        rfidControlTimer->start();
+    } else {
+        rfidControlTimer->stop();
+    }
+    const UINT channel = static_cast<UINT>(ui->sendPathCombo->currentIndex());
+    canthread->setRfidControlPeriodicEnabled(enabled && canStarted, channel, rfidScanning);
+}
+
+void MainWindow::sendRfidFrameWithDlc(UINT canId, const QByteArray &payload, UINT dlc)
+{
+    const UINT channel = static_cast<UINT>(ui->sendPathCombo->currentIndex());
+    CanFrame frame;
+    if (!canthread->sendClassicDataWithDlc(canId, channel, payload, dlc, &frame)) {
+        logService.logRuntime(LogLevel::Error,
+                              QString("Failed to send RFID test frame: id=0x%1, dlc=%2")
+                                  .arg(canId, 0, 16)
+                                  .arg(dlc));
+        return;
+    }
+
+    addCanFrameToList(frame);
+    if (testCaseService.hasActiveCase()) {
+        testCaseService.appendExecutionEvent(QStringLiteral("异常 DLC 测试帧"),
+                                             QStringLiteral("ID=0x%1; DLC=%2; 数据=%3")
+                                                 .arg(canId, 3, 16, QChar('0'))
+                                                 .arg(dlc)
+                                                 .arg(frame.dataText()));
+    }
 }
 
 void MainWindow::logSentRfidFrame(UINT canId, const QByteArray &payload)
@@ -6364,20 +7150,32 @@ void MainWindow::logSentRfidFrame(UINT canId, const QByteArray &payload)
     frame.data = payload;
     frame.direction = CanFrameDirection::Tx;
     frame.protocol = CanFrameProtocol::ClassicCan;
-    frame.hostDateTime = QDateTime::currentDateTime();
+    canthread->stampFrame(frame);
     addCanFrameToList(frame);
-    appendTestEvidenceFrame(frame, protocolDecodeText(frame));
 }
 
 void MainWindow::handleRfidFrame(const CanFrame &frame)
 {
+    if (frame.id == RfidProtocol::ResponseFrameId &&
+        frame.data.size() == RfidProtocol::ClassicCanDlc &&
+        (static_cast<quint8>(frame.data.at(0)) >> 4) == 0x00 &&
+        !RfidProtocol::hasValidSingleFramePadding(frame.data)) {
+        logService.logRuntime(LogLevel::Warning,
+                              QStringLiteral("Discarded malformed RFID 0x107 single frame: invalid ISO-TP padding"));
+        return;
+    }
     if (frame.id == RfidProtocol::ResponseFrameId) {
         rfidDiagnosticTransfer.handleResponseFrame(frame);
+        rfidDiagnosticConflictTransfer.handleResponseFrame(frame);
     }
 
     if (rfidService.handleFrame(frame)) {
         updateRfidPanel(rfidService.state());
         if (frame.id == RfidProtocol::StatusFrameId) {
+            const RfidStatus status = RfidProtocol::parseStatusFrame(frame.data);
+            if (status.valid) {
+                lastObservedScanPeriod10ms = status.scanPeriod10ms;
+            }
             productionTestService.handleRfidStatus(rfidService.state());
         } else if (frame.id == RfidProtocol::TagPart1FrameId ||
                    frame.id == RfidProtocol::TagPart2FrameId ||
@@ -6456,7 +7254,15 @@ void MainWindow::updateStressTestPanel(const StressTestStats &stats)
     if (topStressStatusValue != nullptr) {
         topStressStatusValue->setText(QStringLiteral("压测：%1 成功率 %2%")
                                       .arg(stats.running ? QStringLiteral("运行中") : QStringLiteral("已停止"))
-                                      .arg(stats.successRate, 0, 'f', 2));
+                                      .arg(stats.successRate, 0, 'f', 2)
+                                      + (stats.running || stressTimingSummary.isEmpty()
+                                             ? QString()
+                                             : QStringLiteral("；时序摘要已生成")));
+    }
+    if (stressTimingSummaryValue != nullptr) {
+        stressTimingSummaryValue->setText(stressTimingSummary.isEmpty()
+            ? QStringLiteral("压测结束后在此显示 0x207 与 0x2C0~0x2C6 的时序统计。")
+            : stressTimingSummary);
     }
 }
 
@@ -6778,7 +7584,56 @@ bool MainWindow::readManualMeituanOtaA1Params(quint8 *vendor, quint16 *hardwareV
 
 void MainWindow::addCanFrameToList(const CanFrame &frame)
 {
+    PendingCanFrameOutput pendingOutput;
+    pendingOutput.frame = frame;
+    pendingOutput.sequence = nextCanFrameSequence++;
+    pendingCanFrameOutputs.append(pendingOutput);
+
+    if (pendingCanFrameOutputs.size() >= MaxPendingCanFrameOutputs) {
+        flushOrderedCanFrameOutputs();
+        return;
+    }
+    if (!canFrameOrderTimer->isActive()) {
+        canFrameOrderTimer->start();
+    }
+}
+
+void MainWindow::flushOrderedCanFrameOutputs()
+{
+    if (canFrameOrderTimer->isActive()) {
+        canFrameOrderTimer->stop();
+    }
+    if (pendingCanFrameOutputs.isEmpty()) {
+        return;
+    }
+
+    std::stable_sort(pendingCanFrameOutputs.begin(), pendingCanFrameOutputs.end(),
+                     [](const PendingCanFrameOutput &left, const PendingCanFrameOutput &right) {
+        const qint64 leftElapsed = left.frame.monotonicElapsedMs;
+        const qint64 rightElapsed = right.frame.monotonicElapsedMs;
+        if (leftElapsed >= 0 && rightElapsed >= 0 && leftElapsed != rightElapsed) {
+            return leftElapsed < rightElapsed;
+        }
+        if (left.frame.hostDateTime != right.frame.hostDateTime) {
+            return left.frame.hostDateTime < right.frame.hostDateTime;
+        }
+        if (left.frame.hasZlgTimestamp && right.frame.hasZlgTimestamp &&
+            left.frame.zlgTimestampRaw != right.frame.zlgTimestampRaw) {
+            return left.frame.zlgTimestampRaw < right.frame.zlgTimestampRaw;
+        }
+        return left.sequence < right.sequence;
+    });
+
+    for (const PendingCanFrameOutput &pendingOutput : qAsConst(pendingCanFrameOutputs)) {
+        saveAndRenderCanFrame(pendingOutput.frame);
+    }
+    pendingCanFrameOutputs.clear();
+}
+
+void MainWindow::saveAndRenderCanFrame(const CanFrame &frame)
+{
     logService.logCanFrame(frame);
+    appendTestEvidenceFrame(frame, protocolDecodeText(frame));
     if (!ui->checkBox_4->isChecked()) {
         return;
     }
@@ -6847,6 +7702,12 @@ QString MainWindow::protocolDecodeText(const CanFrame &frame) const
 
             const quint8 sfLength = pci & 0x0F;
             const quint8 sid = static_cast<quint8>(payload.at(1));
+            if (payload.size() != RfidProtocol::ClassicCanDlc) {
+                return QStringLiteral("美团诊断短DLC截断帧: DLC=%1，声明长度=%2，SID=0x%3（不解析）")
+                    .arg(payload.size())
+                    .arg(sfLength)
+                    .arg(sid, 2, 16, QChar('0')).toUpper();
+            }
             switch (sid) {
             case 0x01:
                 if (payload.size() >= 3) {
@@ -7012,6 +7873,7 @@ void MainWindow::setupCanLogSaveButton()
 
 void MainWindow::exportCanLogSnapshot()
 {
+    flushOrderedCanFrameOutputs();
     flushPendingLogRows();
 
     const QString defaultFilePath = QDir(logDirectory).filePath(
@@ -7531,6 +8393,9 @@ void MainWindow::closeEvent(QCloseEvent *event)
     emit requestRs485StopScan();
     emit requestRs485ClosePort();
 
+    flushOrderedCanFrameOutputs();
+    flushPendingLogRows();
+
     if (canLogWindow != nullptr) {
         canLogWindow->close();
         canLogWindow = nullptr;
@@ -7584,6 +8449,11 @@ void MainWindow::handleRecvedFrames(const QVector<CanFrame> &frames)
 {
     for(const CanFrame &frame : frames)
     {
+        // Queue the frame before protocol handling. A diagnostic response can start
+        // a nested event loop; queuing afterwards would append this frame after
+        // later traffic in the persisted raw evidence log.
+        addCanFrameToList(frame);
+
         if (appConfig.load().protocolMode == 1) { // 青桔协议
             if (frame.extendedFrame) {
                 QingjuCanId qjId = QingjuCanId::parse(frame.id);
@@ -7613,13 +8483,12 @@ void MainWindow::handleRecvedFrames(const QVector<CanFrame> &frames)
             }
         }
 
-        addCanFrameToList(frame);
-        appendTestEvidenceFrame(frame, protocolDecodeText(frame));
     }
 }
 
 void MainWindow::on_cleanListBtn_clicked()
 {
+    flushOrderedCanFrameOutputs();
     pendingLogRows.clear();
     logFlushTimer->stop();
     ui->tableWidget->setRowCount(0);
@@ -7816,22 +8685,15 @@ void MainWindow::on_sendBtn_clicked()
         else dlc = 64;
     }
 
+    CanFrame frame;
     if (canthread->sendData(canId,
                             ui->frameTypeCombo->currentIndex(),
                             ui->protocolCombo->currentIndex(),
                             (ui->CANFDaccCheck->checkState() ? 1 : 0),
                             ui->sendPathCombo->currentIndex(),
                             payload.constData(),
-                            dlc)) {
-        CanFrame frame;
-        frame.id = canId;
-        frame.channel = static_cast<quint32>(ui->sendPathCombo->currentIndex());
-        frame.data = payload.left(static_cast<int>(dlc));
-        frame.direction = CanFrameDirection::Tx;
-        frame.protocol = (ui->protocolCombo->currentIndex() == 0) ? CanFrameProtocol::ClassicCan : CanFrameProtocol::CanFd;
-        frame.extendedFrame = ui->frameTypeCombo->currentIndex() != 0;
-        frame.remoteFrame = false;
-        frame.hostDateTime = QDateTime::currentDateTime();
+                            dlc,
+                            &frame)) {
         addCanFrameToList(frame);
     }
 }
@@ -8209,7 +9071,7 @@ void MainWindow::onProtocolModeChanged(int index)
             rfidControlEnabledCheck->setChecked(false);
         }
         if (rfidControlTimer != nullptr) {
-            rfidControlTimer->stop();
+            setRfidControlPeriodicActive(false);
         }
     }
 

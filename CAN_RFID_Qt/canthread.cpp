@@ -8,6 +8,11 @@ namespace {
 constexpr UINT MaxReceiveFrames = 200;
 constexpr UINT CanChannel0 = 0;
 constexpr UINT CanChannel1 = 1;
+constexpr int RfidControlPeriodMs = 100;
+constexpr UINT MaxReceiveBatchesPerCycle = 2;
+constexpr unsigned int BacklogReceiveSleepMs = 1;
+constexpr unsigned int ActiveReceiveSleepMs = 5;
+constexpr unsigned int IdleReceiveSleepMs = 10;
 }
 
 CANThread::CANThread() :
@@ -17,8 +22,14 @@ CANThread::CANThread() :
     m_channel2(INVALID_CHANNEL_HANDLE),
     devPtr(nullptr),
     m_canNum(2),
-    timestampBaseValid(false),
-    firstDeviceTimestampMs(0)
+    frameClockValid(false),
+    periodicControlEnabled(false),
+    periodicControlScanning(false),
+    periodicControlResetRequested(true),
+    periodicControlChannel(CanChannel0),
+    periodicControlNextDueMs(0),
+    lastRfidControlSentMs(-1),
+    lastRfidControlScanning(false)
 {
     std::memset(&m_config, 0, sizeof(m_config));
 }
@@ -53,7 +64,7 @@ bool CANThread::openDevice(UINT device_type, UINT device_index, UINT reserved)
     } else {
         m_canNum = 2;
     }
-    resetTimestampBase();
+    resetFrameClock();
     return true;
 }
 
@@ -127,7 +138,7 @@ bool CANThread::initCAN()
     m_config.can_type = TYPE_CANFD;
     m_channel1 = ZCAN_InitCAN(m_dev, 0, &m_config);
     m_channel2 = (m_canNum > 1) ? ZCAN_InitCAN(m_dev, 1, &m_config) : INVALID_CHANNEL_HANDLE;
-    resetTimestampBase();
+    resetFrameClock();
     return isChannelValid(m_channel1) && (m_canNum <= 1 || isChannelValid(m_channel2));
 }
 
@@ -139,7 +150,7 @@ bool CANThread::initClassicCAN()
     m_config.can_type = TYPE_CAN;
     m_channel1 = ZCAN_InitCAN(m_dev, 0, &m_config);
     m_channel2 = (m_canNum > 1) ? ZCAN_InitCAN(m_dev, 1, &m_config) : INVALID_CHANNEL_HANDLE;
-    resetTimestampBase();
+    resetFrameClock();
     return isChannelValid(m_channel1) && (m_canNum <= 1 || isChannelValid(m_channel2));
 }
 
@@ -190,7 +201,7 @@ bool CANThread::startCAN()
     if (m_canNum > 1 && (!isChannelValid(m_channel2) || ZCAN_StartCAN(m_channel2) != 1)) {
         return false;
     }
-    resetTimestampBase();
+    resetFrameClock();
     return true;
 }
 
@@ -202,7 +213,7 @@ UINT CANThread::MakeCanId(uint id, int eff, int rtr, int err)
     return id | ueff << 31 | urtr << 30 | uerr << 29;
 }
 
-bool CANThread::sendData(UINT id, UINT frame_type_index, UINT protocol_index, UINT canfd_exp_index, UINT channel, const char *data, UINT len)
+bool CANThread::sendData(UINT id, UINT frame_type_index, UINT protocol_index, UINT canfd_exp_index, UINT channel, const char *data, UINT len, CanFrame *sentFrame)
 {
     if (data == nullptr || len == 0) {
         return false;
@@ -213,6 +224,18 @@ bool CANThread::sendData(UINT id, UINT frame_type_index, UINT protocol_index, UI
         return false;
     }
 
+    QMutexLocker transmitLocker(&transmitMutex);
+    if (sentFrame != nullptr) {
+        sentFrame->id = id;
+        sentFrame->channel = channel;
+        sentFrame->data = QByteArray(data, static_cast<int>(len));
+        sentFrame->direction = CanFrameDirection::Tx;
+        sentFrame->protocol = protocol_index == 0
+            ? CanFrameProtocol::ClassicCan : CanFrameProtocol::CanFd;
+        sentFrame->extendedFrame = frame_type_index != 0;
+        sentFrame->remoteFrame = false;
+        stampFrame(*sentFrame);
+    }
     UINT result = 0;
     if (protocol_index == 0) {
         ZCAN_Transmit_Data canData;
@@ -235,12 +258,45 @@ bool CANThread::sendData(UINT id, UINT frame_type_index, UINT protocol_index, UI
     return result == 1;
 }
 
-bool CANThread::sendClassicData(UINT id, UINT channel, const QByteArray &payload)
+bool CANThread::sendClassicData(UINT id, UINT channel, const QByteArray &payload, CanFrame *sentFrame)
 {
     if (id > 0x7FF || payload.isEmpty() || payload.size() > 8) {
         return false;
     }
-    return sendData(id, 0, 0, 0, channel, payload.constData(), static_cast<UINT>(payload.size()));
+    return sendData(id, 0, 0, 0, channel, payload.constData(), static_cast<UINT>(payload.size()), sentFrame);
+}
+
+bool CANThread::sendClassicDataWithDlc(UINT id, UINT channel, const QByteArray &payload, UINT dlc, CanFrame *sentFrame)
+{
+    if (id > 0x7FF || dlc > 8 || payload.size() < static_cast<int>(dlc)) {
+        return false;
+    }
+
+    const CHANNEL_HANDLE ch = (channel == CanChannel0) ? m_channel1 : m_channel2;
+    if (!isChannelValid(ch)) {
+        return false;
+    }
+
+    QMutexLocker transmitLocker(&transmitMutex);
+    if (sentFrame != nullptr) {
+        sentFrame->id = id;
+        sentFrame->channel = channel;
+        sentFrame->data = payload.left(static_cast<int>(dlc));
+        sentFrame->direction = CanFrameDirection::Tx;
+        sentFrame->protocol = CanFrameProtocol::ClassicCan;
+        sentFrame->extendedFrame = false;
+        sentFrame->remoteFrame = false;
+        stampFrame(*sentFrame);
+    }
+    ZCAN_Transmit_Data canData;
+    std::memset(&canData, 0, sizeof(canData));
+    canData.frame.can_id = MakeCanId(id, 0, 0, 0);
+    canData.frame.can_dlc = dlc;
+    if (dlc > 0) {
+        std::memcpy(canData.frame.data, payload.constData(), dlc);
+    }
+    canData.transmit_type = 1;
+    return ZCAN_Transmit(ch, &canData, 1) == 1;
 }
 
 void CANThread::closeDevice()
@@ -253,7 +309,7 @@ void CANThread::closeDevice()
     m_channel2 = INVALID_CHANNEL_HANDLE;
     devPtr = nullptr;
     m_canNum = 0;
-    resetTimestampBase();
+    resetFrameClock();
 }
 
 bool CANThread::reSetCAN()
@@ -270,7 +326,7 @@ bool CANThread::reSetCAN()
         ZCAN_ClearBuffer(m_channel2);
     }
 
-    resetTimestampBase();
+    resetFrameClock();
     return true;
 }
 
@@ -285,61 +341,87 @@ void CANThread::run()
     if (m_canNum > 1 && isChannelValid(m_channel2)) {
         ZCAN_ClearBuffer(m_channel2);
     }
-    resetTimestampBase();
-
+    resetFrameClock();
+    {
+        QMutexLocker locker(&periodicControlMutex);
+        periodicControlClock.start();
+        periodicControlNextDueMs = 0;
+    }
+    {
+        // 新一轮接收线程启动后，不能沿用上一轮周期发送的去重时间。
+        QMutexLocker locker(&rfidControlSendMutex);
+        lastRfidControlSentMs = -1;
+        lastRfidControlScanning = false;
+    }
     while (!stopped.load()) {
         QVector<CanFrame> parsedFrames;
+        bool receiveBacklog = false;
+        appendPeriodicRfidControlFrame(&parsedFrames);
 
         auto collectClassicFrames = [&](CHANNEL_HANDLE channelHandle, quint32 channelIndex) {
             if (!isChannelValid(channelHandle)) {
                 return;
             }
-            UINT frameCount = ZCAN_GetReceiveNum(channelHandle, TYPE_CAN);
-            if (frameCount == 0) {
-                return;
+            for (UINT batch = 0; batch < MaxReceiveBatchesPerCycle; ++batch) {
+                const UINT available = ZCAN_GetReceiveNum(channelHandle, TYPE_CAN);
+                if (available == 0) {
+                    return;
+                }
+                const UINT requested = qMin(available, MaxReceiveFrames);
+                const UINT frameCount = ZCAN_Receive(channelHandle, recvCANData, requested, 0);
+                for (UINT index = 0; index < frameCount; ++index) {
+                    CanFrame frame;
+                    frame.id = GET_ID(recvCANData[index].frame.can_id);
+                    frame.channel = channelIndex;
+                    frame.data = QByteArray(reinterpret_cast<const char *>(recvCANData[index].frame.data),
+                                            recvCANData[index].frame.can_dlc);
+                    frame.direction = CanFrameDirection::Rx;
+                    frame.protocol = CanFrameProtocol::ClassicCan;
+                    frame.extendedFrame = IS_EFF(recvCANData[index].frame.can_id);
+                    frame.remoteFrame = IS_RTR(recvCANData[index].frame.can_id);
+                    frame.zlgTimestampRaw = recvCANData[index].timestamp;
+                    frame.hasZlgTimestamp = true;
+                    stampFrame(frame);
+                    parsedFrames.append(frame);
+                }
+                if (frameCount < requested) {
+                    return;
+                }
             }
-            frameCount = ZCAN_Receive(channelHandle, recvCANData, qMin(frameCount, MaxReceiveFrames), 50);
-            for (UINT index = 0; index < frameCount; ++index) {
-                CanFrame frame;
-                frame.id = GET_ID(recvCANData[index].frame.can_id);
-                frame.channel = channelIndex;
-                frame.data = QByteArray(reinterpret_cast<const char *>(recvCANData[index].frame.data),
-                                        recvCANData[index].frame.can_dlc);
-                frame.direction = CanFrameDirection::Rx;
-                frame.protocol = CanFrameProtocol::ClassicCan;
-                frame.extendedFrame = IS_EFF(recvCANData[index].frame.can_id);
-                frame.remoteFrame = IS_RTR(recvCANData[index].frame.can_id);
-                frame.zlgTimestampRaw = recvCANData[index].timestamp;
-                frame.hasZlgTimestamp = true;
-                frame.hostDateTime = mappedHostDateTime(frame.zlgTimestampRaw);
-                parsedFrames.append(frame);
-            }
+            receiveBacklog = receiveBacklog || ZCAN_GetReceiveNum(channelHandle, TYPE_CAN) > 0;
         };
 
         auto collectCanFdFrames = [&](CHANNEL_HANDLE channelHandle, quint32 channelIndex) {
             if (!isChannelValid(channelHandle)) {
                 return;
             }
-            UINT frameCount = ZCAN_GetReceiveNum(channelHandle, TYPE_CANFD);
-            if (frameCount == 0) {
-                return;
+            for (UINT batch = 0; batch < MaxReceiveBatchesPerCycle; ++batch) {
+                const UINT available = ZCAN_GetReceiveNum(channelHandle, TYPE_CANFD);
+                if (available == 0) {
+                    return;
+                }
+                const UINT requested = qMin(available, MaxReceiveFrames);
+                const UINT frameCount = ZCAN_ReceiveFD(channelHandle, recvCANFDData, requested, 0);
+                for (UINT index = 0; index < frameCount; ++index) {
+                    CanFrame frame;
+                    frame.id = GET_ID(recvCANFDData[index].frame.can_id);
+                    frame.channel = channelIndex;
+                    frame.data = QByteArray(reinterpret_cast<const char *>(recvCANFDData[index].frame.data),
+                                            recvCANFDData[index].frame.len);
+                    frame.direction = CanFrameDirection::Rx;
+                    frame.protocol = CanFrameProtocol::CanFd;
+                    frame.extendedFrame = IS_EFF(recvCANFDData[index].frame.can_id);
+                    frame.remoteFrame = IS_RTR(recvCANFDData[index].frame.can_id);
+                    frame.zlgTimestampRaw = recvCANFDData[index].timestamp;
+                    frame.hasZlgTimestamp = true;
+                    stampFrame(frame);
+                    parsedFrames.append(frame);
+                }
+                if (frameCount < requested) {
+                    return;
+                }
             }
-            frameCount = ZCAN_ReceiveFD(channelHandle, recvCANFDData, qMin(frameCount, MaxReceiveFrames), 50);
-            for (UINT index = 0; index < frameCount; ++index) {
-                CanFrame frame;
-                frame.id = GET_ID(recvCANFDData[index].frame.can_id);
-                frame.channel = channelIndex;
-                frame.data = QByteArray(reinterpret_cast<const char *>(recvCANFDData[index].frame.data),
-                                        recvCANFDData[index].frame.len);
-                frame.direction = CanFrameDirection::Rx;
-                frame.protocol = CanFrameProtocol::CanFd;
-                frame.extendedFrame = IS_EFF(recvCANFDData[index].frame.can_id);
-                frame.remoteFrame = IS_RTR(recvCANFDData[index].frame.can_id);
-                frame.zlgTimestampRaw = recvCANFDData[index].timestamp;
-                frame.hasZlgTimestamp = true;
-                frame.hostDateTime = mappedHostDateTime(frame.zlgTimestampRaw);
-                parsedFrames.append(frame);
-            }
+            receiveBacklog = receiveBacklog || ZCAN_GetReceiveNum(channelHandle, TYPE_CANFD) > 0;
         };
 
         collectClassicFrames(m_channel1, CanChannel0);
@@ -352,7 +434,8 @@ void CANThread::run()
         if (!parsedFrames.isEmpty()) {
             emit recvedFrames(parsedFrames);
         }
-        sleep(10);
+        sleep(receiveBacklog ? BacklogReceiveSleepMs
+                             : (parsedFrames.isEmpty() ? IdleReceiveSleepMs : ActiveReceiveSleepMs));
     }
     stopped.store(false);
 }
@@ -372,21 +455,112 @@ bool CANThread::isChannelValid(CHANNEL_HANDLE channel) const
     return channel != INVALID_CHANNEL_HANDLE && channel != nullptr;
 }
 
-void CANThread::resetTimestampBase()
+void CANThread::resetFrameClock()
 {
-    timestampBaseValid = false;
-    firstDeviceTimestampMs = 0;
-    firstHostDateTime = QDateTime();
+    QMutexLocker locker(&frameClockMutex);
+    frameClock.invalidate();
+    frameClockBaseDateTime = QDateTime();
+    frameClockValid = false;
 }
 
-QDateTime CANThread::mappedHostDateTime(quint64 deviceTimestampMs)
+void CANThread::setRfidControlPeriodicEnabled(bool enabled, UINT channel, bool scanning)
 {
-    const QDateTime now = QDateTime::currentDateTime();
-    if (!timestampBaseValid || deviceTimestampMs < firstDeviceTimestampMs) {
-        timestampBaseValid = true;
-        firstDeviceTimestampMs = deviceTimestampMs;
-        firstHostDateTime = now;
-        return now;
+    QMutexLocker locker(&periodicControlMutex);
+    const bool changed = periodicControlEnabled != enabled ||
+        periodicControlChannel != channel || periodicControlScanning != scanning;
+    periodicControlEnabled = enabled;
+    periodicControlChannel = channel;
+    periodicControlScanning = scanning;
+    if (changed) {
+        if (periodicControlClock.isValid()) {
+            periodicControlNextDueMs = periodicControlClock.elapsed() + RfidControlPeriodMs;
+            periodicControlResetRequested = false;
+        } else {
+            periodicControlResetRequested = true;
+        }
     }
-    return firstHostDateTime.addMSecs(static_cast<qint64>(deviceTimestampMs - firstDeviceTimestampMs));
+}
+
+CANThread::RfidControlSendResult CANThread::sendManualRfidControlFrame(UINT channel, bool scanning, CanFrame *sentFrame)
+{
+    {
+        QMutexLocker locker(&periodicControlMutex);
+        periodicControlChannel = channel;
+        periodicControlScanning = scanning;
+        if (periodicControlClock.isValid()) {
+            periodicControlNextDueMs = periodicControlClock.elapsed() + RfidControlPeriodMs;
+            periodicControlResetRequested = false;
+        } else {
+            periodicControlResetRequested = true;
+        }
+    }
+    return sendRfidControlFrame(channel, scanning, true, sentFrame);
+}
+
+void CANThread::appendPeriodicRfidControlFrame(QVector<CanFrame> *frames)
+{
+    if (frames == nullptr || !periodicControlClock.isValid()) {
+        return;
+    }
+
+    bool enabled = false;
+    bool scanning = false;
+    UINT channel = CanChannel0;
+    CanFrame frame;
+    {
+        QMutexLocker locker(&periodicControlMutex);
+        enabled = periodicControlEnabled;
+        scanning = periodicControlScanning;
+        channel = periodicControlChannel;
+        const qint64 nowMs = periodicControlClock.elapsed();
+        if (periodicControlResetRequested) {
+            periodicControlNextDueMs = nowMs;
+            periodicControlResetRequested = false;
+        }
+        if (!enabled || nowMs < periodicControlNextDueMs) {
+            return;
+        }
+
+        const qint64 missedPeriods = (nowMs - periodicControlNextDueMs) / RfidControlPeriodMs;
+        periodicControlNextDueMs += (missedPeriods + 1) * RfidControlPeriodMs;
+        if (sendRfidControlFrame(channel, scanning, false, &frame) != RfidControlSendResult::Sent) {
+            return;
+        }
+    }
+    frames->append(frame);
+}
+
+CANThread::RfidControlSendResult CANThread::sendRfidControlFrame(UINT channel,
+                                                                  bool scanning,
+                                                                  bool suppressRecentDuplicate,
+                                                                  CanFrame *sentFrame)
+{
+    QMutexLocker locker(&rfidControlSendMutex);
+    const qint64 nowMs = periodicControlClock.isValid() ? periodicControlClock.elapsed() : -1;
+    if (suppressRecentDuplicate && nowMs >= 0 && lastRfidControlSentMs >= 0 &&
+        scanning == lastRfidControlScanning && nowMs - lastRfidControlSentMs < RfidControlPeriodMs) {
+        return RfidControlSendResult::Suppressed;
+    }
+
+    QByteArray payload(8, static_cast<char>(0x55));
+    payload[0] = scanning ? static_cast<char>(0x01) : static_cast<char>(0x00);
+    if (!sendClassicData(0x207, channel, payload, sentFrame)) {
+        return RfidControlSendResult::Failed;
+    }
+
+    lastRfidControlSentMs = nowMs;
+    lastRfidControlScanning = scanning;
+    return RfidControlSendResult::Sent;
+}
+
+void CANThread::stampFrame(CanFrame &frame)
+{
+    QMutexLocker locker(&frameClockMutex);
+    if (!frameClockValid) {
+        frameClockBaseDateTime = QDateTime::currentDateTime();
+        frameClock.start();
+        frameClockValid = true;
+    }
+    frame.monotonicElapsedMs = frameClock.elapsed();
+    frame.hostDateTime = frameClockBaseDateTime.addMSecs(frame.monotonicElapsedMs);
 }

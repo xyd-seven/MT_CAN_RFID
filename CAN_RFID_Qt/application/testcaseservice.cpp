@@ -590,7 +590,9 @@ bool TestCaseService::loadCasesFromJsonData(const QByteArray &jsonData, QString 
         testCase.testData = jsonString(object, "testData");
         testCase.steps = jsonString(object, "steps");
         testCase.expectedResult = jsonString(object, "expectedResult");
-        testCase.executionMode = jsonString(object, "executionMode");
+        const QString configuredExecutionMode = jsonString(object, "executionMode");
+        testCase.executionMode = configuredExecutionMode;
+        testCase.showInMainExecution = jsonBool(object, "showInMainExecution", true);
         testCase.commandTemplate = jsonString(object, "commandTemplate");
         testCase.judgeTemplate = jsonString(object, "judgeTemplate");
         testCase.manualPrompt = jsonString(object, "manualPrompt");
@@ -608,6 +610,9 @@ bool TestCaseService::loadCasesFromJsonData(const QByteArray &jsonData, QString 
         testCase.timeoutMs = jsonInt(object, "timeoutMs", 1000);
         testCase.retryCount = jsonInt(object, "retryCount", 0);
         inferAutomationFields(&testCase);
+        if (!configuredExecutionMode.isEmpty()) {
+            testCase.executionMode = configuredExecutionMode;
+        }
         if (!testCase.id.isEmpty()) {
             loadedCases.append(testCase);
         }
@@ -886,7 +891,8 @@ bool TestCaseService::saveResult(const TestCaseResult &result, QString *error)
     return saveSessionJson(error);
 }
 
-bool TestCaseService::appendEvidence(const QString &direction,
+bool TestCaseService::appendEvidence(const QDateTime &timestamp,
+                                     const QString &direction,
                                      const QString &channel,
                                      const QString &frameId,
                                      const QString &dataHex,
@@ -910,7 +916,7 @@ bool TestCaseService::appendEvidence(const QString &direction,
 
     QTextStream stream(&file);
     stream.setCodec("UTF-8");
-    stream << QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz") << ','
+    stream << timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz") << ','
            << csvEscape(direction) << ','
            << csvEscape(channel) << ','
            << csvEscape(frameId) << ','

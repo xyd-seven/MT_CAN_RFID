@@ -1,6 +1,5 @@
 #include "isotptransport.h"
 
-#include <QDateTime>
 #include "rfidprotocol.h"
 
 IsoTpTransport::IsoTpTransport(const IsoTpConfig &config) :
@@ -48,7 +47,6 @@ CanFrame IsoTpTransport::buildFirstFrame(const QByteArray &payload, int totalSiz
     frame.data = frameData;
     frame.direction = CanFrameDirection::Tx;
     frame.protocol = CanFrameProtocol::ClassicCan;
-    frame.hostDateTime = QDateTime::currentDateTime();
     return frame;
 }
 
@@ -66,7 +64,6 @@ CanFrame IsoTpTransport::buildConsecutiveFrame(const QByteArray &payload, quint8
     frame.data = frameData;
     frame.direction = CanFrameDirection::Tx;
     frame.protocol = CanFrameProtocol::ClassicCan;
-    frame.hostDateTime = QDateTime::currentDateTime();
     return frame;
 }
 
@@ -99,6 +96,5 @@ CanFrame IsoTpTransport::buildClassicFrame(const QByteArray &payload) const
     frame.data = frameData;
     frame.direction = CanFrameDirection::Tx;
     frame.protocol = CanFrameProtocol::ClassicCan;
-    frame.hostDateTime = QDateTime::currentDateTime();
     return frame;
 }

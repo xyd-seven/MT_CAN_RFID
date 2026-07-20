@@ -69,6 +69,7 @@ public:
     static RfidStatus parseStatusFrame(const QByteArray &payload);
     static RfidVersion parseVersionFrame(const QByteArray &payload);
     static RfidResponse parseResponseFrame(const QByteArray &payload);
+    static bool hasValidSingleFramePadding(const QByteArray &payload);
 
     static QString parseAsciiPayload(const QByteArray &payload);
     static bool isUnrecognizedTagPlaceholderPayload(const QByteArray &payload);

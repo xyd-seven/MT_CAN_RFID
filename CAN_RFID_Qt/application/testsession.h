@@ -26,6 +26,7 @@ struct TestCase
     QString steps;
     QString expectedResult;
     QString executionMode;
+    bool showInMainExecution = true;
     QString commandTemplate;
     QString judgeTemplate;
     QString manualPrompt;

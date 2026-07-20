@@ -99,6 +99,14 @@ void RfidDiagnosticTransfer::handleResponseFrame(const CanFrame &frame)
         return;
     }
 
+    const RfidResponse response = RfidProtocol::parseResponseFrame(frame.data);
+    if (response.valid && response.negative && response.originalSid == 0x2E) {
+        failTransfer(QStringLiteral("0x2E 写入失败 NRC=0x%1 %2")
+                         .arg(response.negativeCode, 2, 16, QChar('0')).toUpper()
+                         .arg(nrcText(response.negativeCode)));
+        return;
+    }
+
     if (m_state == State::WaitingFlowControl) {
         handleFlowControl(frame.data);
         return;
@@ -210,6 +218,7 @@ void RfidDiagnosticTransfer::enterWaitingFinalResponse()
 {
     m_cfTimer->stop();
     m_state = State::WaitingFinalResponse;
+    emit payloadSent();
     startTimeout(FinalResponseTimeoutMs);
 }
 

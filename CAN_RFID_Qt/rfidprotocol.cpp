@@ -138,6 +138,9 @@ RfidResponse RfidProtocol::parseResponseFrame(const QByteArray &payload)
     if (frameType != 0x00 || serviceLength < 1 || serviceLength > 7) {
         return response;
     }
+    if (!hasValidSingleFramePadding(payload)) {
+        return response;
+    }
 
     response.sid = static_cast<quint8>(payload[1]);
     if (response.sid == 0x7F) {
@@ -182,6 +185,24 @@ QString RfidProtocol::parseAsciiPayload(const QByteArray &payload)
         }
     }
     return QString::fromLatin1(ascii);
+}
+
+bool RfidProtocol::hasValidSingleFramePadding(const QByteArray &payload)
+{
+    if (!isClassicCanPayload(payload)) {
+        return false;
+    }
+    const quint8 frameType = static_cast<quint8>(payload[0]) >> 4;
+    const quint8 serviceLength = static_cast<quint8>(payload[0]) & 0x0F;
+    if (frameType != 0x00 || serviceLength < 1 || serviceLength > 7) {
+        return false;
+    }
+    for (int index = serviceLength + 1; index < ClassicCanDlc; ++index) {
+        if (static_cast<quint8>(payload.at(index)) != FillByte) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool RfidProtocol::isUnrecognizedTagPlaceholderPayload(const QByteArray &payload)

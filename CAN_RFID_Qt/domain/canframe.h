@@ -27,6 +27,8 @@ struct CanFrame
     CanFrameProtocol protocol = CanFrameProtocol::ClassicCan;
     bool extendedFrame = false;
     bool remoteFrame = false;
+    // 统一 CAN 时钟的相对毫秒，用于时延和周期判断；-1 表示尚未盖章。
+    qint64 monotonicElapsedMs = -1;
     QDateTime hostDateTime;
     quint64 zlgTimestampRaw = 0;
     bool hasZlgTimestamp = false;

@@ -21,6 +21,7 @@ public:
 
 signals:
     void frameReady(quint32 canId, const QByteArray &payload);
+    void payloadSent();
     void finished(bool success, const QString &message);
     void logMessage(const QString &message);
 
