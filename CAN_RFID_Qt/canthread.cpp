@@ -13,6 +13,8 @@ constexpr UINT MaxReceiveBatchesPerCycle = 2;
 constexpr unsigned int BacklogReceiveSleepMs = 1;
 constexpr unsigned int ActiveReceiveSleepMs = 5;
 constexpr unsigned int IdleReceiveSleepMs = 10;
+// ZLG Windows 驱动的运行期 API 由进程共享，多设备收发必须避免同时进入 DLL。
+QMutex zlgRuntimeApiMutex;
 }
 
 CANThread::CANThread() :
@@ -22,6 +24,9 @@ CANThread::CANThread() :
     m_channel2(INVALID_CHANNEL_HANDLE),
     devPtr(nullptr),
     m_canNum(2),
+    m_deviceType(0),
+    m_deviceIndex(0),
+    m_receiveCanFd(false),
     frameClockValid(false),
     periodicControlEnabled(false),
     periodicControlScanning(false),
@@ -45,6 +50,7 @@ bool CANThread::openDevice(UINT device_type, UINT device_index, UINT reserved)
         return false;
     }
 
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
     m_dev = ZCAN_OpenDevice(device_type, device_index, reserved);
     if (m_dev == INVALID_DEVICE_HANDLE) {
         return false;
@@ -64,6 +70,15 @@ bool CANThread::openDevice(UINT device_type, UINT device_index, UINT reserved)
     } else {
         m_canNum = 2;
     }
+    m_deviceType = device_type;
+    m_deviceIndex = device_index;
+    emit driverDiagnostic(
+        QStringLiteral("ZLG设备已打开：类型=%1 索引=%2 设备句柄=0x%3 CAN通道数=%4")
+            .arg(m_deviceType)
+            .arg(m_deviceIndex)
+            .arg(reinterpret_cast<quintptr>(m_dev), 0, 16)
+            .arg(m_canNum)
+            .toUpper());
     resetFrameClock();
     return true;
 }
@@ -73,6 +88,7 @@ bool CANThread::setCANFDStandard(UINT standard)
     if (!isDeviceOpen() || devPtr == nullptr) {
         return false;
     }
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
     if (devPtr->SetValue("0/canfd_standard", QString::number(standard).toStdString().c_str()) != 1) {
         return false;
     }
@@ -88,6 +104,7 @@ bool CANThread::setBaudrateFD(UINT rate1, UINT rate2)
     if (!isDeviceOpen() || devPtr == nullptr) {
         return false;
     }
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
     if (devPtr->SetValue("0/canfd_abit_baud_rate", QString::number(rate1).toStdString().c_str()) != 1 ||
         devPtr->SetValue("0/canfd_dbit_baud_rate", QString::number(rate2).toStdString().c_str()) != 1) {
         return false;
@@ -105,6 +122,7 @@ bool CANThread::setClassicBaudrate(UINT rate)
     if (!isDeviceOpen() || devPtr == nullptr) {
         return false;
     }
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
     if (devPtr->SetValue("0/baud_rate", QString::number(rate).toStdString().c_str()) != 1) {
         return false;
     }
@@ -115,11 +133,24 @@ bool CANThread::setClassicBaudrate(UINT rate)
     return true;
 }
 
+bool CANThread::setClassicBaudrateForChannel(UINT channel, UINT rate)
+{
+    if (!isDeviceOpen() || devPtr == nullptr || channel >= m_canNum || channel > CanChannel1) {
+        return false;
+    }
+
+    const QByteArray path = QStringLiteral("%1/baud_rate").arg(channel).toLatin1();
+    const QByteArray value = QByteArray::number(rate);
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+    return devPtr->SetValue(path.constData(), value.constData()) == 1;
+}
+
 bool CANThread::setCustomBaudrateFD(QString rate)
 {
     if (!isDeviceOpen() || devPtr == nullptr) {
         return false;
     }
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
     if (devPtr->SetValue("0/baud_rate_custom", rate.toStdString().c_str()) != 1) {
         return false;
     }
@@ -135,9 +166,11 @@ bool CANThread::initCAN()
     if (!isDeviceOpen()) {
         return false;
     }
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
     m_config.can_type = TYPE_CANFD;
     m_channel1 = ZCAN_InitCAN(m_dev, 0, &m_config);
     m_channel2 = (m_canNum > 1) ? ZCAN_InitCAN(m_dev, 1, &m_config) : INVALID_CHANNEL_HANDLE;
+    m_receiveCanFd = true;
     resetFrameClock();
     return isChannelValid(m_channel1) && (m_canNum <= 1 || isChannelValid(m_channel2));
 }
@@ -147,11 +180,38 @@ bool CANThread::initClassicCAN()
     if (!isDeviceOpen()) {
         return false;
     }
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
     m_config.can_type = TYPE_CAN;
     m_channel1 = ZCAN_InitCAN(m_dev, 0, &m_config);
     m_channel2 = (m_canNum > 1) ? ZCAN_InitCAN(m_dev, 1, &m_config) : INVALID_CHANNEL_HANDLE;
+    m_receiveCanFd = false;
     resetFrameClock();
     return isChannelValid(m_channel1) && (m_canNum <= 1 || isChannelValid(m_channel2));
+}
+
+bool CANThread::initClassicCANChannel(UINT channel)
+{
+    if (!isDeviceOpen() || channel >= m_canNum || channel > CanChannel1) {
+        return false;
+    }
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+    m_config.can_type = TYPE_CAN;
+    m_channel1 = channel == CanChannel0
+        ? ZCAN_InitCAN(m_dev, CanChannel0, &m_config)
+        : INVALID_CHANNEL_HANDLE;
+    m_channel2 = channel == CanChannel1
+        ? ZCAN_InitCAN(m_dev, CanChannel1, &m_config)
+        : INVALID_CHANNEL_HANDLE;
+    m_receiveCanFd = false;
+    resetFrameClock();
+    const CHANNEL_HANDLE activeHandle = channel == CanChannel0 ? m_channel1 : m_channel2;
+    emit driverDiagnostic(
+        QStringLiteral("ZLG通道已初始化：设备索引=%1 CAN%2 通道句柄=0x%3")
+            .arg(m_deviceIndex)
+            .arg(channel)
+            .arg(reinterpret_cast<quintptr>(activeHandle), 0, 16)
+            .toUpper());
+    return isChannelValid(activeHandle);
 }
 
 bool CANThread::setResistanceEnable(UINT enable)
@@ -159,6 +219,7 @@ bool CANThread::setResistanceEnable(UINT enable)
     if (!isDeviceOpen() || devPtr == nullptr) {
         return false;
     }
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
     devPtr->SetValue("0/initenal_resistance", QString::number(enable).toStdString().c_str());
     if (m_canNum > 1) {
         devPtr->SetValue("1/initenal_resistance", QString::number(enable).toStdString().c_str());
@@ -166,11 +227,24 @@ bool CANThread::setResistanceEnable(UINT enable)
     return true;
 }
 
+bool CANThread::setResistanceEnableForChannel(UINT channel, UINT enable)
+{
+    if (!isDeviceOpen() || devPtr == nullptr || channel >= m_canNum || channel > CanChannel1) {
+        return false;
+    }
+
+    const QByteArray path = QStringLiteral("%1/initenal_resistance").arg(channel).toLatin1();
+    const QByteArray value = QByteArray::number(enable);
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+    return devPtr->SetValue(path.constData(), value.constData()) == 1;
+}
+
 bool CANThread::setFilter(UINT filterMode, QString startID, QString endID)
 {
     if (!isDeviceOpen() || devPtr == nullptr) {
         return false;
     }
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
     if (devPtr->SetValue("0/filter_clear", "0") != 1 ||
         devPtr->SetValue("0/filter_mode", QString::number(filterMode).toStdString().c_str()) != 1 ||
         devPtr->SetValue("0/filter_start", startID.toStdString().c_str()) != 1 ||
@@ -192,13 +266,16 @@ bool CANThread::setFilter(UINT filterMode, QString startID, QString endID)
 
 bool CANThread::startCAN()
 {
-    if (!isChannelValid(m_channel1)) {
+    const bool firstChannelValid = isChannelValid(m_channel1);
+    const bool secondChannelValid = isChannelValid(m_channel2);
+    if (!firstChannelValid && !secondChannelValid) {
         return false;
     }
-    if (ZCAN_StartCAN(m_channel1) != 1) {
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+    if (firstChannelValid && ZCAN_StartCAN(m_channel1) != 1) {
         return false;
     }
-    if (m_canNum > 1 && (!isChannelValid(m_channel2) || ZCAN_StartCAN(m_channel2) != 1)) {
+    if (secondChannelValid && ZCAN_StartCAN(m_channel2) != 1) {
         return false;
     }
     resetFrameClock();
@@ -244,6 +321,7 @@ bool CANThread::sendData(UINT id, UINT frame_type_index, UINT protocol_index, UI
         canData.frame.can_dlc = len > 8 ? 8 : len;
         std::memcpy(canData.frame.data, data, canData.frame.can_dlc);
         canData.transmit_type = 1;
+        QMutexLocker driverLocker(&zlgRuntimeApiMutex);
         result = ZCAN_Transmit(ch, &canData, 1);
     } else {
         ZCAN_TransmitFD_Data canfdData;
@@ -253,7 +331,11 @@ bool CANThread::sendData(UINT id, UINT frame_type_index, UINT protocol_index, UI
         std::memcpy(canfdData.frame.data, data, canfdData.frame.len);
         canfdData.transmit_type = 1;
         canfdData.frame.flags = (canfd_exp_index != 0) ? 1 : 0;
+        QMutexLocker driverLocker(&zlgRuntimeApiMutex);
         result = ZCAN_TransmitFD(ch, &canfdData, 1);
+    }
+    if (result != 1) {
+        reportTransmitFailure(ch, result);
     }
     return result == 1;
 }
@@ -296,11 +378,40 @@ bool CANThread::sendClassicDataWithDlc(UINT id, UINT channel, const QByteArray &
         std::memcpy(canData.frame.data, payload.constData(), dlc);
     }
     canData.transmit_type = 1;
-    return ZCAN_Transmit(ch, &canData, 1) == 1;
+    UINT result = 0;
+    {
+        QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+        result = ZCAN_Transmit(ch, &canData, 1);
+    }
+    if (result != 1) {
+        reportTransmitFailure(ch, result);
+    }
+    return result == 1;
+}
+
+void CANThread::reportTransmitFailure(CHANNEL_HANDLE channelHandle, UINT transmitResult)
+{
+    UINT onlineStatus = 0;
+    {
+        QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+        if (isDeviceOpen()) {
+            onlineStatus = ZCAN_IsDeviceOnLine(m_dev);
+        }
+    }
+    emit driverDiagnostic(
+        QStringLiteral("ZLG发送失败：类型=%1 设备索引=%2 设备句柄=0x%3 通道句柄=0x%4 在线状态=%5 发送返回=%6")
+            .arg(m_deviceType)
+            .arg(m_deviceIndex)
+            .arg(reinterpret_cast<quintptr>(m_dev), 0, 16)
+            .arg(reinterpret_cast<quintptr>(channelHandle), 0, 16)
+            .arg(onlineStatus)
+            .arg(transmitResult)
+            .toUpper());
 }
 
 void CANThread::closeDevice()
 {
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
     if (isDeviceOpen()) {
         ZCAN_CloseDevice(m_dev);
     }
@@ -314,6 +425,7 @@ void CANThread::closeDevice()
 
 bool CANThread::reSetCAN()
 {
+    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
     if (!isChannelValid(m_channel1) || ZCAN_ResetCAN(m_channel1) != 1) {
         return false;
     }
@@ -336,9 +448,11 @@ void CANThread::run()
     ZCAN_ReceiveFD_Data recvCANFDData[MaxReceiveFrames];
 
     if (isChannelValid(m_channel1)) {
+        QMutexLocker driverLocker(&zlgRuntimeApiMutex);
         ZCAN_ClearBuffer(m_channel1);
     }
     if (m_canNum > 1 && isChannelValid(m_channel2)) {
+        QMutexLocker driverLocker(&zlgRuntimeApiMutex);
         ZCAN_ClearBuffer(m_channel2);
     }
     resetFrameClock();
@@ -363,12 +477,20 @@ void CANThread::run()
                 return;
             }
             for (UINT batch = 0; batch < MaxReceiveBatchesPerCycle; ++batch) {
-                const UINT available = ZCAN_GetReceiveNum(channelHandle, TYPE_CAN);
+                UINT available = 0;
+                {
+                    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+                    available = ZCAN_GetReceiveNum(channelHandle, TYPE_CAN);
+                }
                 if (available == 0) {
                     return;
                 }
                 const UINT requested = qMin(available, MaxReceiveFrames);
-                const UINT frameCount = ZCAN_Receive(channelHandle, recvCANData, requested, 0);
+                UINT frameCount = 0;
+                {
+                    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+                    frameCount = ZCAN_Receive(channelHandle, recvCANData, requested, 0);
+                }
                 for (UINT index = 0; index < frameCount; ++index) {
                     CanFrame frame;
                     frame.id = GET_ID(recvCANData[index].frame.can_id);
@@ -388,7 +510,11 @@ void CANThread::run()
                     return;
                 }
             }
-            receiveBacklog = receiveBacklog || ZCAN_GetReceiveNum(channelHandle, TYPE_CAN) > 0;
+            {
+                QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+                receiveBacklog = receiveBacklog ||
+                    ZCAN_GetReceiveNum(channelHandle, TYPE_CAN) > 0;
+            }
         };
 
         auto collectCanFdFrames = [&](CHANNEL_HANDLE channelHandle, quint32 channelIndex) {
@@ -396,12 +522,20 @@ void CANThread::run()
                 return;
             }
             for (UINT batch = 0; batch < MaxReceiveBatchesPerCycle; ++batch) {
-                const UINT available = ZCAN_GetReceiveNum(channelHandle, TYPE_CANFD);
+                UINT available = 0;
+                {
+                    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+                    available = ZCAN_GetReceiveNum(channelHandle, TYPE_CANFD);
+                }
                 if (available == 0) {
                     return;
                 }
                 const UINT requested = qMin(available, MaxReceiveFrames);
-                const UINT frameCount = ZCAN_ReceiveFD(channelHandle, recvCANFDData, requested, 0);
+                UINT frameCount = 0;
+                {
+                    QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+                    frameCount = ZCAN_ReceiveFD(channelHandle, recvCANFDData, requested, 0);
+                }
                 for (UINT index = 0; index < frameCount; ++index) {
                     CanFrame frame;
                     frame.id = GET_ID(recvCANFDData[index].frame.can_id);
@@ -421,14 +555,23 @@ void CANThread::run()
                     return;
                 }
             }
-            receiveBacklog = receiveBacklog || ZCAN_GetReceiveNum(channelHandle, TYPE_CANFD) > 0;
+            {
+                QMutexLocker driverLocker(&zlgRuntimeApiMutex);
+                receiveBacklog = receiveBacklog ||
+                    ZCAN_GetReceiveNum(channelHandle, TYPE_CANFD) > 0;
+            }
         };
 
+        // CAN FD 通道仍可能接收经典 CAN 帧，因此 FD 模式需要同时读取两类队列。
         collectClassicFrames(m_channel1, CanChannel0);
-        collectCanFdFrames(m_channel1, CanChannel0);
+        if (m_receiveCanFd) {
+            collectCanFdFrames(m_channel1, CanChannel0);
+        }
         if (m_canNum > 1) {
             collectClassicFrames(m_channel2, CanChannel1);
-            collectCanFdFrames(m_channel2, CanChannel1);
+            if (m_receiveCanFd) {
+                collectCanFdFrames(m_channel2, CanChannel1);
+            }
         }
 
         if (!parsedFrames.isEmpty()) {

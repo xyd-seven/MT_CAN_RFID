@@ -40,7 +40,10 @@ class QingjuRfidService : public QObject
 public:
     explicit QingjuRfidService(QingjuCanManager *canManager, QObject *parent = nullptr);
 
-    void startScan(int intervalMs = 100, int hostPollIntervalMs = 500, int readMode = 1);
+    void startScan(int intervalMs = 100,
+                   int hostPollIntervalMs = 500,
+                   int readMode = 1,
+                   bool queryDeviceInfoBeforePolling = true);
     void stopScan();
     void reset();
 
@@ -58,6 +61,7 @@ public:
 
 signals:
     void stateUpdated(const QingjuNpkState &state);
+    void pollingDiagnostic(const QString &message);
 
 private slots:
     void onPollTimeout();
@@ -76,6 +80,8 @@ private:
     void calculatePassword(const QByteArray &uid);
     void sendDeviceInfoRequest();
     void startPollingOrSingleQuery();
+    bool sendStatusQuery(bool retry);
+    void resetPollingDiagnostics();
 
     QingjuCanManager *m_canManager;
     QTimer *m_pollTimer;
@@ -91,6 +97,11 @@ private:
     bool m_resumeScanAfterDeviceInfo;
     bool m_deviceInfoOnlyMode;
     qint64 m_ignoreStatusUntilMs;
+    bool m_statusQueryPending;
+    qint64 m_statusQuerySentAtMs;
+    quint32 m_statusQueryCount;
+    quint32 m_statusResponseCount;
+    quint32 m_statusRetryCount;
 };
 
 #endif // QINGJURFIDSERVICE_H

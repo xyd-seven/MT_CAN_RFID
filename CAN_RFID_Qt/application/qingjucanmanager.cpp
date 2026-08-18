@@ -1,14 +1,14 @@
 #include "qingjucanmanager.h"
-#include "canthread.h"
+#include "domain/cantransport.h"
 #include "domain/crc16.h"
 #include <QDateTime>
 #include <QMutexLocker>
 #include <QThread>
 #include <QtGlobal>
 
-QingjuCanManager::QingjuCanManager(CANThread *canThread, QObject *parent)
+QingjuCanManager::QingjuCanManager(CanTransport *canTransport, QObject *parent)
     : QObject(parent)
-    , m_canThread(canThread)
+    , m_canTransport(canTransport)
     , m_nextQueue(0)
     , m_channel(0)
 {
@@ -119,7 +119,7 @@ void QingjuCanManager::handleIncomingFrame(const CanFrame &frame)
 
 bool QingjuCanManager::sendModbusRequest(quint8 destAddr, quint8 funcCode, const QByteArray &payload, quint8 priority)
 {
-    if (!m_canThread) {
+    if (!m_canTransport) {
         return false;
     }
     QMutexLocker locker(&m_sendMutex);
@@ -163,8 +163,8 @@ bool QingjuCanManager::sendModbusRequest(quint8 destAddr, quint8 funcCode, const
 
         quint32 rawId = id.toRawId();
         CanFrame frame;
-        if (!m_canThread->sendData(rawId, 1, 0, 0, m_channel,
-                                   frameData.constData(), frameData.size(), &frame)) {
+        if (!m_canTransport->sendData(rawId, 1, 0, 0, m_channel,
+                                      frameData.constData(), frameData.size(), &frame)) {
             success = false;
         } else {
             emit frameSent(frame);

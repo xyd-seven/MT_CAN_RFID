@@ -1,5 +1,8 @@
 #include "mainwindow.h"
+#include "application/productioncanworkerhost.h"
+#include "domain/canframe.h"
 #include <QApplication>
+#include <QCoreApplication>
 
 int main(int argc, char *argv[])
 {
@@ -8,6 +11,19 @@ int main(int argc, char *argv[])
     QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
 #endif
+
+    if (argc >= 3 && QString::fromLocal8Bit(argv[1]) ==
+                         QStringLiteral("--production-can-worker")) {
+        QCoreApplication workerApplication(argc, argv);
+        qRegisterMetaType<CanFrame>("CanFrame");
+        qRegisterMetaType<QVector<CanFrame>>("QVector<CanFrame>");
+        ProductionCanWorkerHost workerHost(QString::fromLocal8Bit(argv[2]));
+        QString error;
+        if (!workerHost.listen(&error)) {
+            return 2;
+        }
+        return workerApplication.exec();
+    }
 
     QApplication a(argc, argv);
 

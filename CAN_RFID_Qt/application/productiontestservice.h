@@ -111,6 +111,7 @@ private:
     QTimer *m_tagWaitTimer;
     QTimer *m_sampleTimeoutTimer;
     qint64 m_cardTestStartTime;
+    int m_qingjuConsecutiveStatusTimeouts;
 };
 
 #endif // PRODUCTIONTESTSERVICE_H

@@ -5,6 +5,8 @@
 
 namespace {
 
+constexpr int StatusQueryResponseTimeoutMs = 300;
+
 bool isPrintableAscii(const QByteArray &data)
 {
     for (char ch : data) {
@@ -86,6 +88,11 @@ QingjuRfidService::QingjuRfidService(QingjuCanManager *canManager, QObject *pare
     , m_resumeScanAfterDeviceInfo(true)
     , m_deviceInfoOnlyMode(false)
     , m_ignoreStatusUntilMs(0)
+    , m_statusQueryPending(false)
+    , m_statusQuerySentAtMs(0)
+    , m_statusQueryCount(0)
+    , m_statusResponseCount(0)
+    , m_statusRetryCount(0)
 {
     m_pollTimer = new QTimer(this);
     m_pollTimer->setInterval(500);
@@ -98,13 +105,17 @@ QingjuRfidService::QingjuRfidService(QingjuCanManager *canManager, QObject *pare
     connect(m_canManager, &QingjuCanManager::modbusPacketReceived, this, &QingjuRfidService::onModbusPacketReceived);
 }
 
-void QingjuRfidService::startScan(int intervalMs, int hostPollIntervalMs, int readMode)
+void QingjuRfidService::startScan(int intervalMs,
+                                  int hostPollIntervalMs,
+                                  int readMode,
+                                  bool queryDeviceInfoBeforePolling)
 {
     if (m_isScanning) return;
     
     m_isScanning = true;
     m_lastUid.clear();
     m_readMode = readMode;
+    resetPollingDiagnostics();
 
     // 1. 仅 NPK (0x0A) 支持发送启动读卡指令（0xA900 = readMode, 0xA901 周期设置）
     if (m_targetAddress == 0x0A) {
@@ -117,25 +128,39 @@ void QingjuRfidService::startScan(int intervalMs, int hostPollIntervalMs, int re
     // 保存轮询间隔
     m_pollTimer->setInterval(qBound(100, hostPollIntervalMs, 10000));
 
-    // 2. 串行获取设备静态信息（0xA002, 0xA005, 0xA00D, 0xA015, 0xA016, 0xA020）
-    queryDeviceInfo(m_targetAddress, true, false);
+    if (queryDeviceInfoBeforePolling) {
+        // 普通监控启动时读取一次静态信息，完成后自动进入状态轮询。
+        queryDeviceInfo(m_targetAddress, true, false);
+    } else {
+        // 压测和产线只关注连续读卡状态，避免重复读取静态信息。
+        startPollingOrSingleQuery();
+    }
+    emit pollingDiagnostic(QStringLiteral("青桔读卡轮询已启动：间隔%1ms，单请求在途模式")
+                               .arg(m_pollTimer->interval()));
 }
 
 void QingjuRfidService::stopScan()
 {
-    if (!m_isScanning) return;
-
+    const bool wasScanning = m_isScanning;
     m_isScanning = false;
     m_pollTimer->stop();
     if (m_deviceInfoTimer != nullptr) {
         m_deviceInfoTimer->stop();
     }
     m_infoStep = 0;
+    m_statusQueryPending = false;
 
     // 仅 NPK (0x0A) 发送停止读卡指令
-    if (m_targetAddress == 0x0A) {
+    if (wasScanning && m_targetAddress == 0x0A) {
         QVector<quint16> stopVals = { 0x0000, 0x0001 };
         m_canManager->writeRegisters(0x0A, 0xA900, stopVals);
+    }
+    if (wasScanning) {
+        emit pollingDiagnostic(
+            QStringLiteral("青桔读卡轮询结束：发送%1，有效响应%2，超时重试%3")
+                .arg(m_statusQueryCount)
+                .arg(m_statusResponseCount)
+                .arg(m_statusRetryCount));
     }
 }
 
@@ -152,7 +177,7 @@ void QingjuRfidService::triggerSingleQuery()
     if (!m_isScanning) return;
 
     if (m_targetAddress == 0x0A) {
-        m_canManager->readRegisters(0x0A, 0xA904, 22);
+        sendStatusQuery(false);
     } else {
         m_canManager->readRegisters(m_targetAddress, 0xA02A, 1);
     }
@@ -177,8 +202,14 @@ void QingjuRfidService::onPollTimeout()
     if (!m_isScanning) return;
 
     if (m_targetAddress == 0x0A) {
-        // NPK 高频轮询只读取读卡状态，避免 0xA02A 程序状态在读卡过程中跳变干扰观察。
-        m_canManager->readRegisters(0x0A, 0xA904, 22);
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (m_statusQueryPending &&
+            nowMs - m_statusQuerySentAtMs < StatusQueryResponseTimeoutMs) {
+            return;
+        }
+        const bool retry = m_statusQueryPending;
+        m_statusQueryPending = false;
+        sendStatusQuery(retry);
     } else {
         // RFR 轮询：仅轮询程序状态 (0xA02A)
         m_canManager->readRegisters(m_targetAddress, 0xA02A, 1);
@@ -216,6 +247,8 @@ void QingjuRfidService::onModbusPacketReceived(quint8 srcAddr, quint8 destAddr, 
         if (m_deviceInfoOnlyMode || nowMs < m_ignoreStatusUntilMs) {
             return;
         }
+        m_statusQueryPending = false;
+        ++m_statusResponseCount;
         parseStatusData(data);
         return;
     }
@@ -471,6 +504,7 @@ void QingjuRfidService::queryDeviceInfo(quint8 targetAddress, bool resumeScanAft
     if (m_pollTimer != nullptr && m_pollTimer->isActive()) {
         m_pollTimer->stop();
     }
+    m_statusQueryPending = false;
     m_deviceInfoTargetAddress = targetAddress;
     m_resumeScanAfterDeviceInfo = resumeScanAfterInfo;
     m_deviceInfoOnlyMode = deviceInfoOnly;
@@ -480,6 +514,37 @@ void QingjuRfidService::queryDeviceInfo(quint8 targetAddress, bool resumeScanAft
     if (m_deviceInfoTimer != nullptr) {
         m_deviceInfoTimer->start(200); // 200ms 超时守护
     }
+}
+
+bool QingjuRfidService::sendStatusQuery(bool retry)
+{
+    if (!m_isScanning || m_targetAddress != 0x0A) {
+        return false;
+    }
+    if (retry) {
+        ++m_statusRetryCount;
+        emit pollingDiagnostic(
+            QStringLiteral("青桔状态响应超时%1ms，正在重试（累计%2次）")
+                .arg(StatusQueryResponseTimeoutMs)
+                .arg(m_statusRetryCount));
+    }
+    if (!m_canManager->readRegisters(0x0A, 0xA904, 22)) {
+        emit pollingDiagnostic(QStringLiteral("青桔状态查询发送失败"));
+        return false;
+    }
+    ++m_statusQueryCount;
+    m_statusQueryPending = true;
+    m_statusQuerySentAtMs = QDateTime::currentMSecsSinceEpoch();
+    return true;
+}
+
+void QingjuRfidService::resetPollingDiagnostics()
+{
+    m_statusQueryPending = false;
+    m_statusQuerySentAtMs = 0;
+    m_statusQueryCount = 0;
+    m_statusResponseCount = 0;
+    m_statusRetryCount = 0;
 }
 
 void QingjuRfidService::sendDeviceInfoRequest()

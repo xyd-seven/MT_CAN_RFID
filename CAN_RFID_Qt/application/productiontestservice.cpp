@@ -8,6 +8,7 @@ namespace {
 constexpr quint16 SnDid = 0xE7E1;
 constexpr int TagWaitTimeoutMs = 200;
 constexpr int SampleTimeoutMs = 1000;
+constexpr int QingjuMaxConsecutiveStatusTimeouts = 3;
 }
 
 ProductionTestService::ProductionTestService(QObject *parent)
@@ -18,6 +19,7 @@ ProductionTestService::ProductionTestService(QObject *parent)
     , m_tagWaitTimer(new QTimer(this))
     , m_sampleTimeoutTimer(new QTimer(this))
     , m_cardTestStartTime(0)
+    , m_qingjuConsecutiveStatusTimeouts(0)
 {
     m_tagWaitTimer->setSingleShot(true);
     m_sampleTimeoutTimer->setSingleShot(true);
@@ -78,6 +80,7 @@ bool ProductionTestService::start(int protocolMode, const QString &sn, const QSt
     m_lastValidTag.clear();
     m_pendingState = RfidState();
     m_waitingTagCompletion = false;
+    m_qingjuConsecutiveStatusTimeouts = 0;
     setPhase(Phase::WritingSn, QStringLiteral("写入SN"));
 
     if (m_protocolMode == 0) {
@@ -123,6 +126,7 @@ void ProductionTestService::reset()
     m_lastValidTag.clear();
     m_pendingState = RfidState();
     m_waitingTagCompletion = false;
+    m_qingjuConsecutiveStatusTimeouts = 0;
     emitStateChanged();
 }
 
@@ -237,7 +241,7 @@ void ProductionTestService::handleRfidTagUpdate(const QString &tag)
 
 void ProductionTestService::handleQingjuStatus(const QingjuNpkState &state)
 {
-    if (m_phase != Phase::TestingCard) {
+    if (m_phase != Phase::TestingCard || !state.statusSample) {
         return;
     }
 
@@ -245,6 +249,7 @@ void ProductionTestService::handleQingjuStatus(const QingjuNpkState &state)
     if (QDateTime::currentMSecsSinceEpoch() - m_cardTestStartTime < 150) {
         return;
     }
+    m_qingjuConsecutiveStatusTimeouts = 0;
 
     // 提取资产数据的前 16 字节
     QByteArray usedData = state.assetData.left(16);
@@ -465,6 +470,22 @@ void ProductionTestService::onSampleTimeout()
     if (m_phase != Phase::TestingCard) {
         return;
     }
+    if (m_protocolMode == 1) {
+        ++m_qingjuConsecutiveStatusTimeouts;
+        if (m_qingjuConsecutiveStatusTimeouts >= QingjuMaxConsecutiveStatusTimeouts) {
+            finishTest(
+                false,
+                QStringLiteral("CAN通信异常：连续%1次未收到青桔状态响应")
+                    .arg(QingjuMaxConsecutiveStatusTimeouts));
+            return;
+        }
+        emit logMessage(
+            QStringLiteral("青桔状态响应超时，通信重试%1/%2（本次不计入测试次数）")
+                .arg(m_qingjuConsecutiveStatusTimeouts)
+                .arg(QingjuMaxConsecutiveStatusTimeouts));
+        scheduleSampleTimeout();
+        return;
+    }
     recordFailure(QStringLiteral("状态帧超时"));
 }
 
@@ -491,6 +512,7 @@ void ProductionTestService::startTesting()
     m_state.resultText = QStringLiteral("RUNNING");
     m_lastValidTag.clear();
     m_waitingTagCompletion = false;
+    m_qingjuConsecutiveStatusTimeouts = 0;
     setPhase(Phase::TestingCard, QStringLiteral("读卡测试中"));
     m_cardTestStartTime = QDateTime::currentMSecsSinceEpoch();
     emit scanControlRequested(true);
@@ -535,6 +557,7 @@ void ProductionTestService::recordSuccess(const QString &tag)
 
     stopTimers();
     m_waitingTagCompletion = false;
+    m_qingjuConsecutiveStatusTimeouts = 0;
     ++m_state.completedSamples;
     ++m_state.successCount;
     m_state.currentTag = tag;
@@ -563,6 +586,7 @@ void ProductionTestService::recordFailure(const QString &reason)
 
     stopTimers();
     m_waitingTagCompletion = false;
+    m_qingjuConsecutiveStatusTimeouts = 0;
     ++m_state.completedSamples;
     ++m_state.failureCount;
     m_state.lastFailureReason = reason;

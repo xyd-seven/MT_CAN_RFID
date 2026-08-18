@@ -2947,6 +2947,20 @@ QVector<int> writeDataForDid(const QVector<EvidenceFrame> &frames, quint16 did)
     return QVector<int>();
 }
 
+QVector<QVector<int>> writeDataValuesForDid(const QVector<EvidenceFrame> &frames, quint16 did)
+{
+    QVector<QVector<int>> values;
+    const QVector<QVector<int>> payloads = collectIsoTpPayloads(frames, kRfidRequestId, 0x2E);
+    for (const QVector<int> &payload : payloads) {
+        if (payload.size() >= 4 &&
+            payload.at(1) == ((did >> 8) & 0xFF) &&
+            payload.at(2) == (did & 0xFF)) {
+            values.append(payload.mid(3));
+        }
+    }
+    return values;
+}
+
 TestJudgeResult judgeNvmInvalidWriteUnchanged(const TestCase &testCase,
                                               const QVector<EvidenceFrame> &frames,
                                               const QString &evidenceText)
@@ -3124,6 +3138,157 @@ TestJudgeResult judgeNvmWriteAndVerify(const TestCase &testCase,
                           .arg(actualHigh, 2, 16, QChar('0'))
                           .arg(actualLow, 2, 16, QChar('0')).toUpper(),
                       keyFrames);
+}
+
+TestJudgeResult judgeNvmDistinctWritePowerCycleRestore(
+    const TestCase &testCase,
+    const QVector<EvidenceFrame> &frames,
+    const QString &evidenceText)
+{
+    const QStringList keyFrames = keyFrameLinesForCase(
+        testCase,
+        frames,
+        QList<int>() << kRfidRequestId << kRfidResponseId << 0x2C3 << 0x2C4 << 0x2C5,
+        32);
+    if (hasNegativeResponse(frames, QStringLiteral("2E"))) {
+        return makeFailed(QStringLiteral("差异值写入或原值恢复过程中收到0x2E否定响应。"),
+                          QStringLiteral("negative_response"), keyFrames);
+    }
+
+    const bool deviceIdTest = testCase.judgeTemplate.contains(QStringLiteral("device_id"));
+    const quint16 did = deviceIdTest ? 0xE7E1 : 0xE7E0;
+    const int expectedLength = deviceIdTest ? 16 : 2;
+    const QVector<QVector<int>> writeValues = writeDataValuesForDid(frames, did);
+    if (writeValues.size() < 2) {
+        return makeBlocked(QStringLiteral("未采集到测试值写入和原值恢复两次完整的DID=0x%1请求。")
+                               .arg(did, 4, 16, QChar('0')).toUpper(),
+                           QStringLiteral("write_sequence_missing"), keyFrames);
+    }
+    const QVector<int> testValue = writeValues.first();
+    const QVector<int> originalValue = writeValues.last();
+    if (testValue.size() != expectedLength || originalValue.size() != expectedLength) {
+        return makeBlocked(QStringLiteral("测试值或恢复值长度不正确：测试=%1字节，恢复=%2字节，期望=%3字节。")
+                               .arg(testValue.size()).arg(originalValue.size()).arg(expectedLength),
+                           QStringLiteral("request_value_missing"), keyFrames);
+    }
+    if (testValue == originalValue) {
+        return makeFailed(QStringLiteral("本次测试值与写入前原值相同，无法证明NVM写入实际生效。"),
+                          QStringLiteral("test_value_not_changed"), keyFrames);
+    }
+
+    auto byteVectorToData = [](const QVector<int> &values) {
+        QByteArray data;
+        for (const int value : values) {
+            data.append(static_cast<char>(value));
+        }
+        return data;
+    };
+    auto displayedValue = [deviceIdTest, &byteVectorToData](const QVector<int> &values) {
+        const QByteArray data = byteVectorToData(values);
+        return deviceIdTest
+                   ? QString::fromLatin1(data)
+                   : QString::fromLatin1(data.toHex(' ').toUpper());
+    };
+    const QString testValueText = displayedValue(testValue);
+    const QString originalValueText = displayedValue(originalValue);
+    if (!evidenceText.contains(QStringLiteral("原值=%1").arg(originalValueText)) ||
+        !evidenceText.contains(QStringLiteral("测试值=%1").arg(testValueText))) {
+        return makeBlocked(QStringLiteral("差异写入基线事件与两次0x2E请求不一致，无法确认恢复值就是执行前原值。"),
+                           QStringLiteral("baseline_missing"), keyFrames);
+    }
+
+    const QDateTime testPowerOnTime = executionEventTime(
+        evidenceText, QStringLiteral("已确认 NVM 测试值写入后终端重新上电"));
+    const QDateTime restorePowerOnTime = executionEventTime(
+        evidenceText, QStringLiteral("已确认 NVM 原值恢复后终端重新上电"));
+    if (!testPowerOnTime.isValid() || !restorePowerOnTime.isValid() ||
+        restorePowerOnTime <= testPowerOnTime) {
+        return makeBlocked(QStringLiteral("缺少测试值和原值恢复两个有序的真实断电上电确认事件。"),
+                           QStringLiteral("power_cycle_not_confirmed"), keyFrames);
+    }
+
+    const QString positivePattern = deviceIdTest
+                                        ? QStringLiteral("036EE7E1")
+                                        : QStringLiteral("036EE7E0");
+    bool testWriteAccepted = false;
+    bool restoreWriteAccepted = false;
+    for (const EvidenceFrame &frame : framesById(frames, kRfidResponseId, true)) {
+        if (!frame.timestamp.isValid() || !frameHasData(frame, positivePattern)) {
+            continue;
+        }
+        if (frame.timestamp < testPowerOnTime) {
+            testWriteAccepted = true;
+        } else if (frame.timestamp < restorePowerOnTime) {
+            restoreWriteAccepted = true;
+        }
+    }
+    if (!testWriteAccepted || !restoreWriteAccepted) {
+        return makeBlocked(QStringLiteral("测试值写入或原值恢复缺少对应掉电前的0x6E肯定响应。"),
+                           QStringLiteral("response_missing"), keyFrames);
+    }
+
+    auto verifyReadback = [&](const QDateTime &startTime,
+                              const QVector<int> &expected,
+                              const QString &stage,
+                              QString *actualValue) -> TestJudgeResult {
+        if (deviceIdTest) {
+            const QVector<EvidenceFrame> readbackFrames = framesAfterAnyId(
+                frames, startTime, QList<int>() << 0x2C4 << 0x2C5, -1);
+            const QString actual = collectedDeviceId(readbackFrames);
+            if (actualValue != nullptr) {
+                *actualValue = actual;
+            }
+            if (actual.size() != expectedLength) {
+                return makeBlocked(QStringLiteral("%1后未采集到完整16字节设备ID，实际=%2。")
+                                       .arg(stage, actual.isEmpty() ? QStringLiteral("空") : actual),
+                                   QStringLiteral("readback_missing"), keyFrames);
+            }
+            if (actual.toLatin1() != byteVectorToData(expected)) {
+                return makeFailed(QStringLiteral("%1后设备ID不一致：期望=%2，实际=%3。")
+                                      .arg(stage, displayedValue(expected), actual),
+                                  QStringLiteral("persistent_value_mismatch"), keyFrames);
+            }
+            return makePassed(QStringLiteral("%1回读正确。").arg(stage), keyFrames);
+        }
+
+        const QVector<EvidenceFrame> versionFrames = framesAfterAnyId(
+            frames, startTime, QList<int>() << 0x2C3, -1);
+        if (versionFrames.isEmpty() || versionFrames.first().bytes.size() < 4) {
+            return makeBlocked(QStringLiteral("%1后未采集到完整0x2C3硬件版本。" ).arg(stage),
+                               QStringLiteral("readback_missing"), keyFrames);
+        }
+        const EvidenceFrame &frame = versionFrames.first();
+        const QVector<int> actual = QVector<int>()
+            << frame.bytes.at(2).toInt(nullptr, 16)
+            << frame.bytes.at(3).toInt(nullptr, 16);
+        if (actualValue != nullptr) {
+            *actualValue = displayedValue(actual);
+        }
+        if (actual != expected) {
+            return makeFailed(QStringLiteral("%1后硬件版本不一致：期望=%2，实际=%3。")
+                                  .arg(stage, displayedValue(expected), displayedValue(actual)),
+                              QStringLiteral("persistent_value_mismatch"), keyFrames);
+        }
+        return makePassed(QStringLiteral("%1回读正确。").arg(stage), keyFrames);
+    };
+
+    QString testReadback;
+    const TestJudgeResult testResult = verifyReadback(
+        testPowerOnTime, testValue, QStringLiteral("测试值真实断电上电"), &testReadback);
+    if (testResult.status != TestResultStatus::Passed) {
+        return testResult;
+    }
+    QString restoredReadback;
+    const TestJudgeResult restoreResult = verifyReadback(
+        restorePowerOnTime, originalValue, QStringLiteral("原值恢复后真实断电上电"), &restoredReadback);
+    if (restoreResult.status != TestResultStatus::Passed) {
+        return restoreResult;
+    }
+
+    return makePassed(
+        QStringLiteral("NVM差异写入闭环通过：原值=%1，测试值=%2；测试值掉电保持且原值已恢复并再次通过掉电保持验证。")
+            .arg(originalValueText, testValueText),
+        keyFrames);
 }
 
 TestJudgeResult judgeNvmBusyOrSerializedWrite(const TestCase &testCase, const QVector<EvidenceFrame> &frames)
@@ -4410,6 +4575,10 @@ TestJudgeResult TestCaseJudge::judge(const TestCase &testCase, const QString &ev
         judgeTemplate == QStringLiteral("mt.nvm_device_id_writeback_verify") ||
         judgeTemplate == QStringLiteral("mt.nvm_sn_reboot_verify")) {
         return judgeNvmWriteAndVerify(testCase, frames, evidenceText);
+    }
+    if (judgeTemplate == QStringLiteral("mt.nvm_hw_distinct_power_cycle_restore") ||
+        judgeTemplate == QStringLiteral("mt.nvm_device_id_distinct_power_cycle_restore")) {
+        return judgeNvmDistinctWritePowerCycleRestore(testCase, frames, evidenceText);
     }
     if (judgeTemplate == QStringLiteral("mt.nvm_busy_or_serialized_write")) {
         return judgeNvmBusyOrSerializedWrite(testCase, frames);

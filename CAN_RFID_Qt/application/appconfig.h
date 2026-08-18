@@ -48,6 +48,8 @@ struct AppConfigData
     QString qingjuProductionHwVer = "";
     bool qingjuProductionHwVerLocked = false;
     QString productionMatChange = "";
+    int productionStation1DeviceIndex = 0;
+    int productionStation2DeviceIndex = 1;
 };
 
 class AppConfig

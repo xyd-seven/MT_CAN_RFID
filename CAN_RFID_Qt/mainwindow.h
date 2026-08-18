@@ -46,6 +46,7 @@ class MainWindow;
 
 class QSplitter;
 class CanLogWindow;
+class DualProductionWidget;
 
 class MainWindow : public QMainWindow
 {
@@ -188,6 +189,7 @@ private:
     bool confirmOverwriteEvidenceForCase(const QString &caseId, const QString &actionText);
     bool sendAutoTestCommand(const TestCase &testCase, QString *message);
     bool sendSemiAssistCommand(const TestCase &testCase, QString *message);
+    bool runDistinctNvmPowerCycleTest(bool deviceIdTest, QString *message);
     QString readEvidenceText(const QString &caseId) const;
     void refreshProgressBoard();
     QString testReportMarkdown() const;
@@ -339,6 +341,7 @@ private:
     QWidget *mtStressPanel;
     QWidget *qjStressPanel;
     QWidget *productionTestTab;
+    DualProductionWidget *dualProductionWidget = nullptr;
     QWidget *testExecutionTab;
     QLineEdit *testProjectEdit;
     QLineEdit *testSoftwareVersionEdit;
@@ -444,6 +447,9 @@ private:
     QPushButton *otaStartUpgradeBtn;
     QPushButton *otaAbortUpgradeBtn;
     QPushButton *otaSelectFileBtn;
+    QPushButton *otaSelectAlternateFileBtn;
+    QPushButton *otaClearAlternateFileBtn;
+    QLabel *otaAlternateFirmwarePathValue;
     QLabel *otaVersionLabel;
     QLineEdit *otaVersionEdit;
     QGroupBox *otaManualA1Group;
@@ -463,6 +469,8 @@ private:
     QLabel *otaFailureCyclesLabel;
     QLabel *otaStressSuccessRateLabel;
     QLabel *otaLastFailureReasonLabel;
+    QLabel *otaCurrentFirmwareTitleLabel;
+    QLabel *otaCurrentFirmwareLabel;
 
     // OTA 异常注入测试 UI 控件
     QGroupBox *otaErrorInjectionGroup;
@@ -485,6 +493,11 @@ private:
     int m_otaSuccessCount;
     int m_otaFailureCount;
     QString m_otaLastFailureReason;
+    QString m_otaStressPrimaryFirmwarePath;
+    QString m_otaStressAlternateFirmwarePath;
+    bool m_otaStressDualFirmwareMode;
+    quint8 m_otaStressVendorCode;
+    quint16 m_otaStressHardwareVersion;
     bool m_originalLogEnabled;
     QTimer *m_otaCooldownTimer;
 

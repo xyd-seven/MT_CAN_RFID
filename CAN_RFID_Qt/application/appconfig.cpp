@@ -2,6 +2,8 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QtGlobal>
@@ -58,6 +60,14 @@ AppConfigData AppConfig::load() const
     config.qingjuProductionHwVer = settings.value("production/qingjuHwVer", config.qingjuProductionHwVer).toString();
     config.qingjuProductionHwVerLocked = settings.value("production/qingjuHwVerLocked", config.qingjuProductionHwVerLocked).toBool();
     config.productionMatChange = settings.value("production/matChange", config.productionMatChange).toString();
+    config.productionStation1DeviceIndex = qBound(
+        0,
+        settings.value("production/station1DeviceIndex", config.productionStation1DeviceIndex).toInt(),
+        15);
+    config.productionStation2DeviceIndex = qBound(
+        0,
+        settings.value("production/station2DeviceIndex", config.productionStation2DeviceIndex).toInt(),
+        15);
 
     if (config.logDirectory.isEmpty()) {
         config.logDirectory = QDir(QCoreApplication::applicationDirPath()).filePath("logs");
@@ -111,15 +121,29 @@ void AppConfig::save(const AppConfigData &config) const
     settings.setValue("production/qingjuHwVer", config.qingjuProductionHwVer);
     settings.setValue("production/qingjuHwVerLocked", config.qingjuProductionHwVerLocked);
     settings.setValue("production/matChange", config.productionMatChange);
+    settings.setValue("production/station1DeviceIndex", config.productionStation1DeviceIndex);
+    settings.setValue("production/station2DeviceIndex", config.productionStation2DeviceIndex);
     settings.sync();
 }
 
 QString AppConfig::settingsFilePath() const
 {
-    const QString writableConfigPath = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
-    if (!writableConfigPath.isEmpty()) {
-        QDir().mkpath(writableConfigPath);
-        return QDir(writableConfigPath).filePath("settings.ini");
+    const QString portableSettingsPath =
+        QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("settings.ini"));
+
+    // 首次使用便携配置时迁移旧版 AppData 配置，避免升级后重新设置设备参数。
+    if (!QFileInfo::exists(portableSettingsPath)) {
+        const QString legacyConfigDirectory =
+            QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+        const QString legacySettingsPath =
+            QDir(legacyConfigDirectory).filePath(QStringLiteral("settings.ini"));
+        if (!legacyConfigDirectory.isEmpty() &&
+            QFileInfo::exists(legacySettingsPath) &&
+            QFileInfo(legacySettingsPath).absoluteFilePath() !=
+                QFileInfo(portableSettingsPath).absoluteFilePath()) {
+            QFile::copy(legacySettingsPath, portableSettingsPath);
+        }
     }
-    return QDir(QCoreApplication::applicationDirPath()).filePath("settings.ini");
+
+    return portableSettingsPath;
 }

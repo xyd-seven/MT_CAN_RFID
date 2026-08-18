@@ -684,22 +684,22 @@
         "type": "功能",
         "basis": "CAN总线-7.2.6/需求补充",
         "precondition": "设备在线，允许写NVM",
-        "testData": "DID=0xE7E0，数据=当前0x2C3硬件版本值",
-        "steps": "采集当前0x2C3硬件版本并执行0x2E原值写回；收到肯定响应后按弹框提示真实断电、重新上电，再精确比较0x2C3硬件版本。",
-        "expectedResult": "本次写入返回0x6E E7 E0；写入后及真实断电上电后的0x2C3硬件版本均与写入值逐字节一致。",
+        "testData": "DID=0xE7E0；保存当前0x2C3硬件版本作为原值；测试值=原值低字节加1（0xFF回绕为0x00）",
+        "steps": "1. 采集并保存当前0x2C3硬件版本。\n2. 自动生成与原值不同的合法测试值并执行0x2E写入。\n3. 收到6E E7 E0后真实断电上电，精确验证0x2C3等于测试值。\n4. 自动写回原值，再次真实断电上电并精确验证原值恢复。",
+        "expectedResult": "测试值必须与原值不同；测试写入和原值恢复均返回6E E7 E0；测试值及恢复后的原值分别在真实断电上电后通过0x2C3逐字节验证。",
         "executionMode": "semi",
-        "judgeTemplate": "mt.nvm_write_same_value_and_verify",
+        "judgeTemplate": "mt.nvm_hw_distinct_power_cycle_restore",
         "semiAssistTemplate": "mt.semi.nvm_hw_power_cycle",
-        "semiJudgeTemplate": "mt.nvm_write_same_value_and_verify",
-        "manualPrompt": "该用例会改变设备配置或写入非易失数据，执行前请确认样机和测试数据。",
-        "timeoutMs": 35000,
+        "semiJudgeTemplate": "mt.nvm_hw_distinct_power_cycle_restore",
+        "manualPrompt": "该用例会临时改变硬件版本并执行两次真实断电上电；流程结束后自动恢复原硬件版本。",
+        "timeoutMs": 70000,
         "retryCount": 0,
         "keyFrameIds": [
             "0x007",
             "0x107",
             "0x2C3"
         ],
-        "commandTemplate": "mt.nvm_write_current_hw_version"
+        "commandTemplate": "mt.nvm_write_distinct_hw_version"
     },
     {
         "id": "MT-RFID-NVM-002",
@@ -708,15 +708,15 @@
         "type": "功能",
         "basis": "CAN总线-7.2.6/产线需求",
         "precondition": "设备在线，允许写NVM",
-        "testData": "DID=0xE7E1，SN=当前0x2C4/0x2C5拼接的完整16字节设备ID",
-        "steps": "采集当前完整SN并通过ISO-TP执行0x2E原值写回；收到肯定响应后按弹框提示真实断电、重新上电，再精确比较0x2C4/0x2C5。",
-        "expectedResult": "多帧写入成功并返回0x6E E7 E1；写入后及真实断电上电后的0x2C4/0x2C5拼接值均与本次写入的完整16字节SN一致。",
+        "testData": "DID=0xE7E1；保存当前0x2C4/0x2C5完整16字节SN；保持R2A3A0前缀，仅修改SN末位生成不同测试值",
+        "steps": "1. 采集并保存当前完整SN。\n2. 自动修改末位生成不同测试SN，通过ISO-TP执行0x2E写入。\n3. 收到6E E7 E1后真实断电上电，精确验证0x2C4/0x2C5等于测试SN。\n4. 自动写回原SN，再次真实断电上电并精确验证原SN恢复。",
+        "expectedResult": "测试SN必须合法且与原SN不同；测试写入和原SN恢复均返回6E E7 E1；测试SN及恢复后的原SN分别在真实断电上电后通过0x2C4/0x2C5完整16字节验证。",
         "executionMode": "semi",
-        "judgeTemplate": "mt.nvm_device_id_writeback_verify",
+        "judgeTemplate": "mt.nvm_device_id_distinct_power_cycle_restore",
         "semiAssistTemplate": "mt.semi.nvm_device_id_power_cycle",
-        "semiJudgeTemplate": "mt.nvm_device_id_writeback_verify",
-        "manualPrompt": "该用例会改变设备配置或写入非易失数据，执行前请确认样机和测试数据。",
-        "timeoutMs": 35000,
+        "semiJudgeTemplate": "mt.nvm_device_id_distinct_power_cycle_restore",
+        "manualPrompt": "该用例会临时改变设备SN并执行两次真实断电上电；流程结束后自动恢复原SN。",
+        "timeoutMs": 70000,
         "retryCount": 0,
         "requiredPrefix": "R2A3A0",
         "keyFrameIds": [
@@ -725,7 +725,7 @@
             "0x2C4",
             "0x2C5"
         ],
-        "commandTemplate": "mt.nvm_write_current_device_id",
+        "commandTemplate": "mt.nvm_write_distinct_device_id",
         "allowEmptyValue": false
     },
     {

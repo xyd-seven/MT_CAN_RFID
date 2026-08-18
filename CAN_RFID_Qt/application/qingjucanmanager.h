@@ -9,13 +9,13 @@
 #include "domain/canframe.h"
 #include "domain/qingjucanid.h"
 
-class CANThread;
+class CanTransport;
 
 class QingjuCanManager : public QObject
 {
     Q_OBJECT
 public:
-    explicit QingjuCanManager(CANThread *canThread, QObject *parent = nullptr);
+    explicit QingjuCanManager(CanTransport *canTransport, QObject *parent = nullptr);
 
     // 接收底层数据入口
     void handleIncomingFrame(const CanFrame &frame);
@@ -45,7 +45,7 @@ private:
         QByteArray frames[32];
     };
 
-    CANThread *m_canThread;
+    CanTransport *m_canTransport;
     quint8 m_nextQueue;
     QMap<quint32, AssemblyBuffer> m_buffers; // key: (srcAddr << 16) | (destAddr << 8) | queue
     QMutex m_sendMutex;

@@ -80,6 +80,9 @@ void RfidService::reset()
     tagPart3.clear();
     deviceIdPart1.clear();
     deviceIdPart2.clear();
+    m_vendorCode = 0x02;
+    m_hardwareVersion = 0;
+    m_softwareVersion = 0;
 }
 
 void RfidService::handleStatusFrame(const QByteArray &payload)

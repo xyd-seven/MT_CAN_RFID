@@ -1,4 +1,4 @@
-QT += core gui serialport printsupport
+QT += core gui network serialport printsupport
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
@@ -17,6 +17,11 @@ SOURCES += \
     application/appconfig.cpp \
     application/logservice.cpp \
     application/otaservice.cpp \
+    application/productioncanworkerclient.cpp \
+    application/productioncanworkerhost.cpp \
+    application/dualproductionwidget.cpp \
+    application/productionlogservice.cpp \
+    application/productionstationcontroller.cpp \
     application/productiontestservice.cpp \
     application/rfidservice.cpp \
     application/rfiddiagnostictransfer.cpp \
@@ -41,12 +46,19 @@ HEADERS += \
     canthread.h \
     rfidprotocol.h \
     domain/canframe.h \
+    domain/cantransport.h \
     domain/isotptransport.h \
     domain/crc16.h \
     domain/qingjucanid.h \
     application/appconfig.h \
     application/logservice.h \
     application/otaservice.h \
+    application/productioncanipc.h \
+    application/productioncanworkerclient.h \
+    application/productioncanworkerhost.h \
+    application/dualproductionwidget.h \
+    application/productionlogservice.h \
+    application/productionstationcontroller.h \
     application/productiontestservice.h \
     application/rfidservice.h \
     application/rfiddiagnostictransfer.h \
