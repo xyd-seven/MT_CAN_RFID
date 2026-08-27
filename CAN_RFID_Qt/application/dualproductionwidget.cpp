@@ -535,6 +535,7 @@ QGroupBox *DualProductionWidget::createStationGroup(int stationIndex, StationPan
     panel->phaseValue->setStyleSheet(QStringLiteral("font-weight:600;"));
     panel->rateValue->setStyleSheet(QStringLiteral("font-weight:600;"));
     panel->hardwareVersionValue = new QLabel(QStringLiteral("等待广播"), panel->group);
+    panel->softwareVersionValue = new QLabel(QStringLiteral("等待广播"), panel->group);
     panel->materialVersionValue = new QLabel(QStringLiteral("等待广播"), panel->group);
     panel->deviceIdValue = new QLabel(QStringLiteral("等待广播"), panel->group);
     panel->deviceIdValue->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -557,10 +558,17 @@ QGroupBox *DualProductionWidget::createStationGroup(int stationIndex, StationPan
     layout->addWidget(panel->failureCountValue, 5, 3);
     layout->addWidget(panel->outcomeReasonLabel, 6, 0);
     layout->addWidget(panel->failureReasonValue, 6, 1, 1, 3);
-    layout->addWidget(new QLabel(QStringLiteral("当前硬件"), panel->group), 7, 0);
-    layout->addWidget(panel->hardwareVersionValue, 7, 1);
-    layout->addWidget(new QLabel(QStringLiteral("当前物料"), panel->group), 7, 2);
-    layout->addWidget(panel->materialVersionValue, 7, 3);
+    QWidget *versionRow = new QWidget(panel->group);
+    QHBoxLayout *versionLayout = new QHBoxLayout(versionRow);
+    versionLayout->setContentsMargins(0, 0, 0, 0);
+    versionLayout->setSpacing(compactLayout ? 4 : 8);
+    versionLayout->addWidget(new QLabel(QStringLiteral("当前硬件"), versionRow));
+    versionLayout->addWidget(panel->hardwareVersionValue, 1);
+    versionLayout->addWidget(new QLabel(QStringLiteral("当前软件"), versionRow));
+    versionLayout->addWidget(panel->softwareVersionValue, 1);
+    versionLayout->addWidget(new QLabel(QStringLiteral("当前物料"), versionRow));
+    versionLayout->addWidget(panel->materialVersionValue, 1);
+    layout->addWidget(versionRow, 7, 0, 1, 4);
     layout->addWidget(new QLabel(QStringLiteral("当前ID"), panel->group), 8, 0);
     layout->addWidget(panel->deviceIdValue, 8, 1);
     layout->addWidget(panel->stopButton, 8, 2);
@@ -586,10 +594,17 @@ void DualProductionWidget::connectStation(int stationIndex)
         handleStationFrame(stationIndex, frame);
     });
     connect(station, &ProductionStationController::qingjuDeviceInfoUpdated,
-            this, [this, stationIndex](const QString &hardwareVersion,
+            this, [this, stationIndex](const QString &softwareVersion,
+                                      const QString &hardwareVersion,
                                       const QString &deviceSn) {
         if (m_protocolMode != 1) {
             return;
+        }
+        if (!softwareVersion.trimmed().isEmpty()) {
+            const QString fullSoftwareVersion = softwareVersion.trimmed();
+            m_panels[stationIndex].softwareVersionValue->setText(
+                fullSoftwareVersion.section(QChar(0xFF08), 0, 0));
+            m_panels[stationIndex].softwareVersionValue->setToolTip(fullSoftwareVersion);
         }
         if (!hardwareVersion.trimmed().isEmpty()) {
             m_panels[stationIndex].hardwareVersionValue->setText(hardwareVersion.trimmed());
@@ -981,6 +996,18 @@ void DualProductionWidget::handleStationFrame(int stationIndex, const CanFrame &
                 .arg(major)
                 .arg(minor)
                 .arg(hardwareHex));
+        const int softwareMajor = (version.softwareVersion >> 8) & 0xFF;
+        const int softwareMinor = version.softwareVersion & 0xFF;
+        const QString softwareHex =
+            QStringLiteral("%1").arg(version.softwareVersion, 4, 16, QChar('0')).toUpper();
+        const QString fullSoftwareVersion =
+            QStringLiteral("v%1.%2（0x%3）")
+                .arg(softwareMajor, 2, 16, QChar('0'))
+                .arg(softwareMinor, 2, 16, QChar('0'))
+                .arg(softwareHex);
+        panel.softwareVersionValue->setText(
+            fullSoftwareVersion.section(QChar(0xFF08), 0, 0));
+        panel.softwareVersionValue->setToolTip(fullSoftwareVersion);
         panel.materialVersionValue->setText(
             QStringLiteral("0x%1")
                 .arg(QStringLiteral("%1")
@@ -1022,12 +1049,15 @@ void DualProductionWidget::resetStationReadback(int stationIndex)
     m_deviceIdParts[stationIndex][0].clear();
     m_deviceIdParts[stationIndex][1].clear();
     StationPanel &panel = m_panels[stationIndex];
+    panel.softwareVersionValue->setToolTip(QString());
     if (m_protocolMode == 0) {
         panel.hardwareVersionValue->setText(QStringLiteral("等待广播"));
+        panel.softwareVersionValue->setText(QStringLiteral("等待0x2C3"));
         panel.materialVersionValue->setText(QStringLiteral("等待广播"));
         panel.deviceIdValue->setText(QStringLiteral("等待广播"));
     } else {
         panel.hardwareVersionValue->setText(QStringLiteral("等待读取0xA004"));
+        panel.softwareVersionValue->setText(QStringLiteral("等待读取0xA002"));
         panel.materialVersionValue->setText(QStringLiteral("青桔不适用"));
         panel.deviceIdValue->setText(QStringLiteral("等待读取SN"));
     }

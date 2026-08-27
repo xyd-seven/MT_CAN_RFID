@@ -59,6 +59,7 @@ private:
         QLabel *outcomeReasonLabel = nullptr;
         QLabel *failureReasonValue = nullptr;
         QLabel *hardwareVersionValue = nullptr;
+        QLabel *softwareVersionValue = nullptr;
         QLabel *materialVersionValue = nullptr;
         QLabel *deviceIdValue = nullptr;
         QProgressBar *progressBar = nullptr;

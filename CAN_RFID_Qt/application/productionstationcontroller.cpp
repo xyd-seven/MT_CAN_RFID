@@ -11,9 +11,11 @@
 namespace {
 constexpr quint8 QingjuProductionAddress = 0x0A;
 constexpr quint16 QingjuSnRegister = 0xA00D;
+constexpr quint16 QingjuSoftwareVersionRegister = 0xA002;
 constexpr quint16 QingjuHardwareVersionRegister = 0xA004;
 constexpr int QingjuSnRegisterCount = 8;
-constexpr int QingjuHardwareVersionRegisterCount = 1;
+constexpr int QingjuHardwareVersionWriteRegisterCount = 1;
+constexpr int QingjuVersionRegisterCount = 3;
 constexpr int QingjuWriteTimeoutMs = 1000;
 constexpr int QingjuReadBackTimeoutMs = 1500;
 constexpr int QingjuMaxWriteRetries = 2;
@@ -127,7 +129,9 @@ ProductionStationController::ProductionStationController(int stationNumber, QObj
             this, [this](const QingjuNpkState &state) {
         if (m_protocolMode == 1) {
             m_testService.handleQingjuStatus(state);
-            emit qingjuDeviceInfoUpdated(state.hardwareVer, state.devSn);
+            emit qingjuDeviceInfoUpdated(state.firmwareVer,
+                                         state.hardwareVer,
+                                         state.devSn);
             }
     });
     connect(m_qingjuRfidService, &QingjuRfidService::pollingDiagnostic,
@@ -366,7 +370,7 @@ void ProductionStationController::handleQingjuPacket(quint8 sourceAddress,
         m_qingjuVerifySnPending = false;
         if (actualSn == expectedSn) {
             emit logMessage(QStringLiteral("SN回读校验一致（回读值：%1）").arg(actualSn));
-            emit qingjuDeviceInfoUpdated(QString(), actualSn);
+            emit qingjuDeviceInfoUpdated(QString(), QString(), actualSn);
             finishPendingWrite(true, QString());
         } else {
             emit logMessage(QStringLiteral("SN回读不一致：期望=%1，实际=%2")
@@ -380,14 +384,19 @@ void ProductionStationController::handleQingjuPacket(quint8 sourceAddress,
         if (functionCode != 0x03) {
             return;
         }
-        if (payload.size() != 3 || static_cast<quint8>(payload.at(0)) != 2) {
-            finishPendingWrite(false, QStringLiteral("硬件版本回读响应格式错误"));
+        if (payload.size() != 7 || static_cast<quint8>(payload.at(0)) != 6) {
+            finishPendingWrite(false, QStringLiteral("软件/硬件版本回读响应格式错误"));
             return;
         }
 
+        const quint32 softwareVersionRaw =
+            (static_cast<quint32>(static_cast<quint8>(payload.at(1))) << 24) |
+            (static_cast<quint32>(static_cast<quint8>(payload.at(2))) << 16) |
+            (static_cast<quint32>(static_cast<quint8>(payload.at(3))) << 8) |
+            static_cast<quint8>(payload.at(4));
         const quint16 actualVersion =
-            (static_cast<quint8>(payload.at(1)) << 8) |
-            static_cast<quint8>(payload.at(2));
+            (static_cast<quint8>(payload.at(5)) << 8) |
+            static_cast<quint8>(payload.at(6));
         const quint16 expectedVersion =
             m_qingjuWritePendingData.size() >= 2
                 ? (static_cast<quint8>(m_qingjuWritePendingData.at(0)) << 8) |
@@ -400,11 +409,27 @@ void ProductionStationController::handleQingjuPacket(quint8 sourceAddress,
                 QStringLiteral("v%1.%2")
                     .arg((actualVersion >> 8) & 0xFF)
                     .arg(actualVersion & 0xFF);
-            emit logMessage(
-                QStringLiteral("硬件版本回读校验一致（回读值：0x%1）")
+            const QString softwareVersionHex =
+                QStringLiteral("%1")
+                    .arg(softwareVersionRaw, 8, 16, QLatin1Char('0'))
+                    .toUpper();
+            const QString softwareVersionText =
+                QStringLiteral("v%1.%2.%3（0x%4）")
+                    .arg(static_cast<int>(static_cast<quint8>(payload.at(1))))
+                    .arg(static_cast<int>(static_cast<quint8>(payload.at(2))))
+                    .arg(static_cast<int>(static_cast<quint8>(payload.at(3))))
+                    .arg(softwareVersionHex);
+            const QString hardwareVersionHex =
+                QStringLiteral("%1")
                     .arg(actualVersion, 4, 16, QLatin1Char('0'))
-                    .toUpper());
-            emit qingjuDeviceInfoUpdated(hardwareVersionText, QString());
+                    .toUpper();
+            emit logMessage(
+                QStringLiteral("版本读取完成：软件=%1，硬件=0x%2（硬件校验一致）")
+                    .arg(softwareVersionText)
+                    .arg(hardwareVersionHex));
+            emit qingjuDeviceInfoUpdated(softwareVersionText,
+                                         hardwareVersionText,
+                                         QString());
             finishPendingWrite(true, QString());
         } else {
             emit logMessage(
@@ -593,16 +618,16 @@ void ProductionStationController::beginQingjuSnVerification()
 void ProductionStationController::beginQingjuHardwareVersionVerification()
 {
     m_qingjuVerifyHardwarePending = true;
-    emit logMessage(QStringLiteral("下发读取0xA004指令进行硬件版本写入校验"));
+    emit logMessage(QStringLiteral("下发读取0xA002~0xA004指令，获取软件版本并校验硬件版本"));
     QTimer::singleShot(QingjuReadBackDelayMs, this, [this]() {
         if (!m_writePending || !m_qingjuVerifyHardwarePending) {
             return;
         }
         if (!m_qingjuCanManager->readRegisters(
                 QingjuProductionAddress,
-                QingjuHardwareVersionRegister,
-                QingjuHardwareVersionRegisterCount)) {
-            finishPendingWrite(false, QStringLiteral("硬件版本回读请求发送失败"));
+                QingjuSoftwareVersionRegister,
+                QingjuVersionRegisterCount)) {
+            finishPendingWrite(false, QStringLiteral("软件/硬件版本回读请求发送失败"));
             return;
         }
         m_writeTimer->start(QingjuReadBackTimeoutMs);
@@ -627,7 +652,7 @@ bool ProductionStationController::performQingjuWrite(quint16 dataId, const QByte
             QingjuProductionAddress, QingjuSnRegister, registers);
     }
     if (dataId == QingjuHardwareVersionRegister) {
-        m_qingjuWritePendingRegisterCount = QingjuHardwareVersionRegisterCount;
+        m_qingjuWritePendingRegisterCount = QingjuHardwareVersionWriteRegisterCount;
         quint16 hardwareVersion = 0;
         if (data.size() >= 2) {
             hardwareVersion =

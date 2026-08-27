@@ -10377,7 +10377,7 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
 
     readNpkStatusBtn->setToolTip(QStringLiteral("立即读取 NPK 0xA904~0xA919"));
     readRfrStatusBtn->setToolTip(QStringLiteral("立即读取 RFR 0xA02A"));
-    readDeviceInfoBtn->setToolTip(QStringLiteral("立即读取当前 NPK 的设备基本信息"));
+    readDeviceInfoBtn->setToolTip(QStringLiteral("立即读取当前所选目标设备的基本信息"));
     startNpkBtn->setToolTip(QStringLiteral("立即写入 0xA900/0xA901 启动 NPK 检测"));
     stopNpkBtn->setToolTip(QStringLiteral("立即写入 0xA900/0xA901 停止 NPK 检测"));
     writePasswordBtn->setToolTip(QStringLiteral("使用当前计算密码写入 0xA902/0xA903"));
@@ -10448,7 +10448,6 @@ QWidget *MainWindow::createQjRfidMonitorPanel(QWidget *parent)
             break;
         }
         case 6:
-            qjDestAddrCombo->setCurrentIndex(0);
             qjFuncCodeCombo->setCurrentIndex(2);
             qjRegAddrEdit->setText(QStringLiteral("A002"));
             qjRegValueEdit->clear();

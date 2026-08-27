@@ -55,7 +55,9 @@ signals:
     void logMessage(const QString &message);
     void finished(bool passed, const ProductionTestState &state);
     void frameObserved(const CanFrame &frame);
-    void qingjuDeviceInfoUpdated(const QString &hardwareVersion, const QString &deviceSn);
+    void qingjuDeviceInfoUpdated(const QString &softwareVersion,
+                                 const QString &hardwareVersion,
+                                 const QString &deviceSn);
 
 private:
     void handleReceivedFrames(const QVector<CanFrame> &frames);

@@ -30,6 +30,24 @@ build*/
 *.suo
 Thumbs.db
 Desktop.ini
+.DS_Store
+
+# Local agent/tool workspaces and generated analysis output
+/.codex/
+/tmp/
+/outputs/
+
+# Runtime-local configuration and logs
+/settings.ini
+/logs/
+*.log
+
+# Editor and temporary files
+*.tmp
+*.bak
+*.orig
+*.swp
+*~
 
 # Original vendor examples kept locally only; project uses CAN_RFID_Qt/third_party.
 zlgcan 二次开发库/
