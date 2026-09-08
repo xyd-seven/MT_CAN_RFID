@@ -10,6 +10,8 @@
 
 namespace {
 constexpr quint8 QingjuProductionAddress = 0x0A;
+constexpr quint8 QingjuRfrAddress = 0x0B;
+constexpr int QingjuSoftwareVersionRegisterCount = 2;
 constexpr quint16 QingjuSnRegister = 0xA00D;
 constexpr quint16 QingjuSoftwareVersionRegister = 0xA002;
 constexpr quint16 QingjuHardwareVersionRegister = 0xA004;
@@ -71,6 +73,7 @@ ProductionStationController::ProductionStationController(int stationNumber, QObj
     , m_qingjuCanManager(new QingjuCanManager(m_canWorker, this))
     , m_qingjuRfidService(new QingjuRfidService(m_qingjuCanManager, this))
     , m_writeTimer(new QTimer(this))
+    , m_rfrVersionTimer(new QTimer(this))
     , m_writePending(false)
     , m_qingjuVerifySnPending(false)
     , m_qingjuVerifyHardwarePending(false)
@@ -79,6 +82,11 @@ ProductionStationController::ProductionStationController(int stationNumber, QObj
     , m_qingjuWritePendingRegisterCount(0)
 {
     m_writeTimer->setSingleShot(true);
+    m_rfrVersionTimer->setSingleShot(true);
+    connect(m_rfrVersionTimer, &QTimer::timeout, this, [this]() {
+        emit qingjuRfrSoftwareVersionUpdated(QStringLiteral("读取超时"));
+        emit logMessage(QStringLiteral("RFR软件版本读取超时（不影响检测判定）"));
+    });
 
     connect(m_canWorker, &ProductionCanWorkerClient::receivedFrames,
             this, &ProductionStationController::handleReceivedFrames);
@@ -87,6 +95,7 @@ ProductionStationController::ProductionStationController(int stationNumber, QObj
     connect(m_canWorker, &ProductionCanWorkerClient::workerDisconnected,
             this, [this]() {
         m_deviceReady = false;
+        m_rfrVersionTimer->stop();
         if (m_testService.isRunning()) {
             m_testService.stop(QStringLiteral("CAN工作进程意外退出"));
         }
@@ -181,6 +190,7 @@ bool ProductionStationController::startDevice(quint32 deviceType,
 
 void ProductionStationController::stopDevice()
 {
+    m_rfrVersionTimer->stop();
     if (m_testService.isRunning()) {
         m_testService.stop(QStringLiteral("CAN设备已关闭"));
     }
@@ -247,6 +257,7 @@ bool ProductionStationController::setProtocolMode(int protocolMode)
 
 void ProductionStationController::stopTest(const QString &reason)
 {
+    m_rfrVersionTimer->stop();
     m_testService.stop(reason);
     m_writeTimer->stop();
     if (m_diagnosticTransfer.isBusy()) {
@@ -348,6 +359,29 @@ void ProductionStationController::handleQingjuPacket(quint8 sourceAddress,
                                                      quint8 functionCode,
                                                      const QByteArray &payload)
 {
+    // RFR版本只用于显示，与NPK写入校验及读卡计数独立。
+    if (m_protocolMode == 1 && m_rfrVersionTimer->isActive() &&
+        sourceAddress == QingjuRfrAddress && destinationAddress == 0x01) {
+        if (functionCode != 0x03 && functionCode != 0x83) {
+            return;
+        }
+        m_rfrVersionTimer->stop();
+        if (functionCode == 0x83 || payload.size() != 5 ||
+            static_cast<quint8>(payload.at(0)) != 4) {
+            emit qingjuRfrSoftwareVersionUpdated(QStringLiteral("读取失败"));
+            emit logMessage(QStringLiteral("RFR软件版本响应异常（不影响检测判定）：%1")
+                                .arg(QString::fromLatin1(payload.toHex(' '))));
+            return;
+        }
+        const QString version = QStringLiteral("v%1.%2.%3（0x%4）")
+            .arg(static_cast<quint8>(payload.at(1)))
+            .arg(static_cast<quint8>(payload.at(2)))
+            .arg(static_cast<quint8>(payload.at(3)))
+            .arg(QString::fromLatin1(payload.mid(1).toHex()).toUpper());
+        emit qingjuRfrSoftwareVersionUpdated(version);
+        emit logMessage(QStringLiteral("RFR软件版本读取完成：%1").arg(version));
+        return;
+    }
     if (!m_writePending ||
         m_protocolMode != 1 ||
         sourceAddress != QingjuProductionAddress ||
@@ -532,6 +566,14 @@ void ProductionStationController::handleScanControlRequested(bool enabled)
     }
 
     if (enabled) {
+        emit qingjuRfrSoftwareVersionUpdated(QStringLiteral("读取中"));
+        m_rfrVersionTimer->start(QingjuReadBackTimeoutMs);
+        if (!m_qingjuCanManager->readRegisters(QingjuRfrAddress,
+                QingjuSoftwareVersionRegister, QingjuSoftwareVersionRegisterCount)) {
+            m_rfrVersionTimer->stop();
+            emit qingjuRfrSoftwareVersionUpdated(QStringLiteral("读取失败"));
+            emit logMessage(QStringLiteral("RFR软件版本请求发送失败（不影响检测判定）"));
+        }
         m_qingjuRfidService->startScan(100, 100, 1, false);
     } else {
         m_qingjuRfidService->stopScan();
@@ -682,6 +724,7 @@ bool ProductionStationController::sendClassicFrame(quint32 canId, const QByteArr
 
 void ProductionStationController::resetProtocolState()
 {
+    m_rfrVersionTimer->stop();
     m_rfidService.reset();
     if (m_qingjuRfidService != nullptr) {
         m_qingjuRfidService->reset();

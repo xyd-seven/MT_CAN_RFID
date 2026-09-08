@@ -50,6 +50,7 @@ public:
     QString deviceStatusText() const;
 
 signals:
+    void qingjuRfrSoftwareVersionUpdated(const QString &version);
     void deviceStateChanged();
     void testStateChanged(const ProductionTestState &state);
     void logMessage(const QString &message);
@@ -92,6 +93,7 @@ private:
     QingjuRfidService *m_qingjuRfidService;
 
     QTimer *m_writeTimer;
+    QTimer *m_rfrVersionTimer;
     bool m_writePending;
     bool m_qingjuVerifySnPending;
     bool m_qingjuVerifyHardwarePending;

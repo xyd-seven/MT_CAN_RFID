@@ -542,6 +542,10 @@ QGroupBox *DualProductionWidget::createStationGroup(int stationIndex, StationPan
     panel->deviceIdValue->setWordWrap(true);
     panel->stopButton = new QPushButton(QStringLiteral("停止"), panel->group);
     panel->clearButton = new QPushButton(QStringLiteral("清空"), panel->group);
+    const int actionButtonWidth = qMax(panel->stopButton->sizeHint().width(),
+                                       panel->clearButton->sizeHint().width());
+    panel->stopButton->setFixedWidth(actionButtonWidth);
+    panel->clearButton->setFixedWidth(actionButtonWidth);
 
     layout->addWidget(panel->deviceStatus, 0, 0, 1, 4);
     layout->addWidget(panel->resultBanner, 1, 0, 1, 4);
@@ -564,9 +568,13 @@ QGroupBox *DualProductionWidget::createStationGroup(int stationIndex, StationPan
     versionLayout->setSpacing(compactLayout ? 4 : 8);
     versionLayout->addWidget(new QLabel(QStringLiteral("当前硬件"), versionRow));
     versionLayout->addWidget(panel->hardwareVersionValue, 1);
-    versionLayout->addWidget(new QLabel(QStringLiteral("当前软件"), versionRow));
+    QLabel *softwareLabel = new QLabel(QStringLiteral("当前软件"), versionRow);
+    softwareLabel->setObjectName(QStringLiteral("productionSoftwareLabel"));
+    versionLayout->addWidget(softwareLabel);
     versionLayout->addWidget(panel->softwareVersionValue, 1);
-    versionLayout->addWidget(new QLabel(QStringLiteral("当前物料"), versionRow));
+    QLabel *materialLabel = new QLabel(QStringLiteral("当前物料"), versionRow);
+    materialLabel->setObjectName(QStringLiteral("productionMaterialLabel"));
+    versionLayout->addWidget(materialLabel);
     versionLayout->addWidget(panel->materialVersionValue, 1);
     layout->addWidget(versionRow, 7, 0, 1, 4);
     layout->addWidget(new QLabel(QStringLiteral("当前ID"), panel->group), 8, 0);
@@ -581,6 +589,15 @@ QGroupBox *DualProductionWidget::createStationGroup(int stationIndex, StationPan
 void DualProductionWidget::connectStation(int stationIndex)
 {
     ProductionStationController *station = m_stations[stationIndex];
+    connect(station, &ProductionStationController::qingjuRfrSoftwareVersionUpdated,
+            this, [this, stationIndex](const QString &version) {
+        if (m_protocolMode != 1) {
+            return;
+        }
+        QLabel *value = m_panels[stationIndex].materialVersionValue;
+        value->setText(version.section(QChar(0xFF08), 0, 0));
+        value->setToolTip(version);
+    });
     connect(station, &ProductionStationController::deviceStateChanged,
             this, [this, stationIndex]() {
         if (!m_stations[stationIndex]->isDeviceReady()) {
@@ -1050,6 +1067,11 @@ void DualProductionWidget::resetStationReadback(int stationIndex)
     m_deviceIdParts[stationIndex][1].clear();
     StationPanel &panel = m_panels[stationIndex];
     panel.softwareVersionValue->setToolTip(QString());
+    panel.materialVersionValue->setToolTip(QString());
+    panel.group->findChild<QLabel *>(QStringLiteral("productionSoftwareLabel"))->setText(
+        m_protocolMode == 1 ? QStringLiteral("NPK软件") : QStringLiteral("当前软件"));
+    panel.group->findChild<QLabel *>(QStringLiteral("productionMaterialLabel"))->setText(
+        m_protocolMode == 1 ? QStringLiteral("RFR软件") : QStringLiteral("当前物料"));
     if (m_protocolMode == 0) {
         panel.hardwareVersionValue->setText(QStringLiteral("等待广播"));
         panel.softwareVersionValue->setText(QStringLiteral("等待0x2C3"));
@@ -1058,7 +1080,7 @@ void DualProductionWidget::resetStationReadback(int stationIndex)
     } else {
         panel.hardwareVersionValue->setText(QStringLiteral("等待读取0xA004"));
         panel.softwareVersionValue->setText(QStringLiteral("等待读取0xA002"));
-        panel.materialVersionValue->setText(QStringLiteral("青桔不适用"));
+        panel.materialVersionValue->setText(QStringLiteral("等待读取"));
         panel.deviceIdValue->setText(QStringLiteral("等待读取SN"));
     }
 }
